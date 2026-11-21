@@ -6,13 +6,13 @@ from app.providers import ProviderError
 
 
 def collect(query: str) -> list[Source]:
-    key = settings().research_api_key
-    if not key:
+    configuration = settings()
+    if not configuration.research_api_key:
         raise ProviderError("Web research requires a configured Brave Search API key.")
     try:
-        response = httpx.get("https://api.search.brave.com/res/v1/web/search",
+        response = httpx.get(configuration.research_api_url,
                              params={"q": query[:380], "count": 6, "text_decorations": False},
-                             headers={"X-Subscription-Token": key, "Accept": "application/json"},
+                             headers={"X-Subscription-Token": configuration.research_api_key, "Accept": "application/json"},
                              timeout=15, follow_redirects=False)
         response.raise_for_status()
     except httpx.HTTPError as error:
