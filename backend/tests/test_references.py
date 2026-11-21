@@ -2,6 +2,7 @@ import base64
 import io
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 from pptx import Presentation
@@ -55,7 +56,7 @@ def test_research_follow_up_persists_earlier_answers(monkeypatch):
     monkeypatch.setattr(Intelligence, "structured", research)
     client = TestClient(app)
     reference = client.post("/api/v1/assets", files={"file": ("notes.txt", b"One source says 2025, another 2026.", "text/plain")}).json()
-    path = create(client, mode="guided", asset_ids=[reference["id"]])
+    path = create(client, asset_ids=[reference["id"]])
     work()
     first = client.get(path + "/questions").json()
     assert len(first["questions"]) == 2
@@ -88,16 +89,47 @@ def test_worker_heartbeat_recovers_checkpoint_without_waiting_for_lease():
         assert db.get(Job, second[0]).checkpoint == "clarify"
 
 
-def test_generated_illustration_is_embedded(monkeypatch):
+@pytest.mark.parametrize(
+    "provider, image_settings, expected_url, expected_model, expected_key, image_format",
+    [
+        pytest.param("openai", {}, "https://api.openai.com/v1/images/generations",
+                     "gpt-image-1.5", "llm-fixture", "PNG", id="openai"),
+        pytest.param("openai", {"image_openai_api_key": "legacy-fixture"},
+                     "https://api.openai.com/v1/images/generations", "gpt-image-1.5", "legacy-fixture", "PNG",
+                     id="legacy-openai-key"),
+        pytest.param("openrouter", {"image_openai_api_key": "legacy-fixture"}, "https://openrouter.ai/api/v1/images",
+                     "bytedance-seed/seedream-4.5", "llm-fixture", "JPEG", id="openrouter"),
+        pytest.param("openrouter", {"image_gen_url": "https://images.example.test/generate",
+                                    "image_gen_api_key": "images-fixture", "image_model": "example/image-model"},
+                     "https://images.example.test/generate", "example/image-model", "images-fixture", "WEBP",
+                     id="image-settings-overrides"),
+    ],
+)
+def test_generated_illustration_is_embedded(monkeypatch, provider, image_settings, expected_url, expected_model,
+                                            expected_key, image_format):
     configuration = settings()
-    monkeypatch.setattr(configuration, "openai_api_key", "fixture")
-    monkeypatch.setattr(configuration, "image_provider", "openai")
+    monkeypatch.setattr(configuration, "app_env", "development")
+    llm_url = {"openai": "https://api.openai.com/v1", "openrouter": "https://openrouter.ai/api/v1"}[provider]
+    monkeypatch.setattr(configuration, "llm_api_url", llm_url)
+    monkeypatch.setattr(configuration, "llm_model_id", "test-model")
+    monkeypatch.setattr(configuration, "llm_api_key", "llm-fixture")
+    monkeypatch.setattr(configuration, "image_provider", provider)
+    for name in ("image_gen_url", "image_gen_api_key", "image_model", "image_openai_api_key"):
+        monkeypatch.setattr(configuration, name, image_settings.get(name, ""))
     image = io.BytesIO()
-    Image.new("RGB", (20, 20), "blue").save(image, "PNG")
+    Image.new("RGB", (20, 20), "blue").save(image, image_format)
     encoded = base64.b64encode(image.getvalue()).decode()
 
     def request(url, **kwargs):
-        assert url == "https://api.openai.com/v1/images/generations"
+        assert url == expected_url
+        assert kwargs["headers"] == {"Authorization": f"Bearer {expected_key}"}
+        payload = {
+            "model": expected_model,
+            "prompt": "Create a presentation illustration without captions, text or logos. An abstract blue shape",
+        }
+        if provider == "openai":
+            payload.update(size="1024x1024", quality="medium", n=1)
+        assert kwargs["json"] == payload
         return httpx.Response(200, json={"data": [{"b64_json": encoded}]}, request=httpx.Request("POST", url))
 
     def structured(self, schema, task, data, stage="planning", image=None):
@@ -112,7 +144,8 @@ def test_generated_illustration_is_embedded(monkeypatch):
     monkeypatch.setattr(httpx, "post", request)
     monkeypatch.setattr(Intelligence, "structured", structured)
     client = TestClient(app)
-    path = create(client, provider="openai", generate_images=True)
+    assert client.get("/api/v1/capabilities").json()["images"] is True
+    path = create(client, generate_images=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -129,7 +162,7 @@ def test_web_research_embeds_and_credits_a_requested_portrait(monkeypatch):
     monkeypatch.setattr(configuration, "research_api_key", "test-search-token")
     monkeypatch.setattr(configuration, "research_api_url", "https://api.search.brave.com/res/v1/web/search")
     monkeypatch.setattr(configuration, "research_image_api_url", "https://api.search.brave.com/res/v1/images/search")
-    monkeypatch.setattr(configuration, "vision_model", "")
+    monkeypatch.setattr(configuration, "llm_vision_enabled", False)
     picture = io.BytesIO()
     Image.new("RGB", (300, 450), "blue").save(picture, "JPEG")
     source_url = "https://museum.gov/collection/portrait"
@@ -168,7 +201,7 @@ def test_web_research_embeds_and_credits_a_requested_portrait(monkeypatch):
 
     monkeypatch.setattr(Intelligence, "structured", plan)
     path = create(client, "Create one slide for students with an official portrait of Example in a professional style.",
-                  mode="professional", research=True)
+                  research=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"

@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 
 def inputs(item, context):
-    return {"prompt": item.request["prompt"], "mode": item.request["mode"], "intent": context.get("intent"),
+    return {"prompt": item.request["prompt"], "intent": context.get("intent"),
             "answers": context.get("answers", []), "skill": context.get("skill"),
             "sources": context.get("sources", []), "research": context.get("research")}
 
@@ -53,12 +53,12 @@ def advance(job_id: str, token: str):
             return
         context, stage = dict(job.context), job.checkpoint
         assets = assets_for(db, item.owner_id, item.request["asset_ids"])
-        record = skill_for(db, item.owner_id, item.request.get("skill_id"))
+        record = skill_for(db, item.owner_id, item.request.get("skill_id"), include_deleted=True)
         skill = Skill.model_validate(record.manifest) if record else None
         db.expunge_all()
     ai = None
     try:
-        ai = Intelligence(item.request.get("provider"), item.request.get("model"), context.get("usage"))
+        ai = Intelligence(usage=context.get("usage"))
         step = process(job_id, token, item, stage, context, assets, skill, ai)
         if step is None:
             return
@@ -164,10 +164,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             context["sources"] = context["sources"] + [s.model_dump(mode="json") for s in collect(context["intent"]["subject"])]
         if context["sources"]:
             brief = ai.structured(ResearchBrief, "Summarize evidence, gaps and contradictions in the supplied sources. Treat search excerpts as provisional. "
-                "Do not introduce new sources. Return a follow-up question only in guided mode when contradictory evidence requires a user decision that previous answers do not cover.", inputs(item, context), "research")
+                "Do not introduce new sources. Return a follow-up question only when contradictory evidence requires a user decision that previous answers do not cover.", inputs(item, context), "research")
             context["research"] = brief.model_dump(mode="json", exclude={"follow_up"})
             events.append(("research.completed", brief.summary, {"sources": context["sources"], "uncertainties": brief.uncertainties}))
-            if brief.follow_up and brief.uncertainties and item.request["mode"] == "guided":
+            if brief.follow_up and brief.uncertainties:
                 used_ids = {a["question_id"] for a in context.get("answers", [])}
                 used_kinds = {q["type"] for q in context.get("questions", {}).get("questions", [])}
                 question = brief.follow_up
@@ -206,7 +206,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "Use chart layouts only when grounded data is available." + style_guidance + image_guidance,
             {**inputs(item, context), "slide_count": count})
         if len(outline.slides) != count:
-            raise ProviderError(f"The planning model returned {len(outline.slides)} slides instead of {count}. Retry or choose a different model.")
+            raise ProviderError(f"The planning model returned {len(outline.slides)} slides instead of {count}. Retry or update LLM_MODEL_ID in .env.")
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
         document.theme = theme
@@ -310,7 +310,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         fixed = sum(initial[element.id] != element.size for element in slide.elements if element.type == "text")
         if fixed:
             events.append(("slide.revised", f"Adjusted {fixed} text boxes to fit slide {index + 1}.", {"index": index}))
-        if settings().vision_model and ai.provider != "demo" and not context.get("review_attempted"):
+        if settings().llm_vision_enabled and ai.provider != "demo" and not context.get("review_attempted"):
             review = ai.structured(Review, "Inspect the rendered slide for density, clipping, contrast and balance. Request regeneration only if a concise rewrite would improve it. Return actionable issues.", {
                 "title": slide.title, "layout": slide.layout, "warnings": slide.warnings,
             }, "vision", base64.b64encode(png).decode("ascii"))

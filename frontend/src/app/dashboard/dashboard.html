@@ -15,99 +15,134 @@
 } @else {
   <div class="dashboard-shell">
     <aside class="rail">
-      <a class="brand" routerLink="/" (click)="go('home')" aria-label="Framecraft Studio home">
+      <a class="brand" routerLink="/" aria-label="Framecraft Studio home">
         <span class="brand-mark"><lucide-icon [img]="i.Layers3" [size]="21" /></span>
         <span class="brand-name">Framecraft<small>STUDIO</small></span>
       </a>
-      <button class="rail-new" type="button" (click)="start()"><lucide-icon [img]="i.Plus" [size]="18" /><span>New presentation</span></button>
+      <button class="rail-new" type="button" aria-label="New presentation" (click)="start()"><lucide-icon [img]="i.Plus" [size]="18" /><span>New presentation</span></button>
       <nav aria-label="Workspace" class="rail-nav">
         <span class="rail-label">Workspace</span>
-        <button [class.current]="section() === 'home'" type="button" (click)="go('home')" title="Home"><lucide-icon [img]="i.House" [size]="18" /><span>Home</span></button>
-        <button [class.current]="section() === 'presentations'" type="button" (click)="go('presentations')" title="Presentations"><lucide-icon [img]="i.SquareStack" [size]="18" /><span>Presentations</span></button>
-        <button [class.current]="section() === 'skills'" type="button" (click)="go('skills')" title="Skill library"><lucide-icon [img]="i.LayoutGrid" [size]="18" /><span>Skill library</span></button>
+        <a routerLink="/" routerLinkActive="current" [routerLinkActiveOptions]="{ exact: true }" ariaCurrentWhenActive="page" title="Home" aria-label="Home"><lucide-icon [img]="i.House" [size]="18" /><span>Home</span></a>
+        <a routerLink="/presentations" routerLinkActive="current" ariaCurrentWhenActive="page" title="Presentations" aria-label="Presentations"><lucide-icon [img]="i.SquareStack" [size]="18" /><span>Presentations</span></a>
+        <a routerLink="/skills" routerLinkActive="current" ariaCurrentWhenActive="page" title="Skill library" aria-label="Skill library"><lucide-icon [img]="i.LayoutGrid" [size]="18" /><span>Skill library</span></a>
       </nav>
       <div class="rail-bottom">
         <nav class="rail-nav" aria-label="Support">
-          <button type="button" title="Settings" (click)="modal.set('settings')"><lucide-icon [img]="i.Settings2" [size]="18" /><span>Settings</span></button>
           <button type="button" title="Help and shortcuts" (click)="modal.set('help')"><lucide-icon [img]="i.CircleHelp" [size]="18" /><span>Help & shortcuts</span></button>
+          @if (user() && !user()?.local) {
+            <button type="button" title="Sign out" aria-label="Sign out" [disabled]="busy()" (click)="signOut()"><lucide-icon [img]="i.LogOut" [size]="18" /><span>Sign out</span></button>
+          }
         </nav>
-        <button class="profile" type="button" title="Workspace settings" (click)="modal.set('settings')">
+        <div class="profile">
           <span class="avatar">{{ (user()?.email ?? 'F')[0].toUpperCase() }}</span>
           <span><b>{{ user()?.local ? 'Local workspace' : 'Your workspace' }}</b><small>{{ user()?.local ? 'Personal studio' : user()?.email }}</small></span>
-          <lucide-icon [img]="i.ChevronDown" [size]="14" class="profile-caret" />
-        </button>
+        </div>
       </div>
     </aside>
     <div class="dashboard-main">
       <header class="topbar">
         <span class="crumb">Workspace <lucide-icon [img]="i.ChevronRight" [size]="14" /> <strong>{{ section() === 'skills' ? 'Skill library' : section() === 'presentations' ? 'Presentations' : 'Home' }}</strong></span>
-        <button class="top-settings button" type="button" (click)="modal.set('settings')"><lucide-icon [img]="i.Settings2" [size]="16" /> <span>Studio settings</span></button>
       </header>
-      <main id="home" class="home-content">
-        <section class="hero" aria-labelledby="hero-title">
+      <main class="home-content">
+        <section class="hero" [hidden]="section() !== 'home'" aria-labelledby="hero-title">
           <div class="hero-pattern" aria-hidden="true"></div>
           <div class="hero-orbit" aria-hidden="true"><span></span><span></span><span></span><i></i><b></b></div>
           <div class="hero-inner">
             <div class="hero-kicker"><lucide-icon [img]="i.Sparkles" [size]="15" /> AI PRESENTATION STUDIO</div>
             <h1 id="hero-title">Bring your ideas into <em>focus.</em></h1>
             <p class="hero-description">Start with an idea. Shape it into a presentation that’s yours.</p>
-            <studio-composer [config]="config()" [assets]="assets()" [skill]="selectedSkill()" [busy]="busy()"
+            <studio-composer [capabilities]="capabilities()" [assets]="assets()" [skill]="selectedSkill()" [busy]="busy()"
               (generating)="generate($event)" (upload)="upload($event)" (remove)="removeAsset($event)" (clearSkill)="selectedSkill.set(null)" />
             <div class="suggestions"><span>Try an idea</span>
               @for (suggestion of suggested; track suggestion.text) { <button type="button" (click)="start(suggestion.prompt)">{{ suggestion.text }} <lucide-icon [img]="i.ArrowUpRight" [size]="12" /></button> }
             </div>
           </div>
         </section>
-        @if (error() && !modal()) { <p class="error" role="alert">{{ error() }}</p> }
-        <section id="presentations" class="dashboard-section">
-          <div class="section-heading">
-            <div><h2>Recent presentations</h2><p>Pick up where you left off.</p></div>
-            <button class="subtle-button" type="button" (click)="go('presentations')">View all <lucide-icon [img]="i.ArrowRight" [size]="15" /></button>
-          </div>
-          @if (loading()) {
-            <div class="empty-row" aria-live="polite">Loading presentations…</div>
-          } @else if (!recent().length) {
-            <div class="empty-row"><span class="empty-icon"><lucide-icon [img]="i.Clock3" [size]="20" /></span>
-              <div><strong>No presentations yet</strong><p>New presentations will appear here.</p></div>
-              <button type="button" class="button" (click)="start()"><lucide-icon [img]="i.Plus" [size]="16" /> Create a presentation</button>
-            </div>
-          } @else {
-            <div class="recent-grid">
-              @for (item of recent().slice(0, section() === 'presentations' ? 100 : 3); track item.id) {
-                <a class="recent-card" [routerLink]="['/presentation', item.id]">
-                  @if (item.thumbnail; as thumbnail) { <div class="recent-art"><studio-canvas [slide]="thumbnail" [aspect]="item.aspect_ratio" /></div> }
-                  @else { <div class="recent-placeholder"><lucide-icon [img]="i.SquareStack" [size]="30" /></div> }
-                  <strong>{{ item.title }}</strong>
-                  <small>{{ item.slide_count }} slides <span>·</span> {{ item.updated | date:'MMM d, y' }}</small>
-                </a>
+        @if (error() && !modal() && !deleteTarget()) { <p class="error" role="alert">{{ error() }}</p> }
+        @if (section() !== 'skills') {
+          <section class="dashboard-section" #presentationSection tabindex="-1" aria-labelledby="presentations-heading">
+            <div class="section-heading">
+              @if (section() === 'home') {
+                <div><h2 id="presentations-heading">Recent presentations</h2><p>Pick up where you left off.</p></div>
+                <a class="subtle-button" routerLink="/presentations" aria-label="View all presentations">View all <lucide-icon [img]="i.ArrowRight" [size]="15" /></a>
+              } @else {
+                <h1 id="presentations-heading">Presentations</h1>
               }
             </div>
-          }
-        </section>
-        <section id="skills" class="dashboard-section library">
-          <div class="section-heading">
-            <div><h2>Skill library</h2><p>Start with a layout and narrative designed for your goal.</p></div>
-            <button class="button" type="button" (click)="modal.set('skill'); error.set('')"><lucide-icon [img]="i.Plus" [size]="17" /> New skill</button>
-          </div>
-          <div class="library-tools">
-            <div class="category-filters" aria-label="Skill categories">
-              @for (entry of categories().slice(0, showAll() ? 100 : 5); track entry) {
-                <button type="button" [class.active]="category() === entry" [attr.aria-pressed]="category() === entry" (click)="category.set(entry)">{{ entry }}</button>
+            @if (deletedKind() === 'presentation') { <p class="notice library-notice" role="status">Presentation deleted.</p> }
+            @if (loading()) {
+              <div class="empty-row" aria-live="polite">Loading presentations…</div>
+            } @else if (!recent().length) {
+              <div class="empty-row"><span class="empty-icon"><lucide-icon [img]="i.Clock3" [size]="20" /></span>
+                <div><strong>No presentations yet</strong><p>New presentations will appear here.</p></div>
+                <button type="button" class="button" (click)="start()"><lucide-icon [img]="i.Plus" [size]="16" /> Create a presentation</button>
+              </div>
+            } @else {
+              <div class="recent-grid">
+                @for (item of visiblePresentations(); track item.id) {
+                  <article class="recent-card">
+                    <a class="recent-card-link" [routerLink]="['/presentation', item.id]">
+                      @if (item.thumbnail; as thumbnail) { <div class="recent-art"><studio-canvas [slide]="thumbnail" [aspect]="item.aspect_ratio" /></div> }
+                      @else { <div class="recent-placeholder"><lucide-icon [img]="i.SquareStack" [size]="30" /></div> }
+                      <strong>{{ item.title }}</strong>
+                      <small>{{ item.slide_count }} slides <span>·</span> {{ item.updated | date:'MMM d, y' }}</small>
+                    </a>
+                    <button class="icon-button delete-icon recent-delete" type="button" [attr.aria-label]="'Delete ' + item.title" title="Delete presentation"
+                      [disabled]="busy()" (click)="showDelete('presentation', item.id, item.title)"><lucide-icon [img]="i.Trash2" [size]="17" /></button>
+                  </article>
+                }
+              </div>
+            }
+          </section>
+        }
+        @if (section() !== 'presentations') {
+          <section class="dashboard-section library" #skillSection tabindex="-1" aria-labelledby="skills-heading">
+            <div class="section-heading">
+              @if (section() === 'skills') {
+                <h1 id="skills-heading">Skill library</h1>
+              } @else {
+                <div><h2 id="skills-heading">Skill library</h2><p>Start with a layout and narrative designed for your goal.</p></div>
               }
+              <button class="button" type="button" (click)="modal.set('skill'); error.set('')"><lucide-icon [img]="i.Plus" [size]="17" /> New skill</button>
             </div>
-            <label class="search-box"><lucide-icon [img]="i.Search" [size]="16" /><input type="search" [ngModel]="search()" (ngModelChange)="search.set($event)" aria-label="Search skills" placeholder="Search skills" /></label>
-          </div>
-          <div class="skill-grid">
-            @for (skill of visibleSkills(); track skill.id) { <studio-skill-card [skill]="skill" (preview)="preview.set($event)" (chosen)="choose($event)" /> }
-            @empty { @if (!loading()) { <p class="quiet">No skills match your search.</p> } }
-          </div>
-          @if (!showAll() && filteredSkills().length > visibleSkills().length) {
-            <button type="button" class="subtle-button all-skills" (click)="showAll.set(true)">View all skills <lucide-icon [img]="i.ArrowRight" [size]="15" /></button>
-          }
-        </section>
+            @if (deletedKind() === 'skill') { <p class="notice library-notice" role="status">Skill deleted.</p> }
+            <div class="library-tools">
+              <div class="category-filters" aria-label="Skill categories">
+                @for (entry of section() === 'skills' ? categories() : categories().slice(0, 5); track entry) {
+                  <button type="button" [class.active]="category() === entry" [attr.aria-pressed]="category() === entry" (click)="category.set(entry)">{{ entry }}</button>
+                }
+              </div>
+              <label class="search-box"><lucide-icon [img]="i.Search" [size]="16" /><input type="search" [ngModel]="search()" (ngModelChange)="search.set($event)" aria-label="Search skills" placeholder="Search skills" /></label>
+            </div>
+            <div class="skill-grid">
+              @for (skill of visibleSkills(); track skill.id) {
+                <studio-skill-card [skill]="skill" [canDelete]="skill.can_delete" [busy]="busy()"
+                  (preview)="preview.set($event)" (chosen)="choose($event)" (removed)="showDelete('skill', $event.id, $event.name)" />
+              }
+              @empty { @if (!loading()) { <p class="quiet">No skills match your search.</p> } }
+            </div>
+            @if (section() === 'home') {
+              <a class="subtle-button all-skills" routerLink="/skills">View all skills <lucide-icon [img]="i.ArrowRight" [size]="15" /></a>
+            }
+          </section>
+        }
       </main>
     </div>
   </div>
+}
+@if (deleteTarget(); as item) {
+  <studio-dialog [title]="'Delete ' + item.kind + '?'" (closed)="closeDelete()">
+    @if (item.kind === 'skill') {
+      <p><strong>{{ item.name }}</strong> will be permanently removed from your skill library. Existing presentations will keep using it.</p>
+    } @else {
+      <p><strong>{{ item.name }}</strong> and its saved versions will be permanently deleted.</p>
+    }
+    @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
+    <div class="dialog-actions">
+      <button type="button" class="button" [disabled]="busy()" (click)="closeDelete()">Cancel</button>
+      <button type="button" class="danger" [disabled]="busy()" (click)="deleteItem(item)">{{ busy() ? 'Deleting…' : 'Delete ' + item.kind }}</button>
+    </div>
+  </studio-dialog>
 }
 @if (preview(); as skill) {
   <studio-dialog [title]="skill.name" (closed)="preview.set(null)">
@@ -118,21 +153,6 @@
       <p class="quiet">{{ brand.layouts.length }} PowerPoint layouts. The exported deck includes the template’s native artwork.</p>
     } @else if (skill.recipes.length) { <p class="quiet">Slide layouts {{ skill.recipes.join(' · ') }}</p> }
     <div class="dialog-actions"><a class="button" [href]="apiSkillLink(skill.id)"><lucide-icon [img]="i.Download" [size]="16" /> {{ skill.brand ? 'Download template' : 'Export skill' }}</a><button type="button" class="primary" (click)="choose(skill)">Use skill</button></div>
-  </studio-dialog>
-}
-@if (modal() === 'settings') {
-  <studio-dialog title="Studio settings" (closed)="modal.set(null)">
-    <h3>AI providers</h3>
-    <p class="quiet">Configure provider credentials in the backend .env file and restart the services.</p>
-    <div class="provider-list">
-      @for (provider of config()?.providers ?? []; track provider.id) {
-        <div><span><strong>{{ provider.label }}</strong><small>{{ provider.model || 'Add a model ID in generation settings' }}</small></span><span class="status-chip">{{ provider.demo ? 'Offline demo' : provider.configured ? 'Configured' : 'Setup required' }}</span></div>
-      }
-    </div>
-    <div class="dialog-actions">
-      @if (config()?.providers?.some(isDemo)) { <button type="button" class="primary" (click)="demo()">Try Studio Demo</button> }
-      @if (user() && !user()?.local) { <button type="button" class="button" (click)="signOut(); modal.set(null)">Sign out</button> }
-    </div>
   </studio-dialog>
 }
 @if (modal() === 'help') {

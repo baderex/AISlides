@@ -6,8 +6,11 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
+    model_config = SettingsConfigDict(env_file=(BACKEND_DIR.parent / ".env", BACKEND_DIR / ".env"), extra="ignore")
     app_env: Literal["development", "test", "production"] = "development"
     database_url: str = "sqlite+aiosqlite:///./data/app.db"
     storage_backend: Literal["local", "s3"] = "local"
@@ -20,25 +23,18 @@ class Settings(BaseSettings):
     public_origin: str | None = None
     local_session: bool = True
     allow_signup: bool = True
-    ai_provider: str = "openai"
-    ai_model: str = ""
-    planning_model: str = ""
-    research_model: str = ""
-    slide_model: str = ""
-    vision_model: str = ""
-    image_provider: Literal["none", "openai"] = "none"
-    image_model: str = "gpt-image-1.5"
-    image_openai_api_key: str = ""
+    llm_api_url: str = ""
+    llm_model_id: str = ""
+    llm_api_key: str = ""
+    llm_vision_enabled: bool = False
+    image_provider: Literal["none", "openai", "openrouter"] = "none"
+    image_model: str = ""
+    image_gen_url: str = ""
+    image_gen_api_key: str = Field(default="", repr=False)
+    image_openai_api_key: str = Field(default="", repr=False)  # Backward compatibility for the OpenAI provider.
     image_limit_per_job: int = 3
     image_cost_usd: float = 0.0
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    gemini_api_key: str = ""
-    openrouter_api_key: str = ""
-    compatible_api_key: str = ""
-    compatible_base_url: str = ""
     compatible_structured: bool = False
-    ollama_base_url: str = "http://127.0.0.1:11434"
     research_api_key: str = ""
     research_api_url: str = "https://api.search.brave.com/res/v1/web/search"
     research_image_api_url: str = "https://api.search.brave.com/res/v1/images/search"
@@ -52,6 +48,14 @@ class Settings(BaseSettings):
     powerpoint_renderer: str = ""
     powerpoint_review_timeout: int = Field(default=45, ge=5, le=90)
     lease_seconds: int = 300
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        def process_settings():
+            values = env_settings()
+            return {name: value for name, value in values.items() if name not in {"llm_api_url", "llm_model_id"}}
+
+        return init_settings, process_settings, dotenv_settings, file_secret_settings
 
     @property
     def implicit_session(self) -> bool:

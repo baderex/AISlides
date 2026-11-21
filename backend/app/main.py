@@ -9,7 +9,7 @@ from app.api import api
 from app.config import settings
 from app.db import Session
 from app.presentations import Conflict
-from app.providers import ProviderError, provider_configured
+from app.providers import ProviderError, provider_configured, provider_for
 from app.queue import ready
 from app.storage import Storage
 
@@ -81,5 +81,6 @@ def readiness():
             log.warning("unavailable service=%s", name, exc_info=True)
             services[name] = "unavailable"
     ok = all(status == "ok" for status in services.values())
-    ai = "configured" if provider_configured(settings().ai_provider) else "missing credentials"
+    configuration = settings()
+    ai = "configured" if provider_configured(configuration, provider_for(configuration)) else "missing credentials"
     return JSONResponse({"status": "ok" if ok else "unavailable", **services, "ai_provider": ai}, 200 if ok else 503)

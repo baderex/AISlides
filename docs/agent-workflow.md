@@ -4,6 +4,6 @@ Generation moves through created, analyzing, waiting for user, researching, plan
 
 Provider responses are schema-validated. Source material is supplied as untrusted data and never grants tools or authority. Deterministic layout, rendering and export consume the presentation IR.
 
-In guided mode a source conflict can trigger one additional question before planning. The worker can attach a generated illustration to an eligible slide when image generation is enabled. It previews each slide, fits text, and can use an optional vision model for at most one content rewrite. Validated previews and slides commit with their event before the next checkpoint.
+A source conflict can trigger one additional question before planning if earlier answers do not resolve it. The worker can attach a generated illustration to an eligible slide when image generation is enabled. It previews each slide, fits text, and can use the configured model for at most one content rewrite when vision review is enabled. Validated previews and slides commit with their event before the next checkpoint.
 
 The queue fences commits by lease token and recovers work when a worker heartbeat disappears. A cancelled in-flight provider request can still finish at the provider. Its expired lease prevents it from writing new slides.

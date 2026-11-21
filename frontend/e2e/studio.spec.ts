@@ -5,7 +5,9 @@ import { expect, test } from '@playwright/test';
 test('clarify, reload, generate, edit, save and export an editable PowerPoint', async ({ page }, info) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Bring your ideas into focus.' })).toBeVisible();
-  await page.getByLabel('AI model provider').selectOption('demo');
+  await expect(page.getByLabel('AI model provider')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /settings/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^(Professional|Creative|Guide mode)$/ })).toHaveCount(0);
   await page.getByLabel('Describe your presentation').fill('Generate three slides about quantum computing.');
   await page.getByRole('button', { name: 'Generate slides' }).click();
   await expect(page.getByRole('heading', { name: 'Who is this presentation for?' })).toBeVisible();
@@ -71,8 +73,16 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
   ].join('\n'), output]);
 });
 
-test('dashboard filters the skill gallery and opens a reusable skill', async ({ page }) => {
+test('the Skills page opens a reusable skill without losing the draft', async ({ page }) => {
   await page.goto('/');
+  const prompt = page.getByLabel('Describe your presentation');
+  await prompt.fill('A draft about research methods');
+  const skills = page.getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Skill library' });
+  await skills.click();
+  await expect(page).toHaveURL(/\/skills$/);
+  await expect(skills).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('heading', { level: 1, name: 'Skill library' })).toBeVisible();
+  await expect(prompt).toBeHidden();
   await page.getByRole('searchbox', { name: 'Search skills' }).fill('academic');
   await expect(page.getByRole('heading', { name: 'Research Brief' })).toHaveCount(1);
   await expect(page.getByRole('heading', { name: 'Startup Pitch' })).toHaveCount(0);
@@ -80,7 +90,75 @@ test('dashboard filters the skill gallery and opens a reusable skill', async ({ 
   const preview = page.getByRole('dialog', { name: 'Research Brief' });
   await expect(preview).toBeVisible();
   await preview.getByRole('button', { name: 'Use skill', exact: true }).click();
+  await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole('button', { name: 'Remove skill' })).toBeVisible();
+  await expect(prompt).toHaveValue('A draft about research methods');
+  await expect(prompt).toBeFocused();
+  await page.goto('/skills');
+  await expect(page.getByRole('heading', { level: 1, name: 'Skill library' })).toBeVisible();
+});
+
+test('Recent Presentations supports confirmed deletion and links to the full list', async ({ page, request }) => {
+  const title = 'Presentation to delete';
+  const created = await request.post('/api/v1/presentations', { data: { prompt: title, generate: false } });
+  expect(created.status()).toBe(201);
+  const { id } = await created.json();
+
+  await page.goto('/');
+  const recent = page.getByRole('region', { name: 'Recent presentations' });
+  const deleteButton = recent.getByRole('button', { name: `Delete ${title}` });
+  await deleteButton.click();
+  const confirm = page.getByRole('dialog', { name: 'Delete presentation?' });
+  await expect(confirm.getByText(title)).toBeVisible();
+  await confirm.getByRole('button', { name: 'Cancel' }).click();
+  await expect(deleteButton).toBeVisible();
+
+  await recent.getByRole('link', { name: 'View all presentations' }).click();
+  await expect(page).toHaveURL(/\/presentations$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Presentations' })).toBeVisible();
+  await expect(page.getByRole('button', { name: `Delete ${title}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Skill library' })).toHaveCount(0);
+  await page.goBack();
+  await deleteButton.click();
+  await confirm.getByRole('button', { name: 'Delete presentation' }).click();
+  await expect(recent.getByRole('status')).toHaveText('Presentation deleted.');
+  await expect(deleteButton).toHaveCount(0);
+  expect((await request.get(`/api/v1/presentations/${id}`)).status()).toBe(404);
+
+  await page.goto('/presentations');
+  await expect(page.getByRole('heading', { level: 1, name: 'Presentations' })).toBeVisible();
+  await expect(page.getByRole('button', { name: `Delete ${title}` })).toHaveCount(0);
+});
+
+test('the Skill library confirms deletion and clears a deleted draft skill', async ({ page }) => {
+  const name = 'Skill to delete';
+  await page.goto('/skills');
+  await expect(page.getByRole('button', { name: 'Use Research Brief' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Delete Research Brief' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'New skill' }).click();
+  const create = page.getByRole('dialog', { name: 'New skill' });
+  await create.getByLabel('Name', { exact: true }).fill(name);
+  await create.getByLabel('Description').fill('A test skill for the library.');
+  await create.getByRole('button', { name: 'Create skill' }).click();
+  await expect(page.getByRole('button', { name: 'Remove skill' })).toBeVisible();
+
+  await page.getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Skill library' }).click();
+  const remove = page.getByRole('button', { name: `Delete ${name}` });
+  await remove.click();
+  const confirm = page.getByRole('dialog', { name: 'Delete skill?' });
+  await expect(confirm.getByText(name)).toBeVisible();
+  await confirm.getByRole('button', { name: 'Cancel' }).click();
+  await expect(remove).toBeVisible();
+  await remove.click();
+  await confirm.getByRole('button', { name: 'Delete skill' }).click();
+  await expect(page.getByRole('status')).toHaveText('Skill deleted.');
+  await expect(remove).toHaveCount(0);
+  await page.getByRole('link', { name: 'Home', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Remove skill' })).toHaveCount(0);
+
+  await page.goto('/skills');
+  await expect(page.getByRole('button', { name: 'Use Research Brief' })).toBeVisible();
+  await expect(page.getByRole('heading', { name })).toHaveCount(0);
 });
 
 test('import a branded template and review the generated PowerPoint', async ({ page }, info) => {
@@ -104,7 +182,6 @@ test('import a branded template and review the generated PowerPoint', async ({ p
   await expect(page.getByRole('dialog', { name: 'New skill' })).toBeHidden({ timeout: 20000 });
   await expect(page.getByRole('button', { name: 'Remove skill' })).toBeVisible();
   await expect(page.getByLabel('Slide aspect ratio')).toHaveValue('4:3');
-  await page.getByLabel('AI model provider').selectOption('demo');
   await page.getByLabel('Describe your presentation').fill('Generate three slides about quantum computing for executives.');
   await page.getByRole('button', { name: 'Generate slides' }).click();
   await expect(page.getByText('The presentation is ready to edit and export.', { exact: true })).toBeVisible({ timeout: 15000 });

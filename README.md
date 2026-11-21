@@ -13,11 +13,11 @@ python scripts/dev.py
 
 Open [the studio](http://localhost:4200) or [API documentation](http://localhost:8000/docs). Check services with `python scripts/check.py`.
 
-Set provider credentials in `backend/.env` and restart. The default provider is OpenAI. For an offline demonstration of the interface, choose **Studio Demo** in the provider menu or settings. Enter `Generate three slides about quantum computing.`, choose **Executive / Board** and **Editorial report**, then edit a slide and export PowerPoint.
+Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env`, then restart the API and worker. The example configuration uses OpenAI. To try the interface offline, set `LLM_API_URL=demo` in `backend/.env`. Enter `Generate three slides about quantum computing.`, choose **Executive / Board** and **Editorial report**, then edit a slide and export PowerPoint.
 
 ## Capabilities
 
-- Provider settings for OpenAI, Anthropic, Gemini, OpenRouter, Ollama and OpenAI-compatible endpoints.
+- Server-side configuration for OpenAI, Anthropic, Gemini, OpenRouter, Ollama and OpenAI-compatible endpoints.
 - Durable worker checkpoints, clarification cards, event replay, cancellation, and retry.
 - Reference uploads, optional search, source references, reusable skill manifests and deck version history.
 - Branded PowerPoint templates reuse the original slide masters and layouts with editable generated content.
@@ -36,3 +36,14 @@ The local application uses SQLite and filesystem storage. Production configurati
 - [Agent workflow](docs/agent-workflow.md)
 - [Implementation checklist](docs/implementation-plan.md)
 - [PowerPoint export decision](docs/adr/0001-powerpoint-export.md)
+
+## Acknowledgments
+
+Thanks to the maintainers and contributors of the open-source projects that helped shape Framecraft Studio.
+
+- Slide design recipes and editable PowerPoint exports with native objects. [PPT Master](https://github.com/hugohe3/ppt-master)
+- AI provider configuration, document uploads, and a self-hosted REST API. [Presenton](https://github.com/presenton/presenton)
+- Research before slide planning, a dedicated review step, and a limit on revision rounds. [PPTAgent](https://github.com/icip-cas/PPTAgent)
+- Declarative slide themes and reproducible previews. [Slidev](https://github.com/slidevjs/slidev) and [Marp](https://github.com/marp-team/marp)
+
+For more detail, see the [architecture reference review](docs/architecture.md#reference-review).

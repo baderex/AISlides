@@ -61,6 +61,11 @@ def branded_deck(client):
 def test_branded_generation_preserves_native_placeholders_and_artwork():
     client = TestClient(app)
     path, deck = branded_deck(client)
+    skill_id = deck["request"]["skill_id"]
+    skill_path = f"/api/v1/skills/{skill_id}"
+    assert client.delete(skill_path).status_code == 204
+    assert client.get(skill_path + "/export").status_code == 404
+    assert client.post("/api/v1/presentations", json={"prompt": "A new branded deck", "skill_id": skill_id}).status_code == 422
     assert deck["aspect_ratio"] == "4:3"
     first = deck["document"]["slides"][0]
     first["elements"][0]["text"] = "Updated branded title"

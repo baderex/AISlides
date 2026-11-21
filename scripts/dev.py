@@ -53,8 +53,7 @@ def launch(test=False):
         if temporary:
             root = Path(temporary.name).as_posix()
             env.update(APP_ENV="test", DATABASE_URL=f"sqlite+aiosqlite:///{root}/studio.db", STORAGE_BACKEND="local",
-                       LOCAL_STORAGE_PATH=f"{root}/uploads", JOB_BACKEND="local", REDIS_ENABLED="false",
-                       AI_PROVIDER="demo", LOCAL_SESSION="true")
+                       LOCAL_STORAGE_PATH=f"{root}/uploads", JOB_BACKEND="local", REDIS_ENABLED="false", LOCAL_SESSION="true")
             run([PYTHON, "-m", "alembic", "upgrade", "head"], BACKEND, env)
             run([PYTHON, "-m", "app.cli", "seed"], BACKEND, env)
         commands = [

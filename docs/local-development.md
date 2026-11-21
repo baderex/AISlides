@@ -2,7 +2,7 @@
 
 Install Git, Python 3.11 or later, and Node 20.19+, 22.13+, or 24.x with npm. Run `python scripts/setup.py` followed by `python scripts/dev.py` from the repository root. The setup script creates a virtual environment, installs dependencies, applies migrations and seeds the skill library. The development supervisor starts the API, worker and Angular CLI.
 
-The studio is at [localhost:4200](http://localhost:4200), the API docs at [localhost:8000/docs](http://localhost:8000/docs), and readiness at [localhost:8000/health/ready](http://localhost:8000/health/ready). Local development uses one implicit local workspace. Set `LOCAL_SESSION=false` to exercise account registration and login. Both the worker and API read the same environment. The backend dotenv file takes precedence over the root fallback, and process environment variables take precedence over both.
+The studio is at [localhost:4200](http://localhost:4200), the API docs at [localhost:8000/docs](http://localhost:8000/docs), and readiness at [localhost:8000/health/ready](http://localhost:8000/health/ready). Local development uses one implicit local workspace. Set `LOCAL_SESSION=false` to exercise account registration and login. Both the worker and API read the same configuration. For `LLM_API_URL` and `LLM_MODEL_ID`, the services read `backend/.env` first and fall back to the root `.env`. Other variables can also be set in the process environment, which takes precedence for those variables.
 
 The Angular dev server reloads frontend changes. Restart the supervisor after changing backend code or configuration.
 
@@ -14,25 +14,32 @@ Install LibreOffice Impress for **Export → Review PowerPoint export**. FrameCr
 
 ## Model setup
 
-| Provider ID | Backend configuration |
-| --- | --- |
-| `openai` | `OPENAI_API_KEY` |
-| `anthropic` | `ANTHROPIC_API_KEY` |
-| `gemini` | `GEMINI_API_KEY` |
-| `openrouter` | `OPENROUTER_API_KEY` |
-| `ollama` | Run Ollama, pull a model and set `OLLAMA_BASE_URL` if it uses a non-default port |
-| `compatible` | `COMPATIBLE_BASE_URL` ending in the provider’s API root, optional `COMPATIBLE_API_KEY`, and a model ID |
-| `demo` | Explicit offline fixtures for verification |
+Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env` and restart the API and worker. The URL determines the request format. Generation and conversational editing use the same model. Set `LLM_VISION_ENABLED=true` to enable screenshot review when that model supports images.
 
-Set `AI_PROVIDER` to pick a default. Use `AI_MODEL` for its global model override, or `PLANNING_MODEL`, `RESEARCH_MODEL`, `SLIDE_MODEL` and `VISION_MODEL` for role-specific models on the selected provider. The model field in the composer overrides the generation model for an individual presentation. Configure a vision-capable `VISION_MODEL` to enable screenshot review. Set `COMPATIBLE_STRUCTURED=true` when the compatible server supports the OpenAI JSON Schema response format.
+| Service | Example `LLM_API_URL` | `LLM_API_KEY` |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1` | OpenAI key |
+| Anthropic | `https://api.anthropic.com/v1` | Anthropic key |
+| Gemini | `https://generativelanguage.googleapis.com/v1beta` | Gemini key |
+| OpenRouter | `https://openrouter.ai/api/v1` | OpenRouter key |
+| Ollama | `http://127.0.0.1:11434` | Optional |
+| OpenAI-compatible | Your API root | Optional, depending on the server |
+| Offline demo | `demo` | Leave blank |
+
+For OpenAI-compatible APIs, Anthropic and Ollama, you can also use the full endpoint URL. For native Ollama on a different port, use the full `/api/chat` URL and enter the installed model tag as `LLM_MODEL_ID`. Set `COMPATIBLE_STRUCTURED=true` when the compatible server supports the OpenAI JSON Schema response format. Leave `LLM_MODEL_ID` blank for the offline demo.
 
 Set `RESEARCH_API_KEY` in the root `.env` to enable Web research in the studio. `RESEARCH_API_URL` defaults to `https://api.search.brave.com/res/v1/web/search`. If you override it, use the full URL of an endpoint that accepts Brave Search requests and returns the same response format. Search uses snippets and titles, and references are linked to slides when selected by the model.
 
-With **Web research** enabled, requests for photos or portraits also use Brave Image Search. FrameCraft embeds a preview-sized copy and links the original page in the slide sources. The same key must have Image Search access. You can override the default endpoint with `RESEARCH_IMAGE_API_URL`. The **Generate illustrations** setting controls AI-generated imagery.
+With **Web research** enabled, requests for photos or portraits also use Brave Image Search. FrameCraft embeds a preview-sized copy and links the original page in the slide sources. The same key must have Image Search access. You can override the default endpoint with `RESEARCH_IMAGE_API_URL`.
 
-Enable the optional illustration control with `IMAGE_PROVIDER=openai` and `IMAGE_OPENAI_API_KEY` or `OPENAI_API_KEY`. Configure `IMAGE_MODEL`, `IMAGE_LIMIT_PER_JOB` and `IMAGE_COST_USD` to set the model, per-deck limit and cost estimate. The worker stores generated illustrations as independent image assets. [OpenAI image generation documentation](https://developers.openai.com/api/docs/guides/image-generation)
+Set `IMAGE_PROVIDER` to `openai` or `openrouter` in `backend/.env` to enable **Generate illustrations**. Use `IMAGE_GEN_API_KEY` for the selected provider. You can leave it blank if `LLM_API_URL` points to the same provider and `LLM_API_KEY` is set. Existing OpenAI configurations can still use `IMAGE_OPENAI_API_KEY` as a fallback.
 
-For native Ollama, run `ollama pull qwen2.5:7b` and set `AI_PROVIDER=ollama`. The application sends JSON Schema to the [Ollama Chat API](https://docs.ollama.com/api/chat). The offline demo is available from Studio settings for machines without a configured model.
+| `IMAGE_PROVIDER` | Default image generation URL | Default `IMAGE_MODEL` |
+| --- | --- | --- |
+| `openai` | `https://api.openai.com/v1/images/generations` | `gpt-image-1.5` |
+| `openrouter` | `https://openrouter.ai/api/v1/images` | `bytedance-seed/seedream-4.5` |
+
+Leave `IMAGE_GEN_URL` blank to use the provider default, or set it to the full image generation endpoint. If you override `IMAGE_MODEL` for OpenRouter, choose a raster image model supported by its dedicated Images API. Set `IMAGE_LIMIT_PER_JOB` and `IMAGE_COST_USD` to control the per-deck limit and cost estimate. Restart the API and worker after changing these settings. [OpenAI Images API](https://developers.openai.com/api/reference/resources/images/methods/generate) · [OpenRouter image generation guide](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
 
 ## Manual startup
 

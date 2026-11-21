@@ -7,7 +7,7 @@ from time import monotonic
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
@@ -25,7 +25,6 @@ from app.presentations import (
     present_owned, queue_generation, referenced_images, skill_for, summary,
 )
 from app.previews import get_preview
-from app.providers import ProviderError, catalog
 from app.questions import Answers, Clarification, Choice, SlideCount, validate_answers
 from app.queue import notify
 from app.rendering import to_pdf
@@ -137,10 +136,9 @@ def logout(request: Request, response: Response):
     return {"ok": True}
 
 
-@api.get("/providers")
-def providers(owner_id: str = owner):
-    return {"providers": catalog(), "default": settings().ai_provider, "research": bool(settings().research_api_key),
-            "images": image_configured()}
+@api.get("/capabilities")
+def capabilities(owner_id: str = owner):
+    return {"research": bool(settings().research_api_key), "images": image_configured()}
 
 
 @api.get("/schemas/presentation")
@@ -175,6 +173,17 @@ def export_skill(skill_id: str, owner_id: str = owner):
                 raise HTTPException(404, "The original PowerPoint template is unavailable.")
             return download(Storage().get(asset.id), PPTX, record.manifest["name"], "pptx")
         return download(json.dumps(record.manifest, indent=2).encode(), "application/json", record.manifest["name"], "json")
+
+
+@api.delete("/skills/{skill_id}", status_code=204, response_class=Response)
+def delete_skill(skill_id: str, owner_id: str = owner):
+    with Session.begin() as db:
+        result = db.execute(update(SkillRecord).where(
+            SkillRecord.id == skill_id, SkillRecord.owner_id == owner_id, SkillRecord.deleted.is_(False),
+        ).values(deleted=True))
+        if result.rowcount != 1:
+            raise HTTPException(404, "Skill not found.")
+    return Response(status_code=204)
 
 
 @api.post("/skills", status_code=201)
@@ -281,8 +290,6 @@ def create_presentation(data: CreatePresentation, owner_id: str = owner):
         manifest = Skill.model_validate(skill.manifest) if skill else None
         if manifest and manifest.brand:
             data.aspect_ratio = manifest.formats[0]
-        if data.provider and data.provider not in {entry["id"] for entry in catalog()}:
-            raise HTTPException(422, "The selected model provider is unavailable.")
         if data.generate_images and not image_configured():
             raise HTTPException(422, "Image generation is unavailable. Configure an image provider in the backend.")
         title = " ".join(data.prompt.split())[:100]
@@ -314,7 +321,7 @@ def save_presentation(item_id: str, data: Save, owner_id: str = owner):
         item = item_for(db, item_id, owner_id, True)
         assert_editable(item, data.revision)
         if item.document["aspect_ratio"] != data.document.aspect_ratio:
-            record = skill_for(db, owner_id, item.request.get("skill_id"))
+            record = skill_for(db, owner_id, item.request.get("skill_id"), include_deleted=True)
             if record and record.manifest.get("brand"):
                 raise HTTPException(422, "A branded presentation uses the original template aspect ratio.")
         validate_document_assets(db, owner_id, data.document)
@@ -518,7 +525,7 @@ def save_as_skill(item_id: str, owner_id: str = owner):
     with Session() as db:
         item = item_for(db, item_id, owner_id)
         document = read_document(item.document)
-        existing = skill_for(db, owner_id, item.request.get("skill_id"))
+        existing = skill_for(db, owner_id, item.request.get("skill_id"), include_deleted=True)
         original = Skill.model_validate(existing.manifest) if existing else None
     return store_skill(Skill(name=document.title, category=original.category if original and original.brand else "Custom",
                              description=f"Design and layout recipe from {document.title}.", theme=document.theme,
@@ -616,7 +623,7 @@ def export_snapshot(item_id, owner_id, expected=None):
             raise Conflict("Generate or add a slide before exporting.")
         validate_document_assets(db, owner_id, document)
         revision = item.revision
-        record = skill_for(db, owner_id, item.request.get("skill_id"))
+        record = skill_for(db, owner_id, item.request.get("skill_id"), include_deleted=True)
         brand = Skill.model_validate(record.manifest).brand if record else None
         if brand:
             asset = db.get(Asset, brand.asset_id)

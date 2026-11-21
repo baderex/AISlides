@@ -42,9 +42,9 @@ def assets_for(db, owner_id, ids):
     return list(db.scalars(select(Asset).where(Asset.id.in_(ids), Asset.owner_id == owner_id)))
 
 
-def skill_for(db, owner_id, key):
+def skill_for(db, owner_id, key, *, include_deleted=False):
     item = db.get(SkillRecord, key) if key else None
-    return item if item and item.owner_id in {None, owner_id} else None
+    return item if item and item.owner_id in {None, owner_id} and (include_deleted or not item.deleted) else None
 
 
 def image_ids(db, owner_id, ids):

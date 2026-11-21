@@ -32,5 +32,7 @@ def seed(db: Session):
 
 
 def list_skills(db: Session, owner_id: str) -> list[dict]:
-    query = select(SkillRecord).where((SkillRecord.owner_id == owner_id) | SkillRecord.owner_id.is_(None))
-    return [{"id": item.id, **item.manifest} for item in db.scalars(query)]
+    query = select(SkillRecord).where(
+        (SkillRecord.owner_id == owner_id) | SkillRecord.owner_id.is_(None), SkillRecord.deleted.is_(False),
+    )
+    return [{"id": item.id, **item.manifest, "can_delete": item.owner_id == owner_id} for item in db.scalars(query)]

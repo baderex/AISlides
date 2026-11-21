@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, create_engine, event
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, create_engine, event, false
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -39,6 +39,7 @@ class SkillRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
     manifest: Mapped[dict] = mapped_column(JSON)
+    deleted: Mapped[bool] = mapped_column(Boolean, server_default=false())
 
 
 class PresentationRecord(Base):
