@@ -6,6 +6,7 @@ from app.branding import compose_branded
 from app.consulting import compose_consulting, consulting_theme, requested_consulting
 from app.domain import BrandTemplate, Chart, Contract, Document, Image, Layout, Shape, ShortText, Slide, Table, Text, Theme
 from app.questions import Question
+from app.rendering import fit_image
 
 
 class Intent(Contract):
@@ -22,6 +23,7 @@ class OutlineItem(Contract):
     title: ShortText
     layout: Layout
     purpose: str = Field(default="", max_length=500)
+    image_query: str = Field(default="", max_length=380)
 
 
 class Outline(Contract):
@@ -83,12 +85,12 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
 
 
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
-            brand: BrandTemplate | None = None) -> Slide:
+            brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None) -> Slide:
     if brand:
         return compose_branded(item, content, document, image_ids, brand)
     t = document.theme
     if t.profile == "consulting":
-        return compose_consulting(item, content, document, index, image_ids)
+        return compose_consulting(item, content, document, index, image_ids, web_image_ratio=web_image_ratio)
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     editorial = t.font == "Georgia"
@@ -132,11 +134,19 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     label(content.subtitle, .07, .352, .86, .08, 17, muted)
     points = content.points
     if content.image_asset_id in image_ids and item.layout in {"showcase", "editorial", "research"}:
-        elements.append(Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title))
-        for i, point in enumerate(points[:2]):
-            y = .46 + i * .21
-            label(point.title, .07, y, .43, .06, 20, ink, True)
-            label(point.body, .07, y + .07, .43, .125, 16, muted)
+        image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
+        if web_image_ratio:
+            elements.append(fit_image(image, document, web_image_ratio))
+            for i, point in enumerate(points[:3]):
+                y = .46 + i * .146
+                label(point.title, .07, y, .43, .056, 18, ink, True)
+                label(point.body, .07, y + .06, .43, .08, 15, muted)
+        else:
+            elements.append(image)
+            for i, point in enumerate(points[:2]):
+                y = .46 + i * .21
+                label(point.title, .07, y, .43, .06, 20, ink, True)
+                label(point.body, .07, y + .07, .43, .125, 16, muted)
     elif item.layout == "chart" and slide.source_ids and content.chart and len(content.chart.values) == len(content.chart.categories):
         data = content.chart
         try:

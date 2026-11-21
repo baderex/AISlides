@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     research_api_key: str = ""
     research_api_url: str = "https://api.search.brave.com/res/v1/web/search"
+    research_image_api_url: str = "https://api.search.brave.com/res/v1/images/search"
     ai_timeout_seconds: int = 90
     ai_job_token_budget: int = 90000
     ai_job_cost_budget: float = 10

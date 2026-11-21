@@ -49,6 +49,14 @@ def physical(document: Document):
     return tuple(value * 72 for value in document.dimensions)
 
 
+def fit_image(image: Image, document: Document, ratio: float) -> Image:
+    width, height = document.dimensions
+    normalized_ratio = ratio * height / width
+    w = min(image.w, image.h * normalized_ratio)
+    h = min(image.h, image.w / normalized_ratio)
+    return image.model_copy(update={"x": image.x + (image.w - w) / 2, "y": image.y + (image.h - h) / 2, "w": w, "h": h})
+
+
 def flattened(elements, ox=0., oy=0., sx=1., sy=1.):
     for el in sorted(elements, key=lambda element: element.z):
         x, y, w, h = ox + el.x * sx, oy + el.y * sy, el.w * sx, el.h * sy

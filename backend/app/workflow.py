@@ -7,8 +7,8 @@ from app.composition import Intent, Outline, OutlineItem, ResearchBrief, Review,
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
-from app.domain import Skill, Slide, read_document
-from app.imagery import image_configured, render_image
+from app.domain import Skill, Slide, Source, read_document
+from app.imagery import image_configured, render_image, source_web_image
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
 from app.previews import put_preview
 from app.providers import Intelligence, ProviderError
@@ -37,7 +37,10 @@ def pause_for_questions(context, batch, events):
 
 
 def image_ids(assets, context):
-    return {asset.id for asset in assets if asset.media_type.startswith("image/")} | set(context.get("generated_images", []))
+    images = {asset.id for asset in assets if asset.media_type.startswith("image/")} | set(context.get("generated_images", []))
+    if web_image := context.get("web_image"):
+        images.add(web_image["source"]["asset_id"])
+    return images
 
 
 def advance(job_id: str, token: str):
@@ -121,6 +124,9 @@ def lock_presentation(db, job_id):
 
 def process(job_id, token, item, stage, context, assets, skill, ai):
     document = read_document(item.document)
+    web_image = context.get("web_image") if stage in {"review", "revise"} else None
+    if web_image:
+        document.sources.append(Source.model_validate(web_image["source"]))
     brand = skill.brand if skill else None
     events = []
     version = None
@@ -188,9 +194,16 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 direction = answer["value"]
         theme = design(direction, item.request["mode"], skill.theme if skill else None)
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
+        image_guidance = (
+            " Web image search is enabled. When the user requests images, photos, or portraits without asking to generate them, "
+            "set image_query on every slide that needs one. Include the specific subject's name and the desired image type. "
+            "For named people, use their full name and 'official photographic portrait'. Prefer showcase or editorial for these slides. "
+            "Leave image_query empty where the user did not request an image."
+            if item.request["research"] else ""
+        )
         outline = ai.structured(Outline,
             f"Plan exactly {count} slides. Use varied purposeful layouts and provide an actionable story. "
-            "Use chart layouts only when grounded data is available." + style_guidance,
+            "Use chart layouts only when grounded data is available." + style_guidance + image_guidance,
             {**inputs(item, context), "slide_count": count})
         if len(outline.slides) != count:
             raise ProviderError(f"The planning model returned {len(outline.slides)} slides instead of {count}. Retry or choose a different model.")
@@ -202,6 +215,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         events.append(("outline.completed", outline.narrative or "Slide outline ready.", {"outline": context["outline"]}))
         stage, status = "slide", "GENERATING"
     elif stage == "slide":
+        context.pop("web_image", None)
+        context.pop("web_image_warning", None)
         index = context.get("progress_index", len(document.slides))
         outline = Outline.model_validate(context["outline"])
         if index == len(outline.slides):
@@ -232,10 +247,27 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
               "earlier_slide_titles": [slide.title for slide in document.slides[-5:]],
               **inputs(item, context), "generate_image": bool(can_illustrate),
               "image_assets": [{"id": a.id, "name": a.name} for a in assets if a.id in images]}, "slide")
+        web_image_ratio = None
+        if item.request["research"] and part.image_query.strip() and content.image_asset_id not in images:
+            try:
+                found = source_web_image(job_id, token, index, item.owner_id, part.image_query)
+                if found is None:
+                    return None
+                source, web_image_ratio = found
+                if part.layout not in {"showcase", "editorial", "research"}:
+                    part = part.model_copy(update={"layout": "editorial"})
+                document.sources.append(source)
+                images.add(source.asset_id)
+                content.image_asset_id = source.asset_id
+                content.source_ids = [*content.source_ids[:11], source.id]
+                context["web_image"] = {"source": source.model_dump(mode="json"), "ratio": web_image_ratio, "layout": part.layout}
+            except ProviderError as error:
+                context["web_image_warning"] = str(error)
         context["slide_content"] = content.model_dump(mode="json")
         if can_illustrate and content.image_prompt and content.image_asset_id not in images:
             return "image", state, "GENERATING", events, None, None
-        context["draft"] = compose(part, content, document, index, images, brand).model_dump(mode="json")
+        context["draft"] = compose(part, content, document, index, images, brand,
+                                   web_image_ratio=web_image_ratio).model_dump(mode="json")
         stage, status = "review", "REVIEWING"
     elif stage == "image":
         index = context.get("progress_index", len(document.slides))
@@ -269,6 +301,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             return None
         slide = Slide.model_validate(context["draft"])
         images = image_ids(assets, context)
+        if warning := context.get("web_image_warning"):
+            slide.warnings.append(warning)
         initial = {element.id: element.size for element in slide.elements if element.type == "text"}
         slide.warnings.extend(validate_slide(document, slide, images))
         storage = Storage()
@@ -294,6 +328,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         context.pop("slide_content", None)
         context.pop("review_attempted", None)
         context.pop("review_issues", None)
+        context.pop("web_image", None)
+        context.pop("web_image_warning", None)
         events.append(("slide.completed", f"Slide {index + 1} is ready.", {"slide_id": slide.id, "index": index, "warnings": slide.warnings}))
         stage, status = "slide", "GENERATING"
     elif stage == "revise":
@@ -307,7 +343,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         previous = SlideContent.model_validate(context["slide_content"])
         if previous.image_asset_id in images:
             content.image_asset_id = previous.image_asset_id
-        context["draft"] = compose(part, content, document, index, images, brand).model_dump(mode="json")
+        if web_image:
+            part = part.model_copy(update={"layout": web_image["layout"]})
+            source_id = web_image["source"]["id"]
+            content.source_ids = [*content.source_ids[:11], source_id]
+        context["draft"] = compose(part, content, document, index, images, brand,
+                                   web_image_ratio=web_image["ratio"] if web_image else None).model_dump(mode="json")
         events.append(("slide.revised", f"Reworked slide {index + 1} after visual review.", {"index": index}))
         stage, status = "review", "REVIEWING"
     else:

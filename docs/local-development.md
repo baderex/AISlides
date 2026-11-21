@@ -28,6 +28,8 @@ Set `AI_PROVIDER` to pick a default. Use `AI_MODEL` for its global model overrid
 
 Set `RESEARCH_API_KEY` in the root `.env` to enable Web research in the studio. `RESEARCH_API_URL` defaults to `https://api.search.brave.com/res/v1/web/search`. If you override it, use the full URL of an endpoint that accepts Brave Search requests and returns the same response format. Search uses snippets and titles, and references are linked to slides when selected by the model.
 
+With **Web research** enabled, requests for photos or portraits also use Brave Image Search. FrameCraft embeds a preview-sized copy and links the original page in the slide sources. The same key must have Image Search access. You can override the default endpoint with `RESEARCH_IMAGE_API_URL`. The **Generate illustrations** setting controls AI-generated imagery.
+
 Enable the optional illustration control with `IMAGE_PROVIDER=openai` and `IMAGE_OPENAI_API_KEY` or `OPENAI_API_KEY`. Configure `IMAGE_MODEL`, `IMAGE_LIMIT_PER_JOB` and `IMAGE_COST_USD` to set the model, per-deck limit and cost estimate. The worker stores generated illustrations as independent image assets. [OpenAI image generation documentation](https://developers.openai.com/api/docs/guides/image-generation)
 
 For native Ollama, run `ollama pull qwen2.5:7b` and set `AI_PROVIDER=ollama`. The application sends JSON Schema to the [Ollama Chat API](https://docs.ollama.com/api/chat). The offline demo is available from Studio settings for machines without a configured model.
