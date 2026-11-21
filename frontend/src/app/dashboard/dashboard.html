@@ -1,0 +1,171 @@
+@if (authRequired()) {
+  <main class="auth-page">
+    <div class="dialog auth-card">
+      <div class="brand"><span class="brand-mark"><lucide-icon [img]="i.Layers3" [size]="22" /></span><strong>Framecraft<span> Studio</span></strong></div>
+      <h1>{{ authMode() === 'login' ? 'Welcome back' : 'Create your workspace' }}</h1>
+      <form class="dialog-form" (ngSubmit)="signIn()">
+        <label>Email<input type="email" class="field" name="email" [(ngModel)]="email" required autocomplete="email" /></label>
+        <label>Password<input type="password" class="field" name="password" [(ngModel)]="password" required minlength="10" [attr.autocomplete]="authMode() === 'login' ? 'current-password' : 'new-password'" /></label>
+        @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
+        <button type="submit" class="primary" [disabled]="busy()">{{ authMode() === 'login' ? 'Sign in' : 'Create account' }}</button>
+      </form>
+      @if (allowSignup()) { <button class="text-button" type="button" (click)="authMode.set(authMode() === 'login' ? 'register' : 'login')">{{ authMode() === 'login' ? 'Create an account' : 'Back to sign in' }}</button> }
+    </div>
+  </main>
+} @else {
+  <div class="dashboard-shell">
+    <aside class="rail">
+      <a class="brand" routerLink="/" (click)="go('home')" aria-label="Framecraft Studio home">
+        <span class="brand-mark"><lucide-icon [img]="i.Layers3" [size]="21" /></span>
+        <span class="brand-name">Framecraft<small>STUDIO</small></span>
+      </a>
+      <button class="rail-new" type="button" (click)="start()"><lucide-icon [img]="i.Plus" [size]="18" /><span>New presentation</span></button>
+      <nav aria-label="Workspace" class="rail-nav">
+        <span class="rail-label">Workspace</span>
+        <button [class.current]="section() === 'home'" type="button" (click)="go('home')" title="Home"><lucide-icon [img]="i.House" [size]="18" /><span>Home</span></button>
+        <button [class.current]="section() === 'presentations'" type="button" (click)="go('presentations')" title="Presentations"><lucide-icon [img]="i.SquareStack" [size]="18" /><span>Presentations</span></button>
+        <button [class.current]="section() === 'skills'" type="button" (click)="go('skills')" title="Skill library"><lucide-icon [img]="i.LayoutGrid" [size]="18" /><span>Skill library</span></button>
+      </nav>
+      <div class="rail-bottom">
+        <nav class="rail-nav" aria-label="Support">
+          <button type="button" title="Settings" (click)="modal.set('settings')"><lucide-icon [img]="i.Settings2" [size]="18" /><span>Settings</span></button>
+          <button type="button" title="Help and shortcuts" (click)="modal.set('help')"><lucide-icon [img]="i.CircleHelp" [size]="18" /><span>Help & shortcuts</span></button>
+        </nav>
+        <button class="profile" type="button" title="Workspace settings" (click)="modal.set('settings')">
+          <span class="avatar">{{ (user()?.email ?? 'F')[0].toUpperCase() }}</span>
+          <span><b>{{ user()?.local ? 'Local workspace' : 'Your workspace' }}</b><small>{{ user()?.local ? 'Personal studio' : user()?.email }}</small></span>
+          <lucide-icon [img]="i.ChevronDown" [size]="14" class="profile-caret" />
+        </button>
+      </div>
+    </aside>
+    <div class="dashboard-main">
+      <header class="topbar">
+        <span class="crumb">Workspace <lucide-icon [img]="i.ChevronRight" [size]="14" /> <strong>{{ section() === 'skills' ? 'Skill library' : section() === 'presentations' ? 'Presentations' : 'Home' }}</strong></span>
+        <button class="top-settings button" type="button" (click)="modal.set('settings')"><lucide-icon [img]="i.Settings2" [size]="16" /> <span>Studio settings</span></button>
+      </header>
+      <main id="home" class="home-content">
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-pattern" aria-hidden="true"></div>
+          <div class="hero-orbit" aria-hidden="true"><span></span><span></span><span></span><i></i><b></b></div>
+          <div class="hero-inner">
+            <div class="hero-kicker"><lucide-icon [img]="i.Sparkles" [size]="15" /> AI PRESENTATION STUDIO</div>
+            <h1 id="hero-title">Bring your ideas into <em>focus.</em></h1>
+            <p class="hero-description">Start with an idea. Shape it into a presentation that’s yours.</p>
+            <studio-composer [config]="config()" [assets]="assets()" [skill]="selectedSkill()" [busy]="busy()"
+              (generating)="generate($event)" (upload)="upload($event)" (remove)="removeAsset($event)" (clearSkill)="selectedSkill.set(null)" />
+            <div class="suggestions"><span>Try an idea</span>
+              @for (suggestion of suggested; track suggestion.text) { <button type="button" (click)="start(suggestion.prompt)">{{ suggestion.text }} <lucide-icon [img]="i.ArrowUpRight" [size]="12" /></button> }
+            </div>
+          </div>
+        </section>
+        @if (error() && !modal()) { <p class="error" role="alert">{{ error() }}</p> }
+        <section id="presentations" class="dashboard-section">
+          <div class="section-heading">
+            <div><h2>Recent presentations</h2><p>Pick up where you left off.</p></div>
+            <button class="subtle-button" type="button" (click)="go('presentations')">View all <lucide-icon [img]="i.ArrowRight" [size]="15" /></button>
+          </div>
+          @if (loading()) {
+            <div class="empty-row" aria-live="polite">Loading presentations…</div>
+          } @else if (!recent().length) {
+            <div class="empty-row"><span class="empty-icon"><lucide-icon [img]="i.Clock3" [size]="20" /></span>
+              <div><strong>No presentations yet</strong><p>New presentations will appear here.</p></div>
+              <button type="button" class="button" (click)="start()"><lucide-icon [img]="i.Plus" [size]="16" /> Create a presentation</button>
+            </div>
+          } @else {
+            <div class="recent-grid">
+              @for (item of recent().slice(0, section() === 'presentations' ? 100 : 3); track item.id) {
+                <a class="recent-card" [routerLink]="['/presentation', item.id]">
+                  @if (item.thumbnail; as thumbnail) { <div class="recent-art"><studio-canvas [slide]="thumbnail" [aspect]="item.aspect_ratio" /></div> }
+                  @else { <div class="recent-placeholder"><lucide-icon [img]="i.SquareStack" [size]="30" /></div> }
+                  <strong>{{ item.title }}</strong>
+                  <small>{{ item.slide_count }} slides <span>·</span> {{ item.updated | date:'MMM d, y' }}</small>
+                </a>
+              }
+            </div>
+          }
+        </section>
+        <section id="skills" class="dashboard-section library">
+          <div class="section-heading">
+            <div><h2>Skill library</h2><p>Start with a layout and narrative designed for your goal.</p></div>
+            <button class="button" type="button" (click)="modal.set('skill'); error.set('')"><lucide-icon [img]="i.Plus" [size]="17" /> New skill</button>
+          </div>
+          <div class="library-tools">
+            <div class="category-filters" aria-label="Skill categories">
+              @for (entry of categories().slice(0, showAll() ? 100 : 5); track entry) {
+                <button type="button" [class.active]="category() === entry" [attr.aria-pressed]="category() === entry" (click)="category.set(entry)">{{ entry }}</button>
+              }
+            </div>
+            <label class="search-box"><lucide-icon [img]="i.Search" [size]="16" /><input type="search" [ngModel]="search()" (ngModelChange)="search.set($event)" aria-label="Search skills" placeholder="Search skills" /></label>
+          </div>
+          <div class="skill-grid">
+            @for (skill of visibleSkills(); track skill.id) { <studio-skill-card [skill]="skill" (preview)="preview.set($event)" (chosen)="choose($event)" /> }
+            @empty { @if (!loading()) { <p class="quiet">No skills match your search.</p> } }
+          </div>
+          @if (!showAll() && filteredSkills().length > visibleSkills().length) {
+            <button type="button" class="subtle-button all-skills" (click)="showAll.set(true)">View all skills <lucide-icon [img]="i.ArrowRight" [size]="15" /></button>
+          }
+        </section>
+      </main>
+    </div>
+  </div>
+}
+@if (preview(); as skill) {
+  <studio-dialog [title]="skill.name" (closed)="preview.set(null)">
+    <div class="skill-preview-dialog"><studio-skill-card [skill]="skill" (chosen)="choose($event)" /></div>
+    <p>{{ skill.description }}</p>
+    <p class="quiet">Formats {{ skill.formats.join(' · ') }}</p>
+    @if (skill.brand; as brand) {
+      <p class="quiet">{{ brand.layouts.length }} PowerPoint layouts. The exported deck includes the template’s native artwork.</p>
+    } @else if (skill.recipes.length) { <p class="quiet">Slide layouts {{ skill.recipes.join(' · ') }}</p> }
+    <div class="dialog-actions"><a class="button" [href]="apiSkillLink(skill.id)"><lucide-icon [img]="i.Download" [size]="16" /> {{ skill.brand ? 'Download template' : 'Export skill' }}</a><button type="button" class="primary" (click)="choose(skill)">Use skill</button></div>
+  </studio-dialog>
+}
+@if (modal() === 'settings') {
+  <studio-dialog title="Studio settings" (closed)="modal.set(null)">
+    <h3>AI providers</h3>
+    <p class="quiet">Configure provider credentials in the backend .env file and restart the services.</p>
+    <div class="provider-list">
+      @for (provider of config()?.providers ?? []; track provider.id) {
+        <div><span><strong>{{ provider.label }}</strong><small>{{ provider.model || 'Add a model ID in generation settings' }}</small></span><span class="status-chip">{{ provider.demo ? 'Offline demo' : provider.configured ? 'Configured' : 'Setup required' }}</span></div>
+      }
+    </div>
+    <div class="dialog-actions">
+      @if (config()?.providers?.some(isDemo)) { <button type="button" class="primary" (click)="demo()">Try Studio Demo</button> }
+      @if (user() && !user()?.local) { <button type="button" class="button" (click)="signOut(); modal.set(null)">Sign out</button> }
+    </div>
+  </studio-dialog>
+}
+@if (modal() === 'help') {
+  <studio-dialog title="Help & shortcuts" (closed)="modal.set(null)">
+    <p>Describe the audience, goal and desired slide count in your prompt. Add references or select a skill to guide the deck.</p>
+    <p>In the editor, use Delete to remove a selected element, arrow keys to move it, and Control or Command + Z to undo an edit.</p>
+    <p>During a presentation, use the arrow keys to change slides and Escape to exit.</p>
+  </studio-dialog>
+}
+@if (modal() === 'skill') {
+  <studio-dialog title="New skill" (closed)="modal.set(null)">
+    <div class="tab-bar" aria-label="Create skill method">
+      <button type="button" [class.active]="skillMode() === 'scratch'" (click)="skillMode.set('scratch'); skillFile = null">From scratch</button>
+      <button type="button" [class.active]="skillMode() === 'brand'" (click)="skillMode.set('brand'); skillFile = null">Branded PPTX</button>
+      <button type="button" [class.active]="skillMode() === 'reference'" (click)="skillMode.set('reference'); skillFile = null">Reference text</button>
+      <button type="button" [class.active]="skillMode() === 'import'" (click)="skillMode.set('import'); skillFile = null">Import package</button>
+    </div>
+    <form class="dialog-form" (ngSubmit)="addSkill()">
+      @if (skillMode() === 'scratch') {
+        <label>Name<input class="field" name="name" [(ngModel)]="skillName" required maxlength="220" /></label>
+        <label>Category<input class="field" name="category" [(ngModel)]="skillCategory" required maxlength="60" /></label>
+        <label>Description<input class="field" name="description" [(ngModel)]="skillDescription" required maxlength="500" /></label>
+        <label>Writing and layout instructions<textarea class="field" rows="3" name="instructions" [(ngModel)]="skillInstructions" maxlength="3000"></textarea></label>
+      } @else if (skillMode() === 'brand') {
+        <label>PowerPoint template<input class="field" type="file" accept=".pptx" (change)="setFile($event)" /></label>
+        <p class="quiet">Use a 16:9, 4:3, or square deck with editable Slide Master placeholders.</p>
+      } @else if (skillMode() === 'reference') {
+        <label>PowerPoint or PDF<input class="field" type="file" accept=".pptx,.pdf" (change)="setFile($event)" /></label>
+      } @else {
+        <label>Versioned skill package<input class="field" type="file" accept=".json" (change)="setFile($event)" /></label>
+      }
+      @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
+      <div class="dialog-actions"><button type="submit" class="primary" [disabled]="busy()">{{ busy() ? 'Creating skill…' : 'Create skill' }}</button></div>
+    </form>
+  </studio-dialog>
+}

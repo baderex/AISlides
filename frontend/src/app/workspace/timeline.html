@@ -1,0 +1,50 @@
+<div class="timeline" aria-live="polite">
+  @for (entry of entries(); track entry.id) {
+    @switch (entry.kind) {
+      @case ('thinking') {
+        <details class="agent-thinking" aria-live="off">
+          <summary>
+            <lucide-icon [img]="i.Activity" [size]="14" />
+            <strong>Thinking</strong>
+            <small>{{ entry.events.length }} {{ entry.events.length === 1 ? 'update' : 'updates' }}</small>
+            <lucide-icon class="thinking-chevron" [img]="i.ChevronDown" [size]="14" />
+          </summary>
+          <ol>
+            @for (event of entry.events; track event.id) {
+              <li>
+                <span>{{ event.payload.message }}</span>
+                <time>{{ event.timestamp | date:'shortTime' }}</time>
+              </li>
+            }
+          </ol>
+        </details>
+      }
+      @case ('warning') {
+        <article class="agent-event agent-review">
+          <span class="event-icon"><lucide-icon [img]="i.CircleHelp" [size]="14" /></span>
+          <div>
+            <strong>{{ entry.event.payload.index !== undefined ? 'Slide ' + (entry.event.payload.index + 1) + ' review notes' : 'Review notes' }}</strong>
+            @for (warning of entry.event.payload.warnings ?? []; track $index) { <small class="event-warning">{{ warning }}</small> }
+          </div>
+        </article>
+      }
+      @case ('message') {
+        @let event = entry.event;
+        @if (event.type === 'conversation.user') {
+          <article class="user-message"><span>You</span><p>{{ event.payload.message }}</p></article>
+        } @else {
+          <article class="agent-event" [class.event-failed]="event.type === 'generation.failed'">
+            <span class="event-icon"><lucide-icon [img]="event.type === 'generation.completed' ? i.Check : i.Activity" [size]="14" /></span>
+            <div>
+              @if (event.payload.outline) { <strong>Slide outline ready</strong> }
+              @if (!event.payload.outline || event.payload.message !== 'Slide outline ready.') { <p>{{ event.payload.message }}</p> }
+              @for (warning of event.payload.warnings ?? []; track $index) { <small class="event-warning">{{ warning }}</small> }
+              @for (issue of event.payload.uncertainties ?? []; track $index) { <small class="event-warning">{{ issue }}</small> }
+              <time>{{ event.timestamp | date:'shortTime' }}</time>
+            </div>
+          </article>
+        }
+      }
+    }
+  }
+</div>

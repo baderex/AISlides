@@ -1,0 +1,31 @@
+@let plan = summary();
+<section aria-label="Generation plan">
+  <button type="button" class="plan-toggle" [attr.aria-expanded]="expanded()" aria-controls="generation-plan-steps"
+    (click)="expanded.set(!expanded())">
+    <span class="plan-mark"><lucide-icon [img]="i.Layers3" [size]="15" /></span>
+    <span class="plan-heading"><strong>Generation plan</strong><small>{{ plan.count }} of {{ plan.tasks.length }} tasks complete</small></span>
+    <lucide-icon class="plan-chevron" [class.expanded]="expanded()" [img]="i.ChevronDown" [size]="16" />
+  </button>
+  <progress class="plan-progress" aria-label="Generation progress" [value]="plan.count" [max]="plan.tasks.length"></progress>
+  <div id="generation-plan-steps" [hidden]="!expanded()">
+    @if (expanded()) {
+      <ol #steps class="plan-steps">
+        @for (task of plan.tasks; track task.id) {
+          <li [class.plan-done]="task.done" [class.plan-active]="task.id === plan.active"
+            [attr.aria-current]="task.id === plan.active ? 'step' : null">
+            <span class="plan-task-icon" aria-hidden="true">
+              @if (task.done) { <lucide-icon [img]="i.Check" [size]="11" /> }
+            </span>
+            @if (task.done) {
+              <span class="sr-only">Completed </span><s>{{ task.label }}</s>
+            } @else {
+              <span>{{ task.label }}</span>
+            }
+            @if (task.id === plan.active && plan.state) { <small class="plan-state">{{ plan.state }}</small> }
+          </li>
+        }
+      </ol>
+      @if (!plan.active && plan.state) { <p class="plan-interruption">{{ plan.state }}</p> }
+    }
+  </div>
+</section>

@@ -1,0 +1,51 @@
+<form class="composer" (submit)="$event.preventDefault(); submit()">
+  <textarea id="presentation-prompt" [formControl]="prompt" rows="3" maxlength="16000"
+    aria-label="Describe your presentation" placeholder="Describe the presentation you want to create..."></textarea>
+  @if (assets().length || skill()) {
+    <div class="composer-assets">
+      @if (skill(); as picked) { <span class="attachment"><lucide-icon [img]="i.Layers3" [size]="14" />{{ picked.name }} <button type="button" (click)="clearSkill.emit()" aria-label="Remove skill"><lucide-icon [img]="i.X" [size]="13" /></button></span> }
+      @for (asset of assets(); track asset.id) {
+        <span class="attachment"><lucide-icon [img]="i.File" [size]="14" />{{ asset.name }} <button type="button" (click)="remove.emit(asset.id)" [attr.aria-label]="'Remove ' + asset.name"><lucide-icon [img]="i.X" [size]="13" /></button></span>
+      }
+    </div>
+  }
+  <div class="composer-tools">
+    <div class="composer-options">
+      <input #picker type="file" multiple hidden accept=".pdf,.pptx,.docx,.txt,.md,.csv,.png,.jpeg,.jpg,.webp" (change)="files($event)" />
+      <button type="button" class="tool-button attach" (click)="picker.click()" title="Attach documents or images" aria-label="Attach reference"><lucide-icon [img]="i.Paperclip" [size]="18" /></button>
+      <div class="select-wrap tool-button"><lucide-icon [img]="i.Zap" [size]="15" />
+        <select [formControl]="provider" aria-label="AI model provider">
+          <option value="">{{ (config()?.providers | providerLabel: config()?.default) || 'AI model' }}</option>
+          @for (entry of config()?.providers ?? []; track entry.id) {
+            <option [value]="entry.id">{{ entry.label }}{{ entry.configured ? '' : ' · Setup required' }}</option>
+          }
+        </select><lucide-icon [img]="i.ChevronDown" [size]="12" />
+      </div>
+      <button type="button" class="tool-button" title="Generation settings" [attr.aria-expanded]="advanced()" (click)="advanced.set(!advanced())"><lucide-icon [img]="i.Settings2" [size]="16" /> <span>Settings</span></button>
+    </div>
+    <button class="primary generate" type="submit" [disabled]="busy()"><lucide-icon [img]="i.Sparkles" [size]="17" />{{ busy() ? 'Creating…' : 'Generate slides' }}<lucide-icon [img]="i.ArrowRight" [size]="16" /></button>
+  </div>
+  @if (advanced()) {
+    <div class="composer-advanced">
+      <label>Model ID <input class="field" placeholder="Provider default" [formControl]="model" maxlength="150" /></label>
+      <label class="check-option"><input type="checkbox" [checked]="research()" [disabled]="!config()?.research" (change)="research.set($any($event.target).checked)" /> Web research</label>
+      @if (config()?.images) {
+        <label class="check-option"><input type="checkbox" [checked]="images()" (change)="images.set($any($event.target).checked)" /> Generate illustrations</label>
+      }
+    </div>
+  }
+</form>
+<div class="generation-options">
+  <div class="mode-tabs" aria-label="Generation mode">
+    <button type="button" [class.selected]="mode() === 'professional'" [attr.aria-pressed]="mode() === 'professional'" (click)="mode.set('professional')"><lucide-icon [img]="i.Layers3" [size]="15" />Professional</button>
+    <button type="button" [class.selected]="mode() === 'creative'" [attr.aria-pressed]="mode() === 'creative'" (click)="mode.set('creative')"><lucide-icon [img]="i.Sparkles" [size]="15" />Creative</button>
+  </div>
+  <div class="select-wrap ratio-select"><lucide-icon [img]="i.Square" [size]="14" />
+    <select [formControl]="aspect" aria-label="Slide aspect ratio">
+      @for (ratio of formats(); track ratio) { <option [value]="ratio">{{ ratio }}</option> }
+    </select><lucide-icon [img]="i.ChevronDown" [size]="12" />
+  </div>
+  <button type="button" class="guide-toggle" [attr.aria-pressed]="guide()" (click)="guide.set(!guide())">
+    <span class="switch" [class.on]="guide()"></span> Guide mode
+  </button>
+</div>

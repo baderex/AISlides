@@ -1,0 +1,148 @@
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, create_engine, event
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+
+from app.config import settings
+
+
+def uid() -> str:
+    return str(uuid4())
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    email: Mapped[str] = mapped_column(String(254), unique=True)
+    password: Mapped[str] = mapped_column(Text, default="")
+
+
+class LoginSession(Base):
+    __tablename__ = "sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    expires: Mapped[int]
+
+
+class SkillRecord(Base):
+    __tablename__ = "skills"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
+    manifest: Mapped[dict] = mapped_column(JSON)
+
+
+class PresentationRecord(Base):
+    __tablename__ = "presentations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30), default="CREATED")
+    request: Mapped[dict] = mapped_column(JSON)
+    document: Mapped[dict] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created: Mapped[str] = mapped_column(String(40), default=now)
+    updated: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class Version(Base):
+    __tablename__ = "versions"
+    presentation_id: Mapped[str] = mapped_column(ForeignKey("presentations.id", ondelete="CASCADE"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document: Mapped[dict] = mapped_column(JSON)
+    label: Mapped[str] = mapped_column(String(100))
+    created: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    presentation_id: Mapped[str] = mapped_column(ForeignKey("presentations.id", ondelete="CASCADE"), index=True)
+    state: Mapped[str] = mapped_column(String(20), default="queued")
+    checkpoint: Mapped[str] = mapped_column(String(20), default="analyze")
+    context: Mapped[dict] = mapped_column(JSON, default=dict)
+    lease: Mapped[str | None] = mapped_column(String(36))
+    lease_owner: Mapped[str | None] = mapped_column(String(36))
+    lease_until: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created: Mapped[str] = mapped_column(String(40), default=now)
+    updated: Mapped[str] = mapped_column(String(40), default=now)
+    __table_args__ = (Index("ix_jobs_queue", "state", "lease_until", "created"),)
+
+
+class StudioEvent(Base):
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    presentation_id: Mapped[str] = mapped_column(ForeignKey("presentations.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    type: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict] = mapped_column(JSON)
+    timestamp: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class Asset(Base):
+    __tablename__ = "assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    media_type: Mapped[str] = mapped_column(String(100))
+    size: Mapped[int]
+    extracted: Mapped[str] = mapped_column(Text, default="")
+    created: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class ExportRecord(Base):
+    __tablename__ = "exports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    presentation_id: Mapped[str] = mapped_column(ForeignKey("presentations.id", ondelete="CASCADE"), index=True)
+    revision: Mapped[int]
+    format: Mapped[str] = mapped_column(String(8))
+    created: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    seen: Mapped[int]
+
+
+class SlidePreview(Base):
+    __tablename__ = "slide_previews"
+    presentation_id: Mapped[str] = mapped_column(ForeignKey("presentations.id", ondelete="CASCADE"), primary_key=True)
+    slide_id: Mapped[str] = mapped_column(String(70), primary_key=True)
+    storage_key: Mapped[str] = mapped_column(String(36))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    created: Mapped[str] = mapped_column(String(40), default=now)
+
+
+def database_engine():
+    url = make_url(settings().database_url)
+    sqlite = url.get_backend_name() == "sqlite"
+    if sqlite:
+        from pathlib import Path
+        url = url.set(drivername="sqlite")
+        if url.database and url.database != ":memory:":
+            Path(url.database).parent.mkdir(parents=True, exist_ok=True)
+    elif url.drivername in {"postgresql", "postgresql+asyncpg"}:
+        url = url.set(drivername="postgresql+psycopg")
+    engine = create_engine(url, pool_pre_ping=True, connect_args={"timeout": 15} if sqlite else {})
+    if sqlite:
+        @event.listens_for(engine, "connect")
+        def sqlite_options(connection, _):
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA journal_mode=WAL")
+    return engine
+
+
+engine = database_engine()
+Session = sessionmaker(engine, expire_on_commit=False)
