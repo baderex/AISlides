@@ -226,10 +226,8 @@ Skill.model_rebuild()
 
 class CreatePresentation(Contract):
     prompt: str = Field(min_length=3, max_length=16000)
-    mode: Literal["professional", "creative", "guided"] = "professional"
+    mode: Literal["professional", "creative", "guided"] = Field(default="professional", deprecated=True)
     aspect_ratio: Aspect = "16:9"
-    provider: Identifier | None = None
-    model: str | None = Field(default=None, max_length=150)
     skill_id: Identifier | None = None
     asset_ids: list[Identifier] = Field(default_factory=list, max_length=15)
     research: bool = False

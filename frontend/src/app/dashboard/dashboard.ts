@@ -1,44 +1,53 @@
 import { DatePipe } from '@angular/common';
-import { Component, computed, inject, signal, viewChild } from '@angular/core';
+import { afterNextRender, Component, computed, ElementRef, inject, Injector, signal, viewChild } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
-import { Router, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink, RouterLinkActive } from '@angular/router';
 import { HttpErrorResponse } from '@angular/common/http';
 import { Api, errorMessage } from '../api';
 import { Dialog } from '../dialog';
 import { icons, StudioIcon } from '../icons';
-import { Asset, CreatePresentation, PresentationSummary, Provider, ProviderSettings, Skill } from '../models';
+import { Asset, CreatePresentation, GenerationCapabilities, LibrarySkill, PresentationSummary, Skill } from '../models';
 import { SlideCanvas } from '../workspace/canvas';
 import { Composer } from './composer';
 import { SkillCard } from './skill-card';
 
+type DeleteTarget = { kind: 'presentation' | 'skill'; id: string; name: string };
+
 @Component({
   selector: 'studio-dashboard',
-  imports: [Composer, SkillCard, Dialog, FormsModule, DatePipe, RouterLink, SlideCanvas, StudioIcon],
+  imports: [Composer, SkillCard, Dialog, FormsModule, DatePipe, RouterLink, RouterLinkActive, SlideCanvas, StudioIcon],
   templateUrl: './dashboard.html',
 })
 export class Dashboard {
   private api = inject(Api);
   private router = inject(Router);
+  private injector = inject(Injector);
+  private routeUrl = toSignal(inject(ActivatedRoute).url, { requireSync: true });
   private composer = viewChild(Composer);
+  private presentationSection = viewChild<ElementRef<HTMLElement>>('presentationSection');
+  private skillSection = viewChild<ElementRef<HTMLElement>>('skillSection');
   readonly i = icons;
-  readonly skills = signal<Skill[]>([]);
+  readonly skills = signal<LibrarySkill[]>([]);
   readonly recent = signal<PresentationSummary[]>([]);
-  readonly config = signal<ProviderSettings | null>(null);
+  readonly capabilities = signal<GenerationCapabilities | null>(null);
   readonly user = signal<{email: string; local: boolean} | null>(null);
   readonly loading = signal(true);
   readonly busy = signal(false);
   readonly error = signal('');
+  readonly deletedKind = signal<DeleteTarget['kind'] | null>(null);
   readonly authRequired = signal(false);
   readonly allowSignup = signal(false);
   readonly authMode = signal<'login' | 'register'>('login');
   readonly assets = signal<Asset[]>([]);
   readonly selectedSkill = signal<Skill | null>(null);
   readonly preview = signal<Skill | null>(null);
-  readonly section = signal('home');
+  readonly section = computed(() => this.routeUrl()[0]?.path ?? 'home');
+  readonly visiblePresentations = computed(() => this.section() === 'home' ? this.recent().slice(0, 3) : this.recent());
+  readonly deleteTarget = signal<DeleteTarget | null>(null);
   readonly search = signal('');
   readonly category = signal('All skills');
-  readonly showAll = signal(false);
-  readonly modal = signal<'settings' | 'skill' | 'help' | null>(null);
+  readonly modal = signal<'skill' | 'help' | null>(null);
   readonly skillMode = signal<'scratch' | 'brand' | 'reference' | 'import'>('scratch');
   readonly suggested = [
     { text: 'Quarterly business review', prompt: 'Create an 8-slide quarterly business review for an executive leadership team.' },
@@ -52,7 +61,7 @@ export class Dashboard {
     return this.skills().filter(skill => (category === 'All skills' || skill.category === category) &&
       (!term || [skill.name, skill.description, skill.category, ...skill.tags].some(text => text.toLowerCase().includes(term))));
   });
-  readonly visibleSkills = computed(() => this.showAll() || this.category() !== 'All skills' || this.search()
+  readonly visibleSkills = computed(() => this.section() === 'skills' || this.category() !== 'All skills' || this.search()
     ? this.filteredSkills() : this.filteredSkills().slice(0, 3));
   email = '';
   password = '';
@@ -61,7 +70,6 @@ export class Dashboard {
   skillDescription = '';
   skillInstructions = '';
   skillFile: File | null = null;
-  isDemo(provider: Provider) { return provider.demo; }
   apiSkillLink(id: string) { return this.api.skillLink(id); }
 
   constructor() { void this.load(); }
@@ -69,13 +77,16 @@ export class Dashboard {
   async load() {
     this.loading.set(true);
     this.error.set('');
+    this.deletedKind.set(null);
     try {
       this.user.set(await this.api.session());
       this.authRequired.set(false);
-      const [decks, skills, config] = await Promise.all([this.api.list(), this.api.skills(), this.api.providers()]);
+      const [decks, skills, capabilities] = await Promise.all([
+        this.api.list(), this.api.skills(), this.api.capabilities().catch(() => null),
+      ]);
       this.recent.set(decks);
       this.skills.set(skills);
-      this.config.set(config);
+      this.capabilities.set(capabilities);
     } catch (error) {
       if (error instanceof HttpErrorResponse && error.status === 401) {
         this.authRequired.set(true);
@@ -96,18 +107,12 @@ export class Dashboard {
     await this.action(async () => { await this.api.logout(); this.user.set(null); await this.load(); });
   }
 
-  go(section: string) {
-    this.section.set(section);
-    if (section === 'skills') this.showAll.set(true);
-    document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  start(prompt?: string) { this.go('home'); this.composer()?.start(prompt); }
-
-  demo() {
-    this.modal.set(null);
-    this.composer()?.provider.setValue('demo');
-    this.start(this.suggested[2].prompt);
+  async start(prompt?: string) {
+    if (this.section() === 'home') {
+      this.composer()?.start(prompt);
+    } else if (await this.router.navigate(['/'])) {
+      afterNextRender({ write: () => this.composer()?.start(prompt) }, { injector: this.injector });
+    }
   }
 
   async upload(files: File[]) {
@@ -125,13 +130,47 @@ export class Dashboard {
   choose(skill: Skill) {
     this.selectedSkill.set(skill);
     this.preview.set(null);
-    this.start();
+    void this.start();
   }
 
   async generate(request: CreatePresentation) {
     await this.action(async () => {
       const created = await this.api.create(request);
       await this.router.navigate(['/presentation', created.id]);
+    });
+  }
+
+  showDelete(kind: DeleteTarget['kind'], id: string, name: string) {
+    this.error.set('');
+    this.deletedKind.set(null);
+    this.deleteTarget.set({ kind, id, name });
+  }
+
+  closeDelete() {
+    if (this.busy()) return;
+    this.error.set('');
+    this.deleteTarget.set(null);
+  }
+
+  async deleteItem(item: DeleteTarget) {
+    await this.action(async () => {
+      const isSkill = item.kind === 'skill';
+      try {
+        await (isSkill ? this.api.removeSkill(item.id) : this.api.remove(item.id));
+      } catch (error) {
+        if (!(error instanceof HttpErrorResponse) || error.status !== 404) throw error;
+      }
+      if (isSkill) {
+        this.skills.update(items => items.filter(skill => skill.id !== item.id));
+        if (this.selectedSkill()?.id === item.id) this.selectedSkill.set(null);
+        if (!this.categories().includes(this.category())) this.category.set('All skills');
+      } else {
+        this.recent.update(items => items.filter(presentation => presentation.id !== item.id));
+      }
+      this.deleteTarget.set(null);
+      this.deletedKind.set(item.kind);
+      const section = isSkill ? this.skillSection : this.presentationSection;
+      afterNextRender({ write: () => section()?.nativeElement.focus() }, { injector: this.injector });
     });
   }
 
@@ -152,7 +191,7 @@ export class Dashboard {
         const asset = await this.api.upload(this.skillFile);
         skill = await this.api.skillFromAsset(asset.id, this.skillMode() === 'brand');
       }
-      this.skills.update(items => [...items, skill]);
+      this.skills.update(items => [...items, { ...skill, can_delete: true }]);
       this.modal.set(null);
       this.skillName = this.skillDescription = this.skillInstructions = '';
       this.skillFile = null;

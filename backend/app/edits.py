@@ -43,7 +43,7 @@ class ApplyEdit(Contract):
 
 
 def propose(item, document, request):
-    ai = Intelligence(item.request.get("provider"), item.request.get("model"))
+    ai = Intelligence()
     if ai.provider == "demo":
         raise ProviderError("Conversational editing requires a configured live AI provider.")
     slides = [s for s in document.slides if not request.slide_id or s.id == request.slide_id]

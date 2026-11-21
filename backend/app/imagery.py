@@ -6,18 +6,36 @@ import httpx
 from PIL import Image
 from sqlalchemy import select
 
-from app.config import settings
+from app.config import Settings, settings
 from app.db import Asset, Job, Session
 from app.domain import Source
 from app.presentations import begin_write
-from app.providers import ProviderError
+from app.providers import ProviderError, provider_for
 from app.research import find_image
 from app.storage import Storage, inspect_upload
 
 
-def image_configured():
-    conf = settings()
-    return conf.image_provider == "openai" and bool(conf.image_openai_api_key or conf.openai_api_key)
+IMAGE_PROVIDER_DEFAULTS = {
+    "openai": ("https://api.openai.com/v1/images/generations", "gpt-image-1.5"),
+    "openrouter": ("https://openrouter.ai/api/v1/images", "bytedance-seed/seedream-4.5"),
+}
+IMAGE_EXTENSIONS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}
+
+
+def image_api_key(config: Settings) -> str:
+    api_key = config.image_gen_api_key.strip()
+    if api_key:
+        return api_key
+    if config.image_provider == "openai":
+        legacy_key = config.image_openai_api_key.strip()
+        if legacy_key:
+            return legacy_key
+    return config.llm_api_key.strip() if provider_for(config) == config.image_provider else ""
+
+
+def image_configured() -> bool:
+    config = settings()
+    return config.image_provider in IMAGE_PROVIDER_DEFAULTS and bool(image_api_key(config))
 
 
 def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str) -> str | None:
@@ -26,19 +44,40 @@ def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str
         if db.get(Asset, key):
             return key
     config = settings()
-    api_key = config.image_openai_api_key or config.openai_api_key
+    defaults = IMAGE_PROVIDER_DEFAULTS.get(config.image_provider)
+    api_key = image_api_key(config)
+    if defaults is None or not api_key:
+        raise ProviderError("The image provider is unavailable.")
+    default_url, default_model = defaults
+    payload: dict[str, str | int] = {
+        "model": config.image_model.strip() or default_model,
+        "prompt": "Create a presentation illustration without captions, text or logos. " + prompt,
+    }
+    if config.image_provider == "openai":
+        payload.update(size="1024x1024", quality="medium", n=1)
     try:
-        response = httpx.post("https://api.openai.com/v1/images/generations",
+        response = httpx.post(
+            config.image_gen_url.strip() or default_url,
             headers={"Authorization": f"Bearer {api_key}"},
-            json={"model": config.image_model, "size": "1024x1024", "quality": "medium", "n": 1,
-                  "prompt": "Create a presentation illustration without captions, text or logos. " + prompt},
-            timeout=config.ai_timeout_seconds)
+            json=payload,
+            timeout=config.ai_timeout_seconds,
+        )
         response.raise_for_status()
         encoded = response.json()["data"][0]["b64_json"]
+        if not isinstance(encoded, str):
+            raise ValueError("Generated image data must be a base64 string.")
         if len(encoded) > config.asset_limit_bytes * 4 // 3 + 8:
             raise ValueError("Generated image exceeds the asset size limit.")
-        media_type, raw, _ = inspect_upload("illustration.png", base64.b64decode(encoded, validate=True))
-    except (httpx.HTTPError, ValueError, KeyError, IndexError, OSError) as error:
+        decoded = base64.b64decode(encoded, validate=True)
+        if len(decoded) > config.asset_limit_bytes:
+            raise ValueError("Generated image exceeds the asset size limit.")
+        with Image.open(BytesIO(decoded), formats=list(IMAGE_EXTENSIONS)) as image:
+            extension = IMAGE_EXTENSIONS[image.format]
+        media_type, raw, _ = inspect_upload("illustration" + extension, decoded)
+        if len(raw) > config.asset_limit_bytes:
+            raise ValueError("Generated image exceeds the asset size limit.")
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError, IndexError, TypeError, OSError,
+            Image.DecompressionBombError) as error:
         raise ProviderError("The image service did not return a usable illustration.") from error
     asset = Asset(id=key, owner_id=owner_id, name=f"Generated slide {index + 1}.png", media_type=media_type, size=len(raw))
     return key if save_image(job_id, token, asset, raw) else None

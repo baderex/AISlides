@@ -1,7 +1,7 @@
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
-import { Answer, Asset, CreatePresentation, Deck, EditPreview, ExportReview, Presentation, PresentationSummary, ProviderSettings, QuestionBatch, Skill, Version } from './models';
+import { Answer, Asset, CreatePresentation, Deck, EditPreview, ExportReview, GenerationCapabilities, LibrarySkill, Presentation, PresentationSummary, QuestionBatch, Skill, Version } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class Api {
@@ -17,9 +17,10 @@ export class Api {
   list() { return firstValueFrom(this.http.get<PresentationSummary[]>(this.root + '/presentations')); }
   create(request: CreatePresentation) { return firstValueFrom(this.http.post<Presentation>(this.root + '/presentations', request)); }
   deck(id: string) { return firstValueFrom(this.http.get<Presentation>(this.url(id))); }
-  providers() { return firstValueFrom(this.http.get<ProviderSettings>(this.root + '/providers')); }
-  skills() { return firstValueFrom(this.http.get<Skill[]>(this.root + '/skills')); }
+  capabilities() { return firstValueFrom(this.http.get<GenerationCapabilities>(this.root + '/capabilities')); }
+  skills() { return firstValueFrom(this.http.get<LibrarySkill[]>(this.root + '/skills')); }
   addSkill(skill: Omit<Skill, 'id'>) { return firstValueFrom(this.http.post<Skill>(this.root + '/skills', skill)); }
+  removeSkill(id: string) { return firstValueFrom(this.http.delete(this.root + '/skills/' + id)); }
   skillFromAsset(id: string, branded: boolean) {
     return firstValueFrom(this.http.post<Skill>(this.root + '/skills/from-asset/' + id, {}, { params: { branded } }));
   }

@@ -8,7 +8,7 @@ Build Angular with `npm ci` and `npm run build` in the frontend directory. Serve
 - `DATABASE_URL=postgresql+psycopg://studio:...@db.example.com/studio`. Enable TLS and use a least-privileged service role.
 - `JOB_BACKEND=redis` and `REDIS_URL=rediss://...`. Redis dispatches queued job IDs. SQL keeps the authoritative job records, lease tokens and checkpoints. Workers recover queued jobs through SQL if a dispatch is missed.
 - `STORAGE_BACKEND=s3`, `S3_BUCKET=...`, and optional `S3_ENDPOINT=...` for an S3-compatible service. Use AWS-standard credential sources scoped to the bucket. Keep the bucket private and enable versioning according to your retention requirements.
-- Configure provider credentials through environment-based secrets. Set token and cost budgets with `AI_JOB_TOKEN_BUDGET` and `AI_JOB_COST_BUDGET`. Cost estimates use the operator-supplied `AI_INPUT_USD_PER_MILLION` and `AI_OUTPUT_USD_PER_MILLION`.
+- Set `LLM_API_URL` and `LLM_MODEL_ID` in `backend/.env`. Supply `LLM_API_KEY` through environment-based secrets. Set token and cost budgets with `AI_JOB_TOKEN_BUDGET` and `AI_JOB_COST_BUDGET`. Cost estimates use the operator-supplied `AI_INPUT_USD_PER_MILLION` and `AI_OUTPUT_USD_PER_MILLION`.
 - To enable reviewed PowerPoint downloads, provide LibreOffice Impress and the deck fonts on the API host. Run the unprivileged API service with resource limits for document rendering. Set the proxy timeout longer than `POWERPOINT_REVIEW_TIMEOUT` (45 seconds by default) to allow time for conversion and inspection.
 
 From the backend working directory, run `alembic upgrade head`, `python -m app.cli seed`, then `python -m app.cli create-user user@example.com` to provision an account. Secure session cookies require HTTPS.

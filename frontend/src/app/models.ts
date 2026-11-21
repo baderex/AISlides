@@ -1,5 +1,4 @@
 export type Aspect = '16:9' | '4:3' | '1:1';
-export type Mode = 'professional' | 'creative' | 'guided';
 export type Status = 'CREATED' | 'ANALYZING' | 'WAITING_FOR_USER' | 'RESEARCHING' | 'PLANNING' | 'GENERATING' | 'REVIEWING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 export type Layout = 'cover' | 'section' | 'summary' | 'comparison' | 'timeline' | 'process' | 'metrics' | 'chart' | 'showcase' | 'editorial' | 'research' | 'quote' | 'closing';
 
@@ -29,8 +28,8 @@ export interface PresentationSummary {
   aspect_ratio: Aspect; thumbnail: Slide | null;
 }
 export interface CreatePresentation {
-  prompt: string; mode: Mode; aspect_ratio: Aspect; provider: string | null;
-  model: string | null; skill_id: string | null; asset_ids: string[]; research: boolean; generate_images: boolean; generate: boolean;
+  prompt: string; aspect_ratio: Aspect;
+  skill_id: string | null; asset_ids: string[]; research: boolean; generate_images: boolean; generate: boolean;
 }
 export interface Presentation extends PresentationSummary { document: Deck; request: CreatePresentation }
 export interface Skill {
@@ -38,13 +37,13 @@ export interface Skill {
   audience: string; instructions: string; recipes: Layout[]; theme: Theme; preview: 'strategy' | 'pitch' | 'research' | 'product' | 'data' | 'education';
   brand?: {layouts: {index: number; name: string}[]} | null;
 }
+export interface LibrarySkill extends Skill { can_delete: boolean }
 export interface ExportReview {
   id: string;
   revision: number;
   slides: {number: number; title: string; image: string; issues: {code: string; message: string}[]}[];
 }
-export interface Provider { id: string; label: string; model: string; configured: boolean; demo: boolean; vision: boolean }
-export interface ProviderSettings { providers: Provider[]; default: string; research: boolean; images: boolean }
+export interface GenerationCapabilities { research: boolean; images: boolean }
 export interface Asset { id: string; name: string; media_type: string; size: number }
 export interface Version { revision: number; label: string; created: string }
 export interface StudioEvent {

@@ -7,7 +7,7 @@ from pptx import Presentation
 from pypdf import PdfReader
 from sqlalchemy import select, update
 
-from app.db import Job, Session
+from app.db import Job, PresentationRecord, Session
 from app.main import app
 from app.api import fetch_events
 from app.queue import claim
@@ -24,14 +24,26 @@ def work(steps=100):
 
 
 def create(client, prompt="Generate three slides about quantum computing.", **settings):
-    response = client.post("/api/v1/presentations", json={"prompt": prompt, "provider": "demo", **settings})
+    response = client.post("/api/v1/presentations", json={"prompt": prompt, **settings})
     assert response.status_code == 201, response.text
     return f"/api/v1/presentations/{response.json()['id']}"
+
+
+def test_create_rejects_model_overrides():
+    client = TestClient(app)
+    response = client.post("/api/v1/presentations", json={
+        "prompt": "Generate three slides about quantum computing.", "provider": "demo", "model": "override",
+    })
+    assert response.status_code == 422
+    assert {issue["loc"][-1] for issue in response.json()["detail"]} == {"provider", "model"}
 
 
 def test_guided_workflow_and_native_export():
     client = TestClient(app)
     path = create(client)
+    with Session.begin() as db:
+        item = db.get(PresentationRecord, path.rsplit("/", 1)[1])
+        item.request = {**item.request, "provider": "unused-legacy-provider", "model": "unused-legacy-model"}
     work(2)
     assert client.get(path).json()["status"] == "WAITING_FOR_USER"
     waiting = client.get(f"{path}/questions").json()
@@ -140,14 +152,16 @@ def test_atomic_claim():
 
 def test_provider_failure_keeps_checkpoint(monkeypatch):
     from app.config import settings
-    monkeypatch.setattr(settings(), "openai_api_key", "")
+    monkeypatch.setattr(settings(), "app_env", "development")
+    monkeypatch.setattr(settings(), "llm_api_url", "https://api.openai.com/v1")
+    monkeypatch.setattr(settings(), "llm_api_key", "")
     client = TestClient(app)
-    path = create(client, provider="openai")
+    path = create(client)
     work()
     assert client.get(path).json()["status"] == "FAILED"
     with Session() as db:
         job = db.scalar(select(Job))
-        assert job.checkpoint == "analyze" and "Configure" in job.error
+        assert job.checkpoint == "analyze" and "LLM_MODEL_ID" in job.error
     assert client.post(path + "/generate").status_code == 202
 
 
@@ -162,3 +176,12 @@ def test_owner_isolation_and_upload_validation():
     uploaded = first.post("/api/v1/assets", files={"file": ("notes.txt", b"Project context", "text/plain")}).json()
     assert second.get("/api/v1/assets/" + uploaded["id"]).status_code == 404
     assert second.post("/api/v1/presentations", json={"prompt": "A request", "asset_ids": [uploaded["id"]]}).status_code == 422
+    created = first.post("/api/v1/skills", json={"name": "Private skill", "description": "Custom recipe", "category": "Custom"})
+    assert created.status_code == 201
+    skill_id = created.json()["id"]
+    library = {item["id"]: item for item in first.get("/api/v1/skills").json()}
+    assert library[skill_id]["can_delete"] and not library["strategy"]["can_delete"]
+    assert second.delete(f"/api/v1/skills/{skill_id}").status_code == 404
+    assert first.delete("/api/v1/skills/strategy").status_code == 404
+    assert first.get(f"/api/v1/skills/{skill_id}").status_code == 200
+    assert first.get("/api/v1/skills/strategy").status_code == 200
