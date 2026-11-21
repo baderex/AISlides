@@ -9,11 +9,12 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Inches
 from sqlalchemy import select
 
-from app.composition import ResearchBrief
+from app.composition import Outline, ResearchBrief
 from app.config import settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
 from app.main import app
 from app.providers import Intelligence
+from app.questions import Clarification
 from app.queue import claim
 from app.workflow import advance
 from test_workflow import create, work
@@ -120,3 +121,67 @@ def test_generated_illustration_is_embedded(monkeypatch):
     assert response.status_code == 200
     deck = Presentation(io.BytesIO(response.content))
     assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in deck.slides[0].shapes)
+
+
+def test_web_research_embeds_and_credits_a_requested_portrait(monkeypatch):
+    client = TestClient(app)
+    configuration = settings()
+    monkeypatch.setattr(configuration, "research_api_key", "test-search-token")
+    monkeypatch.setattr(configuration, "research_api_url", "https://api.search.brave.com/res/v1/web/search")
+    monkeypatch.setattr(configuration, "research_image_api_url", "https://api.search.brave.com/res/v1/images/search")
+    monkeypatch.setattr(configuration, "vision_model", "")
+    picture = io.BytesIO()
+    Image.new("RGB", (300, 450), "blue").save(picture, "JPEG")
+    source_url = "https://museum.gov/collection/portrait"
+    thumbnail = "https://imgs.search.brave.com/portrait"
+    downloads = []
+
+    def respond(request):
+        if request.url.host == "api.search.brave.com":
+            assert request.headers["X-Subscription-Token"] == "test-search-token"
+            assert request.url.path.endswith("/images/search")
+            assert request.url.params["q"] == "Example official portrait"
+            assert request.url.params["safesearch"] == "strict"
+            return httpx.Response(200, json={"results": [
+                {"title": "Untrusted thumbnail", "url": source_url, "thumbnail": {"src": "https://other.example/portrait"}},
+                {"title": "Museum portrait", "url": source_url, "thumbnail": {"src": thumbnail}},
+            ]})
+        assert str(request.url) == thumbnail
+        assert "X-Subscription-Token" not in request.headers
+        downloads.append(thumbnail)
+        return httpx.Response(200, content=picture.getvalue(), headers={"Content-Type": "image/jpeg"})
+
+    http_client = httpx.Client
+    monkeypatch.setattr("app.workflow.collect", lambda query: [])
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: http_client(transport=httpx.MockTransport(respond), **kwargs))
+    structured = Intelligence.structured
+
+    def plan(self, schema, task, data, stage="planning", image=None):
+        if schema is Clarification:
+            return Clarification()
+        if schema is Outline:
+            assert "Web image search is enabled" in task
+            return Outline.model_validate({"title": "Example", "slides": [
+                {"title": "Example", "layout": "summary", "image_query": "Example official portrait"},
+            ]})
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", plan)
+    path = create(client, "Create one slide for students with an official portrait of Example in a professional style.",
+                  mode="professional", research=True)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    source, = result["document"]["sources"]
+    slide, = result["document"]["slides"]
+    portrait, = [element for element in slide["elements"] if element["type"] == "image"]
+    assert downloads == [thumbnail]
+    assert source["url"] == source_url and source["asset_id"] == portrait["asset_id"]
+    assert source["id"] in slide["source_ids"]
+    assert abs(portrait["w"] * (16 / 9) / portrait["h"] - (300 / 450)) < .001
+    assert client.get(f"/api/v1/assets/{portrait['asset_id']}").headers["content-type"] == "image/png"
+    exported = client.post(f"{path}/export?format=pptx")
+    assert exported.status_code == 200
+    deck = Presentation(io.BytesIO(exported.content))
+    assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in deck.slides[0].shapes)
+    assert source_url in deck.slides[0].notes_slide.notes_text_frame.text

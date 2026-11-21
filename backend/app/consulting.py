@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING
 
 from app.domain import Chart, Document, Image, Shape, Slide, Table, Text, Theme
+from app.rendering import fit_image
 
 if TYPE_CHECKING:
     from app.composition import OutlineItem, SlideContent
@@ -39,7 +40,8 @@ SLIDE_GUIDANCE = (
 )
 
 
-def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document, index: int, image_ids: set[str]) -> Slide:
+def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document, index: int, image_ids: set[str],
+                       *, web_image_ratio: float | None = None) -> Slide:
     theme = deck.theme
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[deck.aspect_ratio]
     references = {source.id: source.title for source in deck.sources}
@@ -77,7 +79,7 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
 
     chart = content.chart
     exhibit = None
-    if chart and source_ids:
+    if chart and source_ids and not web_image_ratio:
         try:
             exhibit = Chart(x=.06, y=.39, w=.88, h=.50, chart=chart.chart, categories=chart.categories,
                             series=[{"name": chart.label, "values": chart.values}], color=theme.accent)
@@ -86,17 +88,25 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
 
     if exhibit:
         slide.elements.append(exhibit)
-    elif valid_table:
+    elif valid_table and not web_image_ratio:
         rows = [[cell[:180] for cell in row] for row in rows]
         slide.elements.append(Table(x=.06, y=.39, w=.88, h=.5, rows=rows, fill=theme.surface, color=theme.ink,
                                     size=max(8, min(17 * factor, 100 / len(rows))),
                                     header_fill=theme.accent, header_color="#FFFFFF"))
     elif content.image_asset_id in image_ids and item.layout in {"showcase", "editorial", "research"}:
-        slide.elements.append(Image(x=.56, y=.39, w=.38, h=.5, asset_id=content.image_asset_id, alt=item.title))
-        for i, point in enumerate(points[:2]):
-            y = .39 + .25 * i
-            label(point.title, .06, y, .45, .09, 20, bold=True)
-            label(point.body, .06, y + .098, .45, .12, 16, theme.muted)
+        image = Image(x=.56, y=.39, w=.38, h=.5, asset_id=content.image_asset_id, alt=item.title)
+        if web_image_ratio:
+            slide.elements.append(fit_image(image, deck, web_image_ratio))
+            for i, point in enumerate(points[:3]):
+                y = .39 + .165 * i
+                label(point.title, .06, y, .45, .06, 18, bold=True)
+                label(point.body, .06, y + .065, .45, .09, 15, theme.muted)
+        else:
+            slide.elements.append(image)
+            for i, point in enumerate(points[:2]):
+                y = .39 + .25 * i
+                label(point.title, .06, y, .45, .09, 20, bold=True)
+                label(point.body, .06, y + .098, .45, .12, 16, theme.muted)
     elif item.layout in {"timeline", "process", "closing"} and points:
         width = .88 / len(points)
         block(.06, .46, .88, .006, theme.surface)

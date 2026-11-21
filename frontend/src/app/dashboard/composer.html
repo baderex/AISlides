@@ -28,7 +28,7 @@
   @if (advanced()) {
     <div class="composer-advanced">
       <label>Model ID <input class="field" placeholder="Provider default" [formControl]="model" maxlength="150" /></label>
-      <label class="check-option"><input type="checkbox" [checked]="research()" [disabled]="!config()?.research" (change)="research.set($any($event.target).checked)" /> Web research</label>
+      <label class="check-option" title="Find sources and images requested in your prompt"><input type="checkbox" [checked]="research()" [disabled]="!config()?.research" (change)="research.set($any($event.target).checked)" /> Web research</label>
       @if (config()?.images) {
         <label class="check-option"><input type="checkbox" [checked]="images()" (change)="images.set($any($event.target).checked)" /> Generate illustrations</label>
       }

@@ -155,7 +155,7 @@ class Document(Contract):
     title: ShortText
     aspect_ratio: Aspect = "16:9"
     theme: Theme = Field(default_factory=Theme)
-    sources: list[Source] = Field(default_factory=list, max_length=30)
+    sources: list[Source] = Field(default_factory=list, max_length=60)
     slides: list[Slide] = Field(default_factory=list, max_length=40)
 
     @model_validator(mode="after")
