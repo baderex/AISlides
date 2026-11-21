@@ -1,0 +1,37 @@
+@if (current(); as question) {
+  <section class="question-card" aria-labelledby="question-title">
+    <div class="question-step"><span class="question-icon"><lucide-icon [img]="i.Sparkles" [size]="15" /></span>
+      <span>Question {{ index() + 1 }} of {{ questions().length }}</span>
+    </div>
+    <h3 id="question-title">{{ question.title }}</h3>
+    @if (question.description) { <p>{{ question.description }}</p> }
+    @if (options(question)) {
+      <div class="question-options" [attr.role]="question.type === 'multi_select' ? 'group' : 'radiogroup'" aria-labelledby="question-title">
+        @for (entry of question.options; track entry.id) {
+          <label class="question-option" [class.chosen]="answer()?.option_ids?.includes(entry.id)">
+            <input [type]="question.type === 'multi_select' ? 'checkbox' : 'radio'" [name]="question.id" [value]="entry.id"
+              [checked]="answer()?.option_ids?.includes(entry.id)" (change)="option(question, entry.id)" />
+            @if (entry.swatch) { <span class="option-swatch" [style.background]="entry.swatch"><i></i><i></i></span> }
+            <span><strong>{{ entry.label }}</strong>@if (entry.description) { <small>{{ entry.description }}</small> }</span>
+            @if (entry.id === question.recommended_option_id) { <span class="recommended" title="Recommended"><lucide-icon [img]="i.Sparkles" [size]="13" /></span> }
+          </label>
+        }
+      </div>
+    }
+    @if (question.type === 'slide_count') {
+      <label class="answer-field">Number of slides
+        <input class="field" type="number" min="1" max="30" [placeholder]="question.recommended_count" [value]="answer()?.text ?? ''" (input)="text(question.id, $any($event.target).value)" />
+      </label>
+    } @else if (question.type === 'free_text' || question.allow_custom_answer) {
+      <label class="answer-field">{{ question.type === 'free_text' ? 'Your answer' : 'Additional details (optional)' }}
+        <textarea class="field" rows="2" maxlength="1000" [value]="answer()?.text ?? ''" (input)="text(question.id, $any($event.target).value)"></textarea>
+      </label>
+    }
+    <div class="question-actions">
+      @if (index() > 0) { <button type="button" class="button" [disabled]="busy()" (click)="index.set(index() - 1)">Back</button> }
+      @if (!question.required) { <button type="button" class="button" [disabled]="busy()" (click)="skip(question)">Skip</button> }
+      <button type="button" class="primary" [disabled]="busy() || !valid(question)" (click)="next()">{{ index() + 1 === questions().length ? 'Submit answers' : 'Continue' }}</button>
+    </div>
+    <button type="button" class="text-button defaults" [disabled]="busy()" (click)="defaults()">Use recommended defaults</button>
+  </section>
+}

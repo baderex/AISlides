@@ -1,0 +1,69 @@
+<div #canvas class="slide-canvas" [class.editable]="editable()" [style.aspect-ratio]="ratio()" [style.background]="slide().background"
+  [attr.tabindex]="editable() ? 0 : null" [attr.aria-label]="slide().title" (pointerdown)="selection.emit(null)"
+  (pointermove)="pointerMove($event, canvas)" (pointerup)="pointerEnd($event, true)"
+  (pointercancel)="pointerEnd($event, false)" (lostpointercapture)="pointerEnd($event, false)">
+  <ng-container *ngTemplateOutlet="parts; context: {$implicit: slide().elements, root: true}" />
+  @if (aligned('x')) { <span class="alignment-guide vertical"></span> }
+  @if (aligned('y')) { <span class="alignment-guide horizontal"></span> }
+  <ng-template #parts let-elements let-root="root">
+    @for (el of elements; track el.id) {
+      @let g = geometry(el);
+      <div class="slide-element" [class.selected-element]="root && editable() && selected() === el.id"
+        [style.left.%]="g.x * 100" [style.top.%]="g.y * 100" [style.width.%]="g.w * 100" [style.height.%]="g.h * 100"
+        [style.z-index]="el.z + 1000" [style.transform]="'rotate(' + el.rotation + 'deg)'"
+        [attr.aria-label]="el.type === 'text' ? el.text : el.type"
+        (pointerdown)="root && pointerStart($event, el.id, false, canvas)"
+        (dblclick)="root && editable() && el.type === 'text' && textEdit.emit(el.id)">
+        <div class="slide-content" [style.opacity]="el.opacity" [style.border]="el.border ? '1px solid ' + el.border : null">
+          @switch (el.type) {
+            @case ('text') {
+              <div class="slide-text" [style.font-family]="el.font" [style.font-size]="font(el.size)" [style.color]="el.color"
+                [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">{{ el.text }}</div>
+            }
+            @case ('shape') { <div class="slide-shape" [class]="el.shape" [style.background]="el.fill" [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div> }
+            @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
+            @case ('line') { <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M 0 0 L 100 100" fill="none" [attr.stroke]="el.color" [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" /></svg> }
+            @case ('table') {
+              <table [style.color]="el.color" [style.background]="el.fill" [style.font-size]="font(el.size ?? 12)">
+                @for (row of el.rows; track $index) {
+                  @if ($first && el.header_fill) {
+                    <tr [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">
+                      @for (cell of row; track $index) { <th scope="col">{{ cell }}</th> }
+                    </tr>
+                  } @else {
+                    <tr>@for (cell of row; track $index) { <td>{{ cell }}</td> }</tr>
+                  }
+                }
+              </table>
+            }
+            @case ('chart') {
+              @if (el.chart === 'pie') { <div class="slide-pie" [style.background]="pie(el)"></div> }
+              @else {
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart" aria-hidden="true">
+                  @for (series of chart(el); track $index; let index = $index) {
+                    @let color = index === 0 ? el.color : shades[index];
+                    @for (mark of series; track $index; let j = $index) {
+                      @switch (el.chart) {
+                        @case ('bar') { <svg:rect [attr.x]="mark.bx" [attr.y]="mark.by + mark.horizontal * index" [attr.width]="mark.bw" [attr.height]="mark.horizontal * .8" [attr.fill]="color" /> }
+                        @case ('column') { <svg:rect [attr.x]="mark.x + mark.w * 1.17 * index" [attr.y]="mark.y" [attr.width]="mark.w" [attr.height]="mark.h" [attr.fill]="color" /> }
+                        @case ('line') {
+                          @if (j > 0) { <svg:line [attr.x1]="series[j-1].cx" [attr.y1]="series[j-1].cy" [attr.x2]="mark.cx" [attr.y2]="mark.cy" [attr.stroke]="color" stroke-width="2" vector-effect="non-scaling-stroke" /> }
+                          <svg:circle [attr.cx]="mark.cx" [attr.cy]="mark.cy" r="1" [attr.fill]="color" />
+                        }
+                      }
+                    }
+                  }
+                </svg>
+                @if (el.chart !== 'bar') { <div class="chart-labels" [style.font-size]="font(10)">@for (cat of el.categories; track $index) { <span>{{ cat }}</span> }</div> }
+              }
+            }
+            @case ('group') { <ng-container *ngTemplateOutlet="parts; context: {$implicit: el.elements, root: false}" /> }
+          }
+        </div>
+        @if (root && editable() && selected() === el.id) {
+          <span class="resize-handle" (pointerdown)="pointerStart($event, el.id, true, canvas)"></span>
+        }
+      </div>
+    }
+  </ng-template>
+</div>

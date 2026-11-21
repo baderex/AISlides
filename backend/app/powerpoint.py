@@ -1,0 +1,183 @@
+import io
+
+from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
+from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+from pptx.oxml.ns import qn
+from pptx.oxml.xmlchemy import OxmlElement
+from pptx.util import Inches, Pt
+
+from app.branding import SLOT_TYPES, choose_layout, native_layouts
+from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
+
+
+def color(value):
+    return RGBColor.from_string(value[1:].upper())
+
+
+def alpha(solid, opacity):
+    if opacity < 1:
+        channel = solid[0]
+        entry = OxmlElement("a:alpha")
+        entry.set("val", str(round(opacity * 100000)))
+        channel.append(entry)
+
+
+def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -> bytes:
+    presentation = Presentation(io.BytesIO(get_asset(brand.asset_id))) if brand else Presentation()
+    if brand:
+        layouts = native_layouts(presentation)
+        remove_sample_slides(presentation)
+        width, height = presentation.slide_width.inches, presentation.slide_height.inches
+    else:
+        width, height = document.dimensions
+        presentation.slide_width = Inches(width)
+        presentation.slide_height = Inches(height)
+    presentation.core_properties.title = document.title
+
+    def draw(shapes, elements, ox=0., oy=0., sx=1., sy=1., placeholders=None):
+        for el in sorted(elements, key=lambda element: element.z):
+            nx, ny, nw, nh = ox + el.x*sx, oy + el.y*sy, el.w*sx, el.h*sy
+            x, y, w, h = Inches(nx*width), Inches(ny*height), Inches(nw*width), Inches(nh*height)
+            slot = placeholders.get(el.placeholder_idx) if placeholders is not None else None
+            slot_kind = SLOT_TYPES.get(slot.placeholder_format.type) if slot is not None else None
+            filled = False
+            if isinstance(el, Group):
+                obj = shapes.add_group_shape()
+                draw(obj.shapes, el.elements, nx, ny, nw, nh)
+            elif isinstance(el, Text):
+                filled = slot_kind in {"title", "subtitle", "body"}
+                obj = slot if filled else shapes.add_textbox(x, y, w, h)
+                frame = obj.text_frame
+                frame.text = el.text
+                frame.word_wrap = True
+                frame.auto_size = MSO_AUTO_SIZE.NONE
+                if not filled:
+                    frame.margin_top = frame.margin_bottom = frame.margin_left = frame.margin_right = 0
+                for paragraph in frame.paragraphs:
+                    paragraph.alignment = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[el.align]
+                    paragraph.line_spacing = 1.13
+                    paragraph.space_before = paragraph.space_after = Pt(0)
+                    paragraph.font.name = el.font
+                    paragraph.font.size = Pt(el.size)
+                    paragraph.font.bold = el.bold
+                    paragraph.font.color.rgb = color(el.color)
+                    alpha(paragraph.font._element.solidFill, el.opacity)
+            elif isinstance(el, Shape):
+                style = {"rect": MSO_AUTO_SHAPE_TYPE.RECTANGLE, "round": MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
+                         "ellipse": MSO_AUTO_SHAPE_TYPE.OVAL, "triangle": MSO_AUTO_SHAPE_TYPE.ISOSCELES_TRIANGLE}[el.shape]
+                obj = shapes.add_shape(style, x, y, w, h)
+                obj.fill.solid()
+                obj.fill.fore_color.rgb = color(el.fill)
+                alpha(obj._element.spPr.solidFill, el.opacity)
+                effect = obj._element.find(".//" + qn("a:effectRef"))
+                if effect is not None:
+                    effect.set("idx", "0")
+                if el.shape == "round":
+                    obj.adjustments[0] = .12
+            elif isinstance(el, Line):
+                obj = shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x, y, x+w, y+h)
+                obj.line.width = Pt(el.weight)
+                obj.line.color.rgb = color(el.color)
+                alpha(obj._element.spPr.ln.solidFill, el.opacity)
+            elif isinstance(el, Image):
+                raw_image = io.BytesIO(get_asset(el.asset_id))
+                filled = slot_kind == "picture"
+                obj = slot.insert_picture(raw_image) if filled else shapes.add_picture(raw_image, x, y, w, h)
+                if filled:
+                    obj.crop_top = obj.crop_bottom = obj.crop_left = obj.crop_right = 0
+                obj._element.nvPicPr.cNvPr.set("descr", el.alt)
+            elif isinstance(el, Table):
+                filled = slot_kind == "table"
+                row_count, columns = len(el.rows), len(el.rows[0])
+                obj = slot.insert_table(row_count, columns) if filled else shapes.add_table(row_count, columns, x, y, w, h)
+                if filled:
+                    for row in obj.table.rows:
+                        row.height = h // row_count
+                for i, row in enumerate(el.rows):
+                    fill, ink, header = el.row_style(i)
+                    for j, value in enumerate(row):
+                        cell = obj.table.cell(i, j)
+                        cell.text = value
+                        if el.header_fill:
+                            cell.margin_left = cell.margin_right = Pt(6)
+                            cell.margin_top = cell.margin_bottom = Pt(3)
+                            cell.text_frame.word_wrap = True
+                        cell.fill.solid()
+                        cell.fill.fore_color.rgb = color(fill)
+                        for paragraph in cell.text_frame.paragraphs:
+                            paragraph.font.size = Pt(el.size)
+                            paragraph.font.color.rgb = color(ink)
+                            if header:
+                                paragraph.font.bold = True
+            elif isinstance(el, Chart):
+                chart_data = CategoryChartData()
+                chart_data.categories = el.categories
+                for series in el.series:
+                    chart_data.add_series(series.name, series.values)
+                kind = {"column": XL_CHART_TYPE.COLUMN_CLUSTERED, "bar": XL_CHART_TYPE.BAR_CLUSTERED,
+                        "line": XL_CHART_TYPE.LINE, "pie": XL_CHART_TYPE.PIE}[el.chart]
+                filled = slot_kind == "chart"
+                obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
+                obj.chart.has_legend = len(el.series) > 1 or el.chart == "pie"
+                if el.chart not in {"line", "pie"}:
+                    obj.chart.series[0].format.fill.solid()
+                    obj.chart.series[0].format.fill.fore_color.rgb = color(el.color)
+            if filled:
+                placeholders.pop(el.placeholder_idx)
+                obj.left, obj.top, obj.width, obj.height = x, y, w, h
+                shapes._spTree.insert_element_before(obj._element, "p:extLst")
+            if not isinstance(el, (Chart, Table)):
+                obj.rotation = el.rotation
+            if isinstance(el, (Shape, Text, Image)):
+                if el.border:
+                    obj.line.color.rgb = color(el.border)
+                else:
+                    obj.line.fill.background()
+            obj.name = el.id
+
+    sources = {source.id: source for source in document.sources}
+    for item in document.slides:
+        placeholders = None
+        if brand:
+            selected = choose_layout(brand.layouts, item.layout)
+            slide = presentation.slides.add_slide(layouts[selected.index])
+            placeholders = {p.placeholder_format.idx: p for p in slide.placeholders}
+        else:
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        if not brand or item.background != selected.background:
+            slide.background.fill.solid()
+            slide.background.fill.fore_color.rgb = color(item.background)
+        draw(slide.shapes, item.elements, placeholders=placeholders)
+        if brand:
+            for placeholder in placeholders.values():
+                placeholder._element.getparent().remove(placeholder._element)
+        if item.notes or item.source_ids:
+            references = [f"{sources[key].title} — {sources[key].url or 'Uploaded reference'}" for key in item.source_ids]
+            slide.notes_slide.notes_text_frame.text = "\n\n".join(filter(None, [item.notes, "\n".join(references)]))
+    output = io.BytesIO()
+    presentation.save(output)
+    return output.getvalue()
+
+
+def remove_sample_slides(presentation):
+    root = presentation._element
+    slide_ids = root.get_or_add_sldIdLst()
+    for entry in list(slide_ids):
+        slide_ids.remove(entry)
+    for entry in list(root):
+        if entry.tag in {qn("p:custShowLst"), qn("p:extLst")}:
+            root.remove(entry)
+    for rel in list(presentation.part.rels.values()):
+        if rel.reltype in {RT.SLIDE, RT.VIEW_PROPS, RT.CUSTOM_XML}:
+            presentation.part.drop_rel(rel.rId)
+    package = presentation.part.package
+    for rel in list(package._rels.values()):
+        if rel.reltype in {RT.THUMBNAIL, RT.CUSTOM_PROPERTIES, RT.EXTENDED_PROPERTIES}:
+            package.drop_rel(rel.rId)
+    for attr in ("author", "category", "comments", "keywords", "last_modified_by", "subject"):
+        setattr(presentation.core_properties, attr, "")
