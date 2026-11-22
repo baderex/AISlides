@@ -1,4 +1,5 @@
 import io
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import accumulate
@@ -120,6 +121,70 @@ def pdf_lines(value, width, face, size):
     return tuple(wrapped(value, width, lambda line: pdfmetrics.stringWidth(line, face, size)))
 
 
+def styled_lines(element, width, measure):
+    """Wrap styled words without losing their source offsets."""
+    lines, line, space = [], [], []
+    line_width = 0
+
+    def width_of(runs):
+        return sum(measure(text, bold) for text, bold, _ in runs)
+
+    for token in re.finditer(r"\r\n|[\r\n]|[^\S\r\n]+|[^\s]+", element.text):
+        if token[0] in {"\r", "\n", "\r\n"}:
+            lines.append((line, line_width))
+            line, space, line_width = [], [], 0
+            continue
+        runs = list(element.text_style(*token.span()))
+        if token[0].isspace():
+            space = [(token[0], runs[0][1], runs[0][2])]
+            continue
+        addition = width_of(runs)
+        if line and line_width + width_of(space) + addition > width:
+            lines.append((line, line_width))
+            line, line_width = [], 0
+        if line:
+            line.extend(space)
+            line_width += width_of(space)
+        space = []
+        if addition <= width:
+            line.extend(runs)
+            line_width += addition
+            continue
+        for text, bold, color in runs:
+            for character in text:
+                advance = measure(character, bold)
+                if line and line_width + advance > width:
+                    lines.append((line, line_width))
+                    line, line_width = [], 0
+                line.append((character, bold, color))
+                line_width += advance
+    return [*lines, (line, line_width)]
+
+
+def styled_raster_layout(element, width):
+    size = round(element.size * TEXT_SCALE)
+    return styled_lines(element, width, lambda text, bold: font(size, bold, element.font).getlength(text))
+
+
+def styled_pdf_layout(element, width):
+    return styled_lines(element, width, lambda text, bold: pdfmetrics.stringWidth(
+        text, pdf_face(element.font, bold), element.size))
+
+
+def styled_text_fits(element, width, height):
+    raster = styled_raster_layout(element, width * TEXT_SCALE)
+    pdf = styled_pdf_layout(element, width)
+    descent = min(pdfmetrics.getDescent(pdf_face(element.font, bold), element.size) for bold in (False, True))
+    return (all(line_width <= width * TEXT_SCALE for _, line_width in raster) and
+            len(raster) * element.size * TEXT_LEADING <= height and
+            all(line_width <= width for _, line_width in pdf) and
+            element.size + (len(pdf) - 1) * element.size * TEXT_LEADING - descent <= height)
+
+
+def align_offset(align, remaining):
+    return {"left": 0, "center": remaining / 2, "right": remaining}[align]
+
+
 def text_fits(value, width, height, size, bold, family="Arial", align="left"):
     if not value.strip():
         return True
@@ -189,6 +254,8 @@ def fit_slide_text(document: Document, slide: Slide) -> list[str]:
     for index, (el, x, y, w, h) in enumerate(elements):
         if isinstance(el, Text):
             def fits(frame_height):
+                if el.spans:
+                    return styled_text_fits(el, w * width, frame_height * height)
                 return text_fits(el.text, w * width, frame_height * height, el.size, el.bold, el.font, el.align)
 
             warning = f"Text may overflow: {el.text[:75]}"
@@ -248,7 +315,8 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
             boxes.append((x, y, w, h))
             backs = [shape.fill for shape, bx, by, bw, bh in elements
                      if isinstance(shape, Shape) and shape.z < el.z and bx <= x and by <= y and bx + bw >= x+w and by+bh >= y+h]
-            if contrast(el.color, backs[-1] if backs else slide.background) < 3:
+            colors = {el.color, *(span.color for span in el.spans if span.color)}
+            if any(contrast(shade, backs[-1] if backs else slide.background) < 3 for shade in colors):
                 warnings.append(f"Low text contrast: {el.text[:55]}")
     return warnings
 
@@ -369,20 +437,44 @@ def arrowheads(line, start, end, size):
                    (base_x + uy * depth * .45, base_y - ux * depth * .45))
 
 
+def connector_points(line, x, y, width, height, nodes):
+    start, end = line.endpoints(width, height)
+    points = [(x + start[0], y + start[1]), (x + end[0], y + end[1])]
+    for index, anchor in enumerate((line.start_anchor, line.end_anchor)):
+        if not anchor or anchor.shape_id not in nodes:
+            continue
+        nx, ny, nw, nh = nodes[anchor.shape_id]
+        dx, dy = {"top": (.5, 0), "left": (0, .5), "bottom": (.5, 1), "right": (1, .5)}[anchor.side]
+        points[index] = nx + nw * dx, ny + nh * dy
+    return points
+
+
 def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> bytes:
     ptw, pth = physical(document)
     scale = pixel_width / ptw
     bounds = pixel_width, round(pth * scale)
     image = PILImage.new("RGBA", bounds, slide.background)
-    for el, nx, ny, nw, nh in flattened(slide.elements):
+    elements = list(flattened(slide.elements))
+    nodes = {item.id: geometry for item, *geometry in elements if isinstance(item, Shape)}
+    for el, nx, ny, nw, nh in elements:
         x, y, w, h = round(nx * bounds[0]), round(ny * bounds[1]), max(1, round(nw * bounds[0])), max(1, round(nh * bounds[1]))
         layer = PILImage.new("RGBA", (w, h))
         draw = ImageDraw.Draw(layer)
         if isinstance(el, Text):
             width, height = round(nw * ptw * TEXT_SCALE), round(nh * pth * TEXT_SCALE)
             text_layer = PILImage.new("RGBA", (max(1, width), max(1, height)))
-            layout = raster_text(el.text, width, height, el.size, el.bold, el.font, el.align)
-            draw_raster_text(ImageDraw.Draw(text_layer), layout, el.color)
+            ink = ImageDraw.Draw(text_layer)
+            if el.spans:
+                for index, (runs, used) in enumerate(styled_raster_layout(el, width)):
+                    left = align_offset(el.align, width - used)
+                    top = index * el.size * TEXT_SCALE * TEXT_LEADING
+                    for text, bold, shade in runs:
+                        face = font(round(el.size * TEXT_SCALE), bold, el.font)
+                        ink.text((left, top), text, fill=shade, font=face, anchor="lt")
+                        left += face.getlength(text)
+            else:
+                layout = raster_text(el.text, width, height, el.size, el.bold, el.font, el.align)
+                draw_raster_text(ink, layout, el.color)
             layer = text_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Shape):
             if el.shape == "triangle":
@@ -394,7 +486,19 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             else:
                 draw.rectangle((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
         elif isinstance(el, Line):
-            start, end = el.endpoints(w - 1, h - 1)
+            if el.start_anchor or el.end_anchor:
+                points = connector_points(el, nx, ny, nw, nh, nodes)
+                pixels = [(round(px * bounds[0]), round(py * bounds[1])) for px, py in points]
+                margin = max(1, round(max(6, el.weight * 3.5) * scale))
+                x = min(px for px, _ in pixels) - margin
+                y = min(py for _, py in pixels) - margin
+                w = max(px for px, _ in pixels) - x + margin + 1
+                h = max(py for _, py in pixels) - y + margin + 1
+                layer = PILImage.new("RGBA", (w, h))
+                draw = ImageDraw.Draw(layer)
+                start, end = [(px - x, py - y) for px, py in pixels]
+            else:
+                start, end = el.endpoints(w - 1, h - 1)
             draw.line((start, end), fill=el.color, width=max(1, round(el.weight * scale)))
             for tip in arrowheads(el, start, end, max(6, el.weight * 3.5) * scale):
                 draw.polygon(tip, fill=el.color)
@@ -487,7 +591,9 @@ def to_pdf(document: Document, get_asset) -> bytes:
     for slide in document.slides:
         pdf.setFillColor(HexColor(slide.background))
         pdf.rect(0, 0, width, height, stroke=0, fill=1)
-        for el, nx, ny, nw, nh in flattened(slide.elements):
+        elements = list(flattened(slide.elements))
+        nodes = {item.id: geometry for item, *geometry in elements if isinstance(item, Shape)}
+        for el, nx, ny, nw, nh in elements:
             x, y, w, h = nx*width, (1-ny-nh)*height, nw*width, nh*height
             pdf.saveState()
             pdf.setFillAlpha(el.opacity)
@@ -502,9 +608,19 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 path = pdf.beginPath()
                 path.rect(0, 0, w, h)
                 pdf.clipPath(path, stroke=0)
-                for i, line in enumerate(pdf_lines(el.text, w, name, el.size)):
-                    fn, px = {"left": (pdf.drawString, 0), "center": (pdf.drawCentredString, w/2), "right": (pdf.drawRightString, w)}[el.align]
-                    fn(px, h-el.size-i*el.size*TEXT_LEADING, line)
+                if el.spans:
+                    for index, (runs, used) in enumerate(styled_pdf_layout(el, w)):
+                        line = pdf.beginText(align_offset(el.align, w - used), h - el.size - index * el.size * TEXT_LEADING)
+                        for text, bold, shade in runs:
+                            line.setFont(pdf_face(el.font, bold), el.size)
+                            line.setFillColor(HexColor(shade))
+                            line.textOut(text)
+                        pdf.drawText(line)
+                else:
+                    for i, line in enumerate(pdf_lines(el.text, w, name, el.size)):
+                        fn, px = {"left": (pdf.drawString, 0), "center": (pdf.drawCentredString, w/2),
+                                  "right": (pdf.drawRightString, w)}[el.align]
+                        fn(px, h-el.size-i*el.size*TEXT_LEADING, line)
             elif isinstance(el, Shape):
                 pdf.setFillColor(HexColor(el.fill))
                 if el.border:
@@ -527,7 +643,11 @@ def to_pdf(document: Document, get_asset) -> bytes:
             elif isinstance(el, Line):
                 pdf.setStrokeColor(HexColor(el.color))
                 pdf.setLineWidth(el.weight)
-                start, end = el.endpoints(w, h)
+                if el.start_anchor or el.end_anchor:
+                    points = connector_points(el, nx, ny, nw, nh, nodes)
+                    start, end = [((px - nx) * width, (py - ny) * height) for px, py in points]
+                else:
+                    start, end = el.endpoints(w, h)
                 pdf.line(start[0], h - start[1], end[0], h - end[1])
                 pdf.setFillColor(HexColor(el.color))
                 for tip in arrowheads(el, start, end, max(6, el.weight * 3.5)):

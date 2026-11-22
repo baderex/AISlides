@@ -8,11 +8,11 @@ from app.branding import choose_layout, compose_branded
 from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
 from app.design import blend, readable, style_chart, style_slide_tables
 from app.diagrams import Diagram, draw_diagram
-from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Series, Shape, ShortText,
+from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Recipe, Series, Shape, ShortText,
                         Slide, Table, Text, Theme, display_value)
 from app.lucide import ICON_NAMES
 from app.questions import Question
-from app.rendering import fit_image, longest_word_width, physical, slide_icon, text_height
+from app.rendering import contrast, fit_image, longest_word_width, physical, slide_icon, text_height
 
 
 class Intent(Contract):
@@ -48,6 +48,8 @@ class OutlineItem(PlanningResponse):
     topic: str = Field(default="", max_length=180, description="A neutral label for the subject.")
     key_message: str = Field(default="", max_length=140, description="The concise supported takeaway or recommendation.")
     lock_title: bool = Field(default=False, description="True only if the user supplies the exact slide title.")
+    recipe: Recipe | None = Field(default=None, description="Optional preferred composition for the actual slide content.")
+    visual_priority: str = Field(default="", max_length=180, description="The exhibit or takeaway the design should emphasize.")
     layout: Layout = Field(description="Use one exact layout ID from the enum. Use chart for a sourced chart and research for a data table.")
     purpose: str = Field(default="", max_length=500)
     required_details: list[ShortText] = Field(default_factory=list, max_length=8)
@@ -224,7 +226,12 @@ class Decision(Contract):
 
     @field_validator("request", "scope")
     @classmethod
-    def separate_future_gates(cls, value: str) -> str:
+    def separate_future_gates(cls, value: str, info: ValidationInfo) -> str:
+        if info.field_name == "request":
+            value = re.sub(r"\s+(?:with|pending)\s+(?:(?:the|future|day[- ]?90)\s+)*"
+                           r"(?:gating conditions|meeting the gates|gate clearance)\s*\.?$", "", value, flags=re.I)
+        elif match := re.search(r"\s*[;,]\s*(?:success measured by|subject to the day[- ]?90 gates)\b", value, re.I):
+            value = value[:match.start()]
         if re.search(r"\b(conditional on|contingent on|subject to|provided that)\b.*\bgates?\b", value, re.IGNORECASE):
             raise PydanticCustomError("decision_scope", "keep the future gate condition in if_missed")
         return value.strip().rstrip(".")
@@ -383,7 +390,7 @@ def select_layout(item, content, document, images, *, data_driven, allow_variant
 
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
             brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None,
-            image_ratio: float | None = None, data_driven: bool = False) -> Slide:
+            image_ratio: float | None = None, data_driven: bool = False, recipe: Recipe = "standard") -> Slide:
     source_ids = {source.id for source in document.sources}
     rules = document.theme.design
     layout = select_layout(item, content, document, image_ids, data_driven=data_driven,
@@ -485,10 +492,23 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         return slide
 
     if rules and item.layout in {"cover", "closing"}:
+        centered = recipe == "closing_centered"
+        align = "center" if centered else "left"
         if item.layout == "cover":
-            rect(.07, .202, .075, .004, accent)
-        end = fitted_label(item.title, .07, .24, .86, .39, 54 if compact else 62, 32, ink, heading=True)
-        end = fitted_label(content.next_step or content.subtitle, .07, end + .023, .75, .15, 20, 14, muted)
+            if recipe == "editorial_cover" and rules.cover_style == "rules":
+                rect(.07, .165, .86, .003, accent)
+                rect(.07, .858, .86, .003, accent)
+            else:
+                rect(.07, .202, .075, .004, accent)
+        elif centered:
+            rect(.463, .212, .074, .003, accent)
+            rect(.20, .80, .60, .002, blend(bg, ink, .34))
+        display = recipe in {"closing_display", "closing_centered"}
+        end = fitted_label(item.title, .12 if centered else .07, .29 if centered else .24, .76 if centered else .86,
+                           .40, (60 if compact else 78) if display else (54 if compact else 62), 32, ink,
+                           heading=True, align=align)
+        end = fitted_label(content.next_step or content.subtitle, .12 if centered else .07, end + .023,
+                           .76 if centered else .75, .15, 20, 14, muted, align=align)
         if item.layout == "closing" and not content.next_step:
             visible = [point for point in points[:3] if point.title.casefold() not in {
                 item.title.casefold(), (content.next_step or content.subtitle).casefold()
@@ -539,8 +559,40 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     else:
         label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
         label(content.subtitle, .07, .352, .86, .08, 17, muted)
-    if rules and content.diagram and item.layout in {"process", "summary", "comparison", "showcase"}:
-        draw_diagram(elements, content.diagram, body_top, t, bg, fitted_label, compact=compact)
+    if rules and content.diagram and item.layout in {"process", "summary", "comparison", "showcase"} and (
+            recipe != "standard" or not points):
+        draw_diagram(elements, content.diagram, body_top, t, bg, fitted_label, compact=compact,
+                     vertical_flow=recipe == "diagram_vertical")
+        return slide
+    if rules and points and recipe in {"feature_panels", "feature_rows"}:
+        panel = t.surface if abs(contrast(t.surface, bg) - 1) >= .16 else blend(bg, t.accent, .14)
+        panel_ink = readable(ink, panel, t.ink)
+        body_ink = readable(muted, panel, panel_ink)
+        panel_accent = readable(accent, panel, panel_ink, minimum=3)
+        for index, point in enumerate(points[:3]):
+            horizontal = recipe == "feature_panels"
+            gap = .018
+            step = (.86 + gap) / min(len(points), 3)
+            row_step = (.914 - body_top) / min(len(points), 3)
+            x, y = (.07 + index * step, body_top + .015) if horizontal else (.07, body_top + index * row_step)
+            w, h = (step - gap, .89 - y) if horizontal else (.86, row_step - .012)
+            rect(x, y, w, h, panel)
+            rect(x, y, w if horizontal else .005, .006 if horizontal else h, panel_accent)
+            prefix = rf"^(?:Step\s+0?{index + 1}|0?{index + 1})\s*[:.–-]\s*"
+            title = re.sub(prefix, "", point.title, flags=re.I)
+            if horizontal:
+                icon_y = y + .044
+                if point.icon:
+                    elements.append(slide_icon(document, point.icon, x + .02, icon_y, min(.062, h * .14), panel))
+                end = fitted_label(title, x + .02, y + h * .28, w - .04, h * .31,
+                                   28, 17, panel_ink, bold=True, heading=True)
+                fitted_label(point.body, x + .02, end + .027, w - .04, y + h - end - .042, 16, 13, body_ink)
+            else:
+                split = .31
+                fitted_label(title, x + .024, y + .024, split, max(.05, h - .037),
+                             23, 14, panel_ink, bold=True, heading=True)
+                fitted_label(point.body, x + split + .06, y + .024, w - split - .084, max(.05, h - .037),
+                             18, 13, body_ink)
         return slide
     first_body_element = len(elements)
     use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table or content.stacked_comparison)
@@ -636,8 +688,9 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         selected = [i for i, row in enumerate(rows[1:], 1) if row[0].strip().casefold() in focus]
         if len(selected) == len(rows) - 1:
             selected = []
-        elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface,
-                              focus_rows=selected))
+        full = recipe == "dense_table_full"
+        elements.append(Table(x=.055 if full else .07, y=.446 if full else .46, w=.89 if full else .86,
+                              h=.50 if full else .44, rows=rows, color=t.ink, fill=t.surface, focus_rows=selected))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
         if web_image_ratio or image_ratio:

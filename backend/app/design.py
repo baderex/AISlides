@@ -45,7 +45,7 @@ def font_family(value):
 
 
 BACKGROUND_DIRECTION = re.compile(
-    r"(light|dark)[- ](?:backgrounds?|palettes?|themes?|financial|reports?|analytical|editorial|corporate|styles?)", re.I
+    r"\b(light|dark)[- ](?:backgrounds?|palettes?|themes?|financial|reports?|analytical|editorial|corporate|styles?)\b", re.I
 )
 HEX_COLOR = r"#[0-9a-fA-F]{6}(?![\da-fA-F])"
 COLOR_ROLES = {
@@ -60,22 +60,22 @@ def explicit_constraints(prompt: str, style_answer: str = "") -> DesignConstrain
     for text in (prompt, style_answer):
         if match := BACKGROUND_DIRECTION.search(text):
             rules.background_mode = match[1].lower()
-        elif re.search(r"restrained\s+(?:light\s+)?financial[- ]report", text, re.I):
+        elif re.search(r"\brestrained\s+(?:light\s+)?financial[- ]report\b", text, re.I):
             rules.background_mode = "light"
-        if re.search(r"restrained", text, re.I):
+        if re.search(r"\brestrained\b", text, re.I):
             rules.restrained = True
-        palette = re.search(r"(?:use only|allowed colors|locked palette)([^.;
-]{0,220})", text, re.I)
+        palette = re.search(r"\b(?:use only|allowed colors|locked palette)\b([^.;\n]{0,220})", text, re.I)
         if palette and (colors := re.findall(HEX_COLOR, palette[1])):
             rules.palette = list(dict.fromkeys(c.upper() for c in colors))[:10]
         for role, field in COLOR_ROLES.items():
+            if role == "background":
+                role = r"(?<!cover )(?<!slide )background"
             if match := re.search(rf"(?<![\w-]){role}\s*(?:[:=]|(?:is|of)\s+)?\s*({HEX_COLOR})", text, re.I):
                 rules.colors[field] = match[1].upper()
         for role, field in (("headings?", "heading_font"), ("body(?: text)?", "body_font")):
-            if match := re.search(rf"{role}\s+(?:font\s*)?(?:[:=]|is)\s*["“]?([A-Za-z][A-Za-z0-9 -]{{0,48}}?)["”]?(?=[,.;
-]|$)", text, re.I):
+            if match := re.search(rf'\b{role}\s+(?:font\s*)?(?:[:=]|is)\s*["“]?([A-Za-z][A-Za-z0-9 -]{{0,48}}?)["”]?(?=[,.;\n]|$)', text, re.I):
                 setattr(rules, field, font_family(match[1]))
-            elif match := re.search(rf"(?:use|set)\s+["“]?([A-Za-z][A-Za-z0-9 -]{{0,48}}?)["”]?\s+for\s+{role}", text, re.I):
+            elif match := re.search(rf'\b(?:use|set|and)\s+["“]?([A-Za-z](?:(?!\s+(?:and|for)\b)[A-Za-z0-9 -]){{0,48}}?)["”]?\s+for\s+{role}\b', text, re.I):
                 setattr(rules, field, font_family(match[1]))
     return rules if rules != DesignConstraints() else None
 

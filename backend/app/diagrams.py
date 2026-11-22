@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 
 from app.design import blend, readable
-from app.domain import Contract, Line, Shape
+from app.domain import ConnectorAnchor, Contract, Line, Shape
 
 
 class DiagramNode(Contract):
@@ -37,11 +37,11 @@ class Diagram(Contract):
     recap: str = Field(default="", max_length=160)
 
 
-def draw_diagram(elements, diagram, body_top, theme, background, label, *, compact):
+def draw_diagram(elements, diagram, body_top, theme, background, label, *, compact, vertical_flow=False):
     """Compose the diagram from independently editable shapes, text and connectors."""
     shades = (theme.design.chart_colors + [theme.ink, theme.accent])[:3]
-    role_colors = {"actor": theme.accent, "service": shades[0], "store": shades[1],
-                   "decision": shades[2], "step": theme.accent}
+    role_colors = {"actor": theme.accent, "service": shades[1], "store": shades[2],
+                   "decision": shades[0], "step": theme.accent}
     ink = readable(theme.ink, background)
     muted = readable(theme.muted, background, ink)
     connector = blend(background, ink, .72)
@@ -49,7 +49,8 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
     def draw_node(node, x, y, w, h, condition="", *, wide=False):
         color = role_colors[node.role]
         panel = blend(background, color, .10)
-        elements.append(Shape(x=x, y=y, w=w, h=h, fill=panel, border=blend(panel, color, .52), z=-2))
+        box = Shape(x=x, y=y, w=w, h=h, fill=panel, border=blend(panel, color, .52), z=-2)
+        elements.append(box)
         elements.append(Shape(x=x, y=y, w=.006, h=h, fill=color, z=-1))
         text_x, text_w = x + .016, w - .032
         top = y + .014
@@ -58,7 +59,7 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
             label(node.label, text_x, top, .315, h - .024, 17, 10, node_ink, bold=True, keep_words=True)
             detail = "\n".join(part for part in (node.detail, node.contains) if part)
             label(detail, x + .355, top, w - .373, h - .024, 14, 10, readable(theme.muted, panel, node_ink))
-            return
+            return box
         if condition:
             top = label(condition, text_x, top, text_w, h * .26, 11, 9,
                         readable(color, panel, node_ink), bold=True) + .004
@@ -76,14 +77,19 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
             if detail_end > end + .008:
                 label(node.detail, text_x, end + .005, text_w, detail_end - end - .005, 15, 11,
                       readable(theme.muted, panel, node_ink))
+        return box
 
-    def horizontal(x, y, width, arrows="none"):
+    def horizontal(x, y, width, arrows="none", start=None, end=None):
         elements.append(Line(x=x, y=y - .012, w=width, h=.024, direction="right",
-                             arrows=arrows, color=connector, weight=1.6, z=-3))
+                             arrows=arrows, color=connector, weight=1.6, z=-3,
+                             start_anchor=ConnectorAnchor(shape_id=start.id, side="right") if start else None,
+                             end_anchor=ConnectorAnchor(shape_id=end.id, side="left") if end else None))
 
-    def vertical(x, y, height, arrows="none"):
+    def vertical(x, y, height, arrows="none", start=None, end=None):
         elements.append(Line(x=x - .012, y=y, w=.024, h=height, direction="down",
-                             arrows=arrows, color=connector, weight=1.6, z=-3))
+                             arrows=arrows, color=connector, weight=1.6, z=-3,
+                             start_anchor=ConnectorAnchor(shape_id=start.id, side="bottom") if start else None,
+                             end_anchor=ConnectorAnchor(shape_id=end.id, side="top") if end else None))
 
     lanes = diagram.lanes
     body_end = .82 if diagram.recap else .91
@@ -96,16 +102,18 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
         top = y
         if lane.title:
             top = label(lane.title, .07, y, .86, .056, 16, 12, ink, bold=True) + .011
-        if lane.kind == "flow" and compact and len(lanes) == 1 and len(lane.nodes) == 4:
+        previous = None
+        if lane.kind == "flow" and len(lanes) == 1 and (vertical_flow or (compact and len(lane.nodes) == 4)):
             gap_y = .038
-            row_h = (end_y - top - gap_y * 3) / 4
+            row_h = (end_y - top - gap_y * (len(lane.nodes) - 1)) / len(lane.nodes)
             for i, node in enumerate(lane.nodes):
                 node_y = top + i * (row_h + gap_y)
-                draw_node(node, .07, node_y, .86, row_h, wide=True)
+                box = draw_node(node, .07, node_y, .86, row_h, wide=True)
                 if i:
-                    vertical(.15, node_y - gap_y, gap_y, "both" if node.two_way else "end")
+                    vertical(.5, node_y - gap_y, gap_y, "both" if node.two_way else "end", previous, box)
                     if node.incoming:
-                        label(node.incoming, .177, node_y - gap_y + .004, .72, gap_y - .007, 10, 8, muted)
+                        label(node.incoming, .53, node_y - gap_y + .004, .38, gap_y - .007, 10, 8, muted)
+                previous = box
         elif lane.kind == "flow":
             nodes = lane.nodes
             space = .19 if len(nodes) == 2 else .076 if len(nodes) == 3 else .048
@@ -116,32 +124,33 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
             node_y = top + (end_y - top - h) / 2
             for i, node in enumerate(nodes):
                 x = .07 + i * (w + space)
-                draw_node(node, x, node_y, w, h)
+                box = draw_node(node, x, node_y, w, h)
                 if i:
-                    mid_y = node_y + h * .56
-                    horizontal(x - space, mid_y, space, "both" if node.two_way else "end")
+                    mid_y = node_y + h * .5
+                    horizontal(x - space, mid_y, space, "both" if node.two_way else "end", previous, box)
                     if node.incoming:
                         width = .148 if link_band else space - .012
                         label(node.incoming, x - (space + width) / 2,
                               node_y - link_band if link_band else mid_y - min(.055, h * .43),
                               width, link_band or min(.049, h * .41), 11, 9, muted, align="center")
+                previous = box
         else:
             origin, *outcomes = lane.nodes
             available = end_y - top
             origin_h = min(.11, available * .35)
-            draw_node(origin, .30, top, .40, origin_h)
+            origin_box = draw_node(origin, .30, top, .40, origin_h)
             first_link = min(.025, available * .12)
             last_link = min(.036, available * .16)
             spine_y = top + origin_h + first_link
             outcomes_y = spine_y + last_link
-            vertical(.5, top + origin_h, first_link)
+            vertical(.5, top + origin_h, first_link, start=origin_box)
             space = .018
             w = (.86 - space * (len(outcomes) - 1)) / len(outcomes)
             centers = [.07 + i * (w + space) + w / 2 for i in range(len(outcomes))]
             horizontal(centers[0], spine_y, centers[-1] - centers[0])
             for x, node in zip(centers, outcomes):
-                vertical(x, spine_y, outcomes_y - spine_y, "end")
-                draw_node(node, x - w / 2, outcomes_y, w, end_y - outcomes_y, condition=node.incoming)
+                box = draw_node(node, x - w / 2, outcomes_y, w, end_y - outcomes_y, condition=node.incoming)
+                vertical(x, spine_y, outcomes_y - spine_y, "end", end=box)
         y = end_y + gap
 
     if diagram.recap:

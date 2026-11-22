@@ -1,0 +1,198 @@
+import io
+
+from PIL import Image
+from pptx import Presentation
+from pypdf import PdfReader
+from pytest import raises
+
+from app.composition import OutlineItem, SlideContent
+from app.design import enforce_constraints, explicit_constraints
+from app.domain import DesignRules, Document, Shape, Source, Text, TextSpan, Theme
+from app.edits import ChangeText, ChatRequest, EditProposal, Restyle, RestyleDirection, apply, propose
+from app.evidence import resolve_headline
+from app.powerpoint import to_pptx
+from app.providers import Intelligence
+from app.rendering import preview, to_pdf
+from app.slide_design import build_slide, review_layouts
+
+
+def themed_document(**kwargs):
+    return Document(title="Review", theme=Theme(design=DesignRules(
+        audience="Readers", purpose="Inform", industry="General", mood="Editorial", brand_constraints="",
+        visual_references="", imagery="None", heading_font="Georgia", spacing="regular", card_shape="rect",
+        cover_style="rules", cover_background="#F7F6F0", dense_surface="#F5F1EB", dense_ink="#191817",
+        chart_colors=["#253B4D", "#8F541D", "#1C6050"],
+    )), **kwargs)
+
+
+def test_cost_headline_reconciles_values_and_derives_the_rate():
+    evidence = (
+        "Monthly running cost per vehicle: diesel $1,060 ($620 fuel, $440 maintenance), "
+        "electric $680 ($380 energy, $300 maintenance). Illustrative figures."
+    )
+    plan = OutlineItem(title="Cost comparison", layout="chart", key_message="Electric vans are 67% cheaper")
+    slide = SlideContent(title=plan.title, stacked_comparison={
+        "label": "Monthly running cost", "categories": ["Diesel", "Electric"],
+        "series": [{"name": "Fuel or energy", "values": [380, 620]}, {"name": "Maintenance", "values": [300, 440]}],
+    })
+    resolved = resolve_headline(plan, slide, evidence, [])
+    assert resolved.title == "Electric operating costs are 36% lower"
+    assert resolved.topic == "Cost comparison"
+    assert [item.values for item in slide.stacked_comparison.series] == [[620, 380], [440, 300]]
+
+
+def test_quarterly_chart_and_signed_recovery_use_supplied_evidence():
+    evidence = (
+        "Illustrative results in USD millions. Revenue by quarter: Q1 30, Q2 34, Q3 31, Q4 38. "
+        "Columns: Metric, Q1, Q2, Q3, Q4 and rows: Operating profit 2, 2, -1, 4; "
+        "Cash and equivalents 19, 20, 18, 20."
+    )
+    plan = OutlineItem(title="Quarterly revenue trends", layout="chart")
+    revenue = SlideContent(title=plan.title, chart={
+        "label": "Revenue", "chart": "line", "categories": ["Q1", "Q2", "Q3", "Q4"], "values": [30, 34, 31, 83],
+    })
+    assert resolve_headline(plan, revenue, evidence, []).title == "Revenue rebounds to $38m in Q4"
+    assert revenue.chart.values == [30, 34, 31, 38]
+    plan = OutlineItem(title="Financial readout", layout="metrics")
+    results = SlideContent(title=plan.title, readout={"metrics": [
+        {"title": "Q3 Operating Profit", "value": "$1m"},
+        {"title": "Q4 Operating Profit", "value": "$4m"},
+        {"title": "Q4 Cash and Equivalents", "value": "$20m", "body": "Cash held steady."},
+    ]})
+    assert resolve_headline(plan, results, evidence, []).title == "Operating profit rebounds from −$1m to $4m"
+    assert results.readout.metrics[0].value == "−$1m"
+    assert results.readout.metrics[2].body == "Up from $18m in Q3."
+
+
+def test_unsupported_numerical_headline_falls_back_and_explicit_title_is_preserved():
+    plan = OutlineItem(title="Profitability", layout="summary", key_message="Profit was $5m")
+    draft = SlideContent(title=plan.title)
+    assert resolve_headline(plan, draft, "Profit was -$5m.", []).title == "Profitability"
+    plan = OutlineItem(title="Five years in review", layout="summary", lock_title=True, key_message="A different title")
+    assert resolve_headline(plan, draft, 'Slide titled "Five years in review".', []).title == plan.title
+
+
+def test_explicit_theme_constraints_apply_to_both_backgrounds_and_fonts():
+    deck = themed_document()
+    deck.theme.background = "#4C52D9"
+    deck.theme.design.cover_background = "#252341"
+    constraints = explicit_constraints(
+        "Use a restrained light financial-report style. Use Georgia for headings and Arial for body text. Accent #1A4354."
+    )
+    updated = enforce_constraints(deck.theme, constraints)
+    assert updated.background == updated.design.cover_background == "#F7F5EF"
+    assert updated.accent == "#1A4354"
+    assert updated.design.heading_font == "Georgia" and updated.font == "Arial"
+    assert updated.constraints.background_mode == "light"
+
+
+def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
+    deck = themed_document()
+    part = OutlineItem(title="Three product features", topic="Features", layout="editorial")
+    content = SlideContent(title=part.title, points=[
+        {"title": "Warm beam", "body": "Dimmable light."}, {"title": "Charging", "body": "USB-C."},
+        {"title": "Handle", "body": "A fold-flat loop."},
+    ])
+    slide = build_slide(part, content, deck, 0, set())
+    assert slide.spec.recipe == "feature_panels"
+    deck.slides = [slide]
+    changed = next(e for e in slide.elements if isinstance(e, Text) and e.text == "USB-C.")
+    removed = next(e for e in slide.elements if isinstance(e, Text) and e.text == "A fold-flat loop.")
+    slide.elements.remove(removed)
+    changed.x -= .01
+    original_pos = changed.x
+    deck = apply(deck, EditProposal(summary="Edit", operations=[
+        ChangeText(op="change_text", slide_id=slide.id, element_id=changed.id, text="USB-C charging."),
+    ]))
+    theme = deck.theme.model_copy(deep=True)
+    theme.design.spacing = "compact"
+    transformed = apply(deck, EditProposal(summary="Redesign", operations=[Restyle(op="restyle", theme=theme)]))
+    result = transformed.slides[0]
+    assert result.spec.recipe == "feature_rows"
+    assert result.spec.content == slide.spec.content
+    assert result.id == slide.id
+    assert removed.id not in {e.id for e in result.elements}
+    edited = next(e for e in result.elements if e.id == changed.id)
+    assert edited.edited and edited.text == "USB-C charging." and edited.x == original_pos
+
+
+def test_candidate_review_prefers_connected_diagram_to_plain_text_grid():
+    deck = themed_document(aspect_ratio="1:1")
+    part = OutlineItem(title="How a request moves", recipe="standard", layout="comparison")
+    content = SlideContent(title=part.title, points=[
+        {"title": "First step", "body": "The browser looks for the existing response."},
+        {"title": "Second step", "body": "The server responds when contacted."},
+    ], diagram={"lanes": [{"nodes": [
+        {"label": "Browser", "role": "actor"}, {"label": "Server", "role": "service", "two_way": True},
+    ]}]})
+    draft = build_slide(part, content, deck, 0, set())
+    assert draft.spec.recipe == "standard"
+    result, png = review_layouts(deck, draft, 0, set(), None)
+    assert result.spec.recipe == "diagram_flow"
+    assert png.startswith(b"\x89PNG")
+    connector = next(el for el in result.elements if el.type == "line")
+    assert {connector.start_anchor.shape_id, connector.end_anchor.shape_id} <= {
+        el.id for el in result.elements if isinstance(el, Shape)
+    }
+    deck.slides = [result]
+    native = Presentation(io.BytesIO(to_pptx(deck, None)))
+    assert b"<a:stCxn" in native.slides[0]._element.xml.encode()
+    assert b"<a:endCxn" in native.slides[0]._element.xml.encode()
+
+
+def test_styled_text_preserves_one_native_object_and_visible_copy():
+    deck = themed_document()
+    part = OutlineItem(title="Savings are 36% higher", key_message="Savings are 36% higher", layout="comparison")
+    slide = build_slide(part, SlideContent(title=part.title), deck, 0, set())
+    deck.slides = [slide]
+    text = next(e for e in slide.elements if isinstance(e, Text))
+    assert text.text[text.spans[0].start:text.spans[0].end] == "36%"
+    png = preview(deck, slide, None)
+    assert Image.open(io.BytesIO(png)).width > 0
+    pdf = PdfReader(io.BytesIO(to_pdf(deck, None)))
+    assert text.text in pdf.pages[0].extract_text()
+    native = Presentation(io.BytesIO(to_pptx(deck, None)))
+    heading, = [sh for sh in native.slides[0].shapes if sh.has_text_frame and sh.text]
+    assert heading.text == text.text
+    assert any(run.text == "36%" and run.font.bold for run in heading.text_frame.paragraphs[0].runs)
+    with raises(ValueError, match="non-overlapping"):
+        Text(text="ab", x=0, y=0, w=.1, h=.1, spans=[TextSpan(start=0, end=1), TextSpan(start=0, end=2)])
+
+
+def test_named_network_actors_and_optional_response_survive_composition():
+    brief = ("Browser requests a resource, browser receives the response and cache instructions, "
+             "browser stores the response when permitted. The server may return 304 Not Modified during revalidation.")
+    part = OutlineItem(title="Request and response", layout="process")
+    content = SlideContent(title=part.title, diagram={"lanes": [{"nodes": [
+        {"label": "Browser Requests Resource"},
+        {"label": "Receives Response", "detail": "Includes Cache-Control"},
+        {"label": "Stores Response if Allowed"},
+    ]}], "recap": "Only store the response when permitted. Revalidation requests may get "})
+    resolve_headline(part, content, brief, [])
+    nodes = content.diagram.lanes[0].nodes
+    assert [node.label for node in nodes[:2]] == ["Browser", "Server"]
+    assert nodes[1].two_way and nodes[1].incoming == "Request / response"
+    assert content.diagram.recap == "Only store the response when permitted."
+    nodes[1].label = "Server Responds 304 Not Modified"
+    resolve_headline(part, content, brief, [])
+    assert nodes[1].label == "May return 304 Not Modified"
+
+
+def test_deck_design_request_is_routed_to_a_theme_only_proposal(monkeypatch):
+    deck = themed_document()
+    part = OutlineItem(title="Product demo", layout="closing")
+    deck.slides = [build_slide(part, SlideContent(title=part.title), deck, 0, set())]
+    theme = deck.theme.model_dump(exclude={"profile", "constraints"})
+    theme["design"]["mood"] = "Luxury editorial"
+
+    def redesign(self, schema, task, data, stage):
+        assert schema is RestyleDirection and stage == "design"
+        assert "slides" not in data
+        return schema.model_validate({**theme, "summary": "A more expressive editorial style"})
+
+    monkeypatch.setattr(Intelligence, "__init__", lambda self: setattr(self, "provider", "compatible"))
+    monkeypatch.setattr(Intelligence, "structured", redesign)
+    proposal = propose(None, deck, ChatRequest(instruction="Make the deck more luxurious and preserve its facts."))
+    operation, = proposal.operations
+    assert isinstance(operation, Restyle)
+    assert apply(deck, proposal).slides[0].spec.recipe == "closing_centered"

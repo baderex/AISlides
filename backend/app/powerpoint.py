@@ -1,4 +1,5 @@
 import io
+import re
 
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
@@ -61,6 +62,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
     presentation.core_properties.title = document.title
 
     def draw(shapes, elements, ox=0., oy=0., sx=1., sy=1., placeholders=None):
+        nodes, connectors = {}, []
         for el in sorted(elements, key=lambda element: element.z):
             nx, ny, nw, nh = ox + el.x*sx, oy + el.y*sy, el.w*sx, el.h*sy
             x, y, w, h = Inches(nx*width), Inches(ny*height), Inches(nw*width), Inches(nh*height)
@@ -79,7 +81,19 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 frame.auto_size = MSO_AUTO_SIZE.NONE
                 if not filled:
                     frame.margin_top = frame.margin_bottom = frame.margin_left = frame.margin_right = 0
-                for paragraph in frame.paragraphs:
+                lines = re.split(r"\n", el.text) if el.spans else ()
+                offset = 0
+                for index, paragraph in enumerate(frame.paragraphs):
+                    if el.spans:
+                        line = lines[index]
+                        paragraph.clear()
+                        for text, bold, shade in el.text_style(offset, offset + len(line)):
+                            run = paragraph.add_run()
+                            run.text = text
+                            run.font.bold = bold
+                            run.font.color.rgb = color(shade)
+                            alpha(run.font._element.solidFill, el.opacity)
+                        offset += len(line) + 1
                     paragraph.alignment = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[el.align]
                     paragraph.line_spacing = TEXT_LEADING
                     paragraph.space_before = paragraph.space_after = Pt(0)
@@ -104,6 +118,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 start, end = el.endpoints(w, h)
                 obj = shapes.add_connector(MSO_CONNECTOR.STRAIGHT, round(x + start[0]), round(y + start[1]),
                                            round(x + end[0]), round(y + end[1]))
+                connectors.append((obj, el.start_anchor, el.end_anchor))
                 obj.line.width = Pt(el.weight)
                 obj.line.color.rgb = color(el.color)
                 alpha(obj._element.spPr.ln.solidFill, el.opacity)
@@ -184,6 +199,14 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 else:
                     obj.line.fill.background()
             obj.name = el.id
+            if isinstance(el, Shape) and el.shape == "rect":
+                nodes[el.id] = obj
+        ports = {"top": 0, "left": 1, "bottom": 2, "right": 3}
+        for connector, start, end in connectors:
+            if start and start.shape_id in nodes:
+                connector.begin_connect(nodes[start.shape_id], ports[start.side])
+            if end and end.shape_id in nodes:
+                connector.end_connect(nodes[end.shape_id], ports[end.side])
 
     sources = {source.id: source for source in document.sources}
     for item in document.slides:

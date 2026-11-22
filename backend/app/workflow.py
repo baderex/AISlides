@@ -9,12 +9,12 @@ from sqlalchemy import select, update
 
 from app.composition import (
     EXHIBIT_LAYOUTS, IMAGE_LAYOUTS, EvidenceSummary, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review,
-    SlideContent, accepts_web_image, compose, design, is_data_driven, planned_exhibit, supports_point_icons,
+    SlideContent, accepts_web_image, design, is_data_driven, planned_exhibit, supports_point_icons,
 )
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
-from app.design import ArtDirection, DIRECTOR_PROMPT, apply_cover_direction, font_family, reference_sheet
+from app.design import ArtDirection, DIRECTOR_PROMPT, enforce_constraints, explicit_constraints, font_family, reference_sheet
 from app.domain import Image, Skill, Slide, Source, Theme, read_document
 from app.evidence import resolve_headline
 from app.imagery import image_configured, render_image, source_web_image
@@ -23,8 +23,9 @@ from app.previews import put_preview
 from app.providers import Intelligence, ProviderError
 from app.questions import Choice, Clarification, Option, standard_options
 from app.queue import notify
-from app.rendering import flattened, preview, validate_slide
+from app.rendering import flattened
 from app.research import collect
+from app.slide_design import build_slide, review_layouts
 from app.storage import Storage
 
 log = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ COMPOSITION_PLAN = (
     "'Operating profit recovers in Q4' and 'North and Central host the pilot'. Leave key_message empty for supplied titles, "
     "neutral look-up tables, or where evidence does not yet support a finding. Set lock_title only for exact titles the user supplies. "
     "Use title as a clear fallback. Keep introduced shorthand out of headings. Aim for 4–9 words. "
+    "Set visual_priority to the central figure, exhibit, or action. For a product slide about two or three independent "
+    "features set recipe to feature_panels. Use diagram_flow for a sequence and diagram_paths for alternatives. "
+    "Use closing_display for one clear closing action. Leave recipe null when unsure. "
     "Choose chart for a measured trend, research for exact lookup, process for ordered steps, "
     "comparison for parallel alternatives, and summary for unrelated explanatory points. Use a section divider only "
     "for a transition. Mark use_uploaded_image on a slide explicitly assigned a reference image, including a cover. "
@@ -422,7 +426,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             previous.image_asset_id = None
             previous.source_ids = [key for key in previous.source_ids if key != source.id]
             context["slide_content"] = previous.model_dump(mode="json")
-            context["draft"] = compose(part, previous, document, index, image_ids(assets, context), brand,
+            context["draft"] = build_slide(part, previous, document, index, image_ids(assets, context), brand,
                                        data_driven=data_driven).model_dump(mode="json")
     events = []
     version = None
@@ -534,16 +538,20 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         baseline = design(direction or ("Data Driven" if data_driven else ""), item.request["mode"], skill.theme if skill else None)
         locked = skill is not None or baseline.profile == "consulting"
         references = [{"name": asset.name, "type": asset.media_type, "excerpt": asset.extracted[:900]} for asset in assets]
+        style_answers = [answer["value"] for answer in context.get("answers", [])
+                         if answer["question_id"] in {"visual_direction", *context.get("style_questions", [])}]
+        constraints = explicit_constraints(item.request["prompt"], " ".join(style_answers))
         proposed = ai.structured(ArtDirection, DIRECTOR_PROMPT, {
             "prompt": item.request["prompt"], "intent": context["intent"], "answers": context.get("answers", []),
             "direction": direction, "selected_skill": context.get("skill"), "references": references,
-            "baseline": baseline.model_dump(), "locked_template": locked,
+            "baseline": baseline.model_dump(exclude={"constraints"}), "locked_template": locked,
+            "explicit_constraints": constraints.model_dump() if constraints else None,
         }, "design", reference_sheet(assets) if settings().llm_vision_enabled else None)
         theme = Theme.model_validate(proposed.model_dump())
         if not locked:
             theme.font = font_family(theme.font)
             theme.design.heading_font = font_family(theme.design.heading_font)
-            apply_cover_direction(theme, direction)
+            theme = enforce_constraints(theme, constraints)
         if locked:
             rules = proposed.design
             if baseline.design:
@@ -659,10 +667,18 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 "Use a branch lane for a decision with its test first, followed by two or three mutually exclusive outcomes. "
                 "Never separate an action and its result into two sibling outcomes. "
                 "For a definition, show the parts and their relationship. Use consistent roles for recurring actors, services and stores. "
-                "Use contains only for a system inside another system. Keep node labels under five words. Keep link labels empty "
+                "Use contains only for a named subsystem inside another system, such as a cache within a browser. "
+                "Leave contains empty for a tangible resource and for a node that is already the store. "
+                "When explaining a request and response, show the client and responding service as distinctly named nodes. "
+                "Name the request and response and use a two-way link if the traffic goes both ways. Give any later storage "
+                "its own node. For an overview, show the actors together with any local store nested in its owner. "
+                "Use clearly named actors, services or stores where possible. Keep node labels under five words. Keep link labels empty "
                 "unless they provide a short transition or condition. Put exact protocol terms in node details. Preserve the prescribed step count. "
-                "Distinguish local lookups from network requests. If a path stays local, do not label an operation as sending HTTP to a server. "
-                "Keep a conditional response conditional. "
+                "For a path that stays local, use explicit labels such as 'Browser checks local cache' and 'Browser "
+                "reuses cached response'. Avoid 'sends request' anywhere in a local-only path. "
+                "For a network path name the server and clearly label the network exchange. "
+                "If a response is described as possible or conditional, say 'may return' or qualify it with 'if unchanged' "
+                "where that response appears, including the recap. "
                 "For a worked example with an initial visit and a later decision to reuse or revalidate, keep the first "
                 "visit in its own flow lane. Begin the later branch lane with the later lookup or decision and put each "
                 "revalidation result within the same node as the conditional request. Use recap for the short requested takeaway. "
@@ -736,7 +752,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             content.chart or content.table or content.stacked_comparison
         ):
             return "image", state, "GENERATING", events, None, None
-        context["draft"] = compose(part, content, document, index, images, brand,
+        context["draft"] = build_slide(part, content, document, index, images, brand,
                                    web_image_ratio=web_image_ratio, image_ratio=image_aspect(content.image_asset_id, images),
                                    data_driven=data_driven).model_dump(mode="json")
         stage, status = "review", "REVIEWING"
@@ -746,6 +762,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             return None
         content = SlideContent.model_validate(context["slide_content"])
         part = OutlineItem.model_validate(context["outline"]["slides"][index]).model_copy(update={"title": content.title})
+        if part.key_message:
+            part.key_message = content.title
         warning = ""
         try:
             if not image_configured():
@@ -765,7 +783,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         except ProviderError as error:
             warning = str(error)
         images = image_ids(assets, context)
-        slide = compose(part, content, document, index, images, brand,
+        slide = build_slide(part, content, document, index, images, brand,
                         image_ratio=image_aspect(content.image_asset_id, images), data_driven=data_driven)
         if warning:
             slide.warnings.append(warning)
@@ -778,15 +796,18 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         slide = Slide.model_validate(context["draft"])
         attach_slide_sources(document, context, set(slide.source_ids))
         images = image_ids(assets, context)
+        original_recipe = slide.spec.recipe if slide.spec else None
+        text_elements = [element for element, *_ in flattened(slide.elements) if element.type in {"text", "table"}]
+        dimensions = [(element.size, element.h) for element in text_elements]
+        storage = Storage()
+        slide, png = review_layouts(document, slide, index, images, storage.get)
+        if slide.spec and original_recipe != slide.spec.recipe:
+            events.append(("slide.revised", f"Selected a clearer layout for slide {index + 1}.",
+                           {"index": index, "recipe": slide.spec.recipe}))
         if warning := context.get("web_image_warning"):
             slide.warnings.append(warning)
         if data_driven and slide.layout == "chart" and not any(element.type == "chart" for element in slide.elements):
             slide.warnings.append("The available evidence did not support the planned chart.")
-        text_elements = [element for element, *_ in flattened(slide.elements) if element.type in {"text", "table"}]
-        dimensions = [(element.size, element.h) for element in text_elements]
-        slide.warnings.extend(validate_slide(document, slide, images))
-        storage = Storage()
-        png = preview(document, slide, storage.get)
         fixed = sum(original != (element.size, element.h) for original, element in zip(dimensions, text_elements))
         if fixed:
             events.append(("slide.revised", f"Adjusted text fit in {fixed} elements on slide {index + 1}.",
@@ -846,7 +867,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         part = resolve_headline(part, content, item.request["prompt"], document.sources,
                                 strict_copy=bool(inferred_intent.get("supplied_evidence_only")))
         context["slide_content"] = content.model_dump(mode="json")
-        context["draft"] = compose(part, content, document, index, images, brand,
+        context["draft"] = build_slide(part, content, document, index, images, brand,
                                    web_image_ratio=web_image["ratio"] if web_image else None,
                                    image_ratio=image_aspect(content.image_asset_id, images),
                                    data_driven=data_driven).model_dump(mode="json")

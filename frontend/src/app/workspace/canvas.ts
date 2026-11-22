@@ -1,8 +1,9 @@
 import { NgTemplateOutlet } from '@angular/common';
 import { Component, computed, input, output, signal } from '@angular/core';
-import { Aspect, ChartElement, Geometry, Slide, SlideElement, TableElement } from '../models';
+import { Aspect, ChartElement, ConnectorAnchor, Geometry, LineElement, Slide, SlideElement, TableElement, TextElement } from '../models';
 import { FitText } from './fit-text';
 
+type Point = [number, number];
 type Change = Pick<Geometry, 'x' | 'y' | 'w' | 'h'>;
 interface Drag { id: string; pointer: number; startX: number; startY: number; resize: boolean; original: Change }
 
@@ -31,6 +32,74 @@ export class SlideCanvas {
   geometry(element: SlideElement): Change {
     const draft = this.draft();
     return draft?.id === element.id ? draft.change : element;
+  }
+
+  connectedLine(element: LineElement) {
+    const anchorPoint = (anchor?: ConnectorAnchor | null): Point | null => {
+      const node = anchor && this.slide().elements.find(el => el.id === anchor.shape_id && el.type === 'shape');
+      if (!node || !anchor) return null;
+      const {x, y, w, h} = this.geometry(node);
+      const [dx, dy] = {top: [.5, 0], left: [0, .5], bottom: [.5, 1], right: [1, .5]}[anchor.side];
+      return [x + w * dx, y + h * dy];
+    };
+    const anchoredStart = anchorPoint(element.start_anchor);
+    const anchoredEnd = anchorPoint(element.end_anchor);
+    if (!anchoredStart && !anchoredEnd) return null;
+    const {x, y, w, h} = this.geometry(element);
+    const [from, to] = {
+      diagonal: [[x, y], [x + w, y + h]],
+      right: [[x, y + h / 2], [x + w, y + h / 2]],
+      left: [[x + w, y + h / 2], [x, y + h / 2]],
+      down: [[x + w / 2, y], [x + w / 2, y + h]],
+      up: [[x + w / 2, y + h], [x + w / 2, y]],
+    }[element.direction ?? 'diagonal'] as [Point, Point];
+    const a = anchoredStart ?? from, b = anchoredEnd ?? to;
+    const left = Math.max(0, Math.min(a[0], b[0]) - .015);
+    const top = Math.max(0, Math.min(a[1], b[1]) - .022);
+    const width = Math.min(1, Math.max(a[0], b[0]) + .015) - left;
+    const height = Math.min(1, Math.max(a[1], b[1]) + .022) - top;
+    const coords = ([px, py]: Point) => [(px - left) / width * 100, (py - top) / height * 100];
+    const arrow = (start: Point, end: Point) => {
+      const dx = (end[0] - start[0]) * this.widthPoints();
+      const dy = (end[1] - start[1]) * 540;
+      const length = Math.hypot(dx, dy);
+      if (length < 1) return '';
+      const depth = Math.min(length / 2, Math.max(6, element.weight * 3.5));
+      const baseX = end[0] - dx / length * depth / this.widthPoints();
+      const baseY = end[1] - dy / length * depth / 540;
+      const sideX = dy / length * depth * .4 / this.widthPoints();
+      const sideY = dx / length * depth * .4 / 540;
+      return [coords(end), coords([baseX - sideX, baseY + sideY]), coords([baseX + sideX, baseY - sideY])]
+        .map(point => point.join(',')).join(' ');
+    };
+    return {
+      geometry: {x: left, y: top, w: width, h: height},
+      path: `M ${coords(a).join(' ')} L ${coords(b).join(' ')}`,
+      startTip: element.arrows === 'both' ? arrow(b, a) : '',
+      endTip: element.arrows === 'both' || element.arrows === 'end' ? arrow(a, b) : '',
+    };
+  }
+
+  textRuns(element: TextElement) {
+    if (!element.spans?.length) return [{text: element.text, color: element.color, bold: element.bold}];
+    const chars = Array.from(element.text);
+    const runs: {text: string; color: string; bold: boolean}[] = [];
+    let cursor = 0;
+    for (const span of element.spans) {
+      if (span.start > cursor) {
+        runs.push({text: chars.slice(cursor, span.start).join(''), color: element.color, bold: element.bold});
+      }
+      runs.push({
+        text: chars.slice(span.start, span.end).join(''),
+        color: span.color ?? element.color,
+        bold: span.bold ?? element.bold,
+      });
+      cursor = span.end;
+    }
+    if (cursor < chars.length) {
+      runs.push({text: chars.slice(cursor).join(''), color: element.color, bold: element.bold});
+    }
+    return runs;
   }
 
   font(size: number) { return size / this.widthPoints() * 100 + 'cqw'; }
@@ -77,6 +146,7 @@ export class SlideCanvas {
     event.preventDefault();
     canvas.focus({preventScroll: true});
     this.selection.emit(id);
+    if (target.type === 'line' && (target.start_anchor || target.end_anchor)) return;
     this.drag = { id, resize, pointer: event.pointerId, startX: event.clientX, startY: event.clientY, original: target };
     canvas.setPointerCapture(event.pointerId);
   }

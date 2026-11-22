@@ -14,15 +14,20 @@ export interface Geometry {
   opacity: number; border: string | null; edited: boolean;
   placeholder_idx?: number | null;
 }
+export interface TextSpan { start: number; end: number; color?: string | null; bold?: boolean | null }
 export interface TextElement extends Geometry {
+  spans?: TextSpan[];
   type: 'text'; text: string; size: number; color: string; font: string; bold: boolean; align: 'left' | 'center' | 'right';
 }
 export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle'; fill: string }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
+export interface ConnectorAnchor { shape_id: string; side: 'top' | 'left' | 'bottom' | 'right' }
 export interface LineElement extends Geometry {
   type: 'line'; color: string; weight: number;
   direction?: 'diagonal' | 'right' | 'left' | 'down' | 'up';
   arrows?: 'none' | 'end' | 'both';
+  start_anchor?: ConnectorAnchor | null;
+  end_anchor?: ConnectorAnchor | null;
 }
 export interface TableElement extends Geometry {
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
