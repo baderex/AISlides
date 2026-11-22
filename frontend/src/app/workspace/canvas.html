@@ -60,7 +60,8 @@
             @case ('chart') {
               @if (el.chart === 'pie') { <div class="slide-pie" [style.background]="pie(el)"></div> }
               @else {
-                <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart" aria-hidden="true">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart"
+                  [class.labeled-line]="el.chart === 'line' && el.show_values" aria-hidden="true">
                   @if (el.chart === 'stacked_column') {
                     @for (series of stackedColumns(el); track $index; let index = $index) {
                       @for (mark of series; track $index) {
@@ -85,9 +86,18 @@
                   }
                   }
                 </svg>
+                @if (el.chart === 'line' && el.show_values && el.series.length === 1) {
+                  @for (mark of chart(el)[0]; track $index) {
+                    <span class="chart-point-value" [style.left.%]="mark.cx" [style.top.%]="mark.cy"
+                      [style.font-family]="el.font" [style.color]="el.label_color" [style.font-size]="font(14)">
+                      {{ chartPointValue(el, $index) }}
+                    </span>
+                  }
+                }
                 @if (el.chart !== 'bar') {
-                  <div class="chart-labels" [style.font-family]="el.font" [style.color]="el.label_color"
-                    [style.font-size]="font(el.chart === 'stacked_column' ? 13 : 10)"
+                  <div class="chart-labels" [class.labeled-line]="el.chart === 'line' && el.show_values"
+                    [style.font-family]="el.font" [style.color]="el.label_color"
+                    [style.font-size]="font(el.chart === 'stacked_column' || el.show_values ? 13 : 10)"
                     [style.font-weight]="el.chart === 'stacked_column' ? 700 : null">
                     @for (label of chartLabels(el); track $index) { <span>{{ label }}</span> }
                   </div>

@@ -38,7 +38,10 @@ export class SlideCanvas {
   tableFormat(table: TableElement, width: number, height: number) {
     const points = width * this.widthPoints();
     const compact = !!table.row_rule && points < 360;
-    const weights = table.rows[0].map((_, index) => compact && !table.numeric_columns?.includes(index) ? 1.4 : 1);
+    const count = table.rows[0].length;
+    const numericCount = table.numeric_columns?.length ?? 0;
+    const mixed = !!table.row_rule && count >= 4 && numericCount > 0 && numericCount < count;
+    const weights = table.rows[0].map((_, index) => (compact || mixed) && !table.numeric_columns?.includes(index) ? 1.5 : 1);
     const total = weights.reduce((sum, weight) => sum + weight, 0);
     return {
       insetY: this.font(Math.min(6, (height * 540 / table.rows.length) * .15)),
@@ -98,15 +101,22 @@ export class SlideCanvas {
     const values = el.series.flatMap(series => series.values);
     const high = Math.max(0, ...values), low = Math.min(0, ...values), span = high - low || 1;
     const band = 100 / el.categories.length;
-    const baseline = 85 * high / span;
+    const plotHeight = el.chart === 'line' && el.show_values ? 87 : 85;
+    const baseline = plotHeight * high / span;
     return el.series.map(series => series.values.map((value, index) => {
-      const current = 85 * (high - value) / span;
+      const current = plotHeight * (high - value) / span;
+      const lineY = el.chart === 'line' && el.show_values ? plotHeight * .13 + current * .82 : current;
       const thickness = .76 * band / el.series.length;
       const horizontal = 85 / el.categories.length * .72 / el.series.length;
       return { x: band*(index+.12), y: Math.min(current, baseline), w: thickness*.85, h: Math.abs(current-baseline),
-        cx: band*(index+.5), cy: current, horizontal, bx: 100 * (Math.min(0, value)-low)/span,
+        cx: band*(index+.5), cy: lineY, horizontal, bx: 100 * (Math.min(0, value)-low)/span,
         by: index * 85 / el.categories.length, bw: Math.abs(value)*100/span };
     }));
+  }
+
+  chartPointValue(el: ChartElement, index: number) {
+    const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
+    return (el.value_prefix ?? '') + number.format(el.series[0].values[index]);
   }
 
   readonly stackedBaseline = 97;

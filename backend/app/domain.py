@@ -161,6 +161,7 @@ class Chart(ElementBase):
     label_color: Color = "#292C49"
     font: str = Field(default="Arial", max_length=60)
     value_prefix: str = Field(default="", max_length=8)
+    show_values: bool = False
 
     def totals(self) -> list[float]:
         return [sum(values) for values in zip(*(series.values for series in self.series))]

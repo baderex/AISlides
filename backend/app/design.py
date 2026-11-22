@@ -26,12 +26,20 @@ DIRECTOR_PROMPT = (
     "Infer audience, purpose, industry, mood and visual references from the request and clarification answers. "
     "Honor explicit brand instructions, exact color values, requested fonts and locked template settings before "
     "inferred preferences. Treat uploaded materials as references. Choose body and heading fonts, card geometry, "
-    "spacing, cover treatment, chart colors and an imagery direction. Prefer Arial or Georgia for portable typography "
-    "unless a brand specifies another font. Make ink and muted text readable on both background and surface. "
+    "spacing, cover treatment, chart colors and an imagery direction. Give font family names without style suffixes "
+    "such as Bold or Regular. Choose fonts by role. For an editorial deck, "
+    "prefer Georgia for headings and Arial for body text, charts and tables unless another font is requested. "
+    "Use background for content slides and cover_background for the cover and closing. When a brief names a dark "
+    "brand color without requiring dark slides throughout, consider a quiet light background for analytical slides "
+    "and use the dark color on decision slides. Make ink and muted text readable on both background and surface. "
     "Use a contrasting, quieter dense_surface for data tables. For dark luxury use a charcoal background, restrained "
     "gold accents, a rules-style cover, editorial typography and a light warm table surface unless the user specifies otherwise. "
     "Return only design JSON matching the schema. Do not produce slide content, layout assignments, HTML or CSS."
 )
+
+
+def font_family(value):
+    return re.sub(r"\s+(?:bold|regular)$", "", value.strip(), flags=re.IGNORECASE)
 
 
 def reference_sheet(assets):
@@ -75,8 +83,8 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
         table.header_fill = blend(table.fill, background, .42)
         table.header_color = readable(theme.ink, table.header_fill, table.color, background)
         table.font = theme.font
-        if table.w >= .65 and len(table.rows) <= 6:
-            table.size = max(table.size, 18)
+        if table.w >= .65:
+            table.size = max(table.size, 15 if dense else 18)
     table.row_rule = blend(table.fill, table.color, .27)
     table.header_rule = theme.accent
     table.numeric_columns = []

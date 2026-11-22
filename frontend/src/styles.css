@@ -407,6 +407,9 @@ studio-canvas { display: block; width: 100%; }
 .slide-shape.ellipse, .slide-pie { border-radius: 50%; }
 .slide-shape.triangle { clip-path: polygon(50% 0,100% 100%,0 100%); }
 .slide-content .slide-chart { height: 90%; }
+.slide-content .slide-chart.labeled-line { height: 100%; }
+.chart-labels.labeled-line { position: absolute; inset: 89% 0 auto; }
+.chart-point-value { position: absolute; translate: -50% calc(-100% - 4px); font-weight: 700; white-space: nowrap; }
 .slide-pie { width: auto; height: 90%; aspect-ratio: 1; margin: 2% auto; max-width: 100%; }
 .chart-labels { display: flex; justify-content: space-around; white-space: nowrap; }
 .chart-labels span { flex: 1; min-width: 0; text-align: center; text-overflow: ellipsis; overflow: hidden; }

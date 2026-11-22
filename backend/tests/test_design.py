@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageColor
 from pptx import Presentation
 from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.oxml.ns import qn
 from pypdf import PdfReader
@@ -94,6 +95,8 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     line = next(shape.chart for shape in ppt.slides[1].shapes if shape.has_chart)
     assert str(line.series[0].format.line.color.rgb) == chart["color"][1:]
     assert str(line.category_axis.tick_labels.font.color.rgb) == chart["label_color"][1:]
+    assert line.plots[0].data_labels.show_value
+    assert [*line.series[0].values] == [80, 92, 106]
     with ZipFile(io.BytesIO(raw)) as archive:
         assert any(name.startswith("ppt/embeddings/") for name in archive.namelist())
     pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
@@ -105,9 +108,9 @@ def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
     structured = Intelligence.structured
     parts = [
         ("Costs by option", "chart", "Compare costs broken down by component."),
-        ("Budget", "metrics", "Show the itemized allocation."),
+        ("Budget", "summary", "Show the itemized allocation."),
         ("Delivery schedule", "process", "Show the deployment timeline and risks."),
-        ("Release decision", "comparison", "Show performance gates and approval."),
+        ("Release decision", "metrics", "Show performance gates and approval."),
     ]
     expected_exhibits = ["stacked_comparison", "allocation", "rollout", "decision"]
     exhibits = [
@@ -172,3 +175,38 @@ def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
     assert [category.label for category in native.plots[0].categories] == ["Current  $100", "Proposed  $60"]
     pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
     assert all(label in pdf.pages[0].extract_text() for label in chart.category_labels())
+
+
+def test_requested_cover_image_fits_and_is_used_once(monkeypatch):
+    structured = Intelligence.structured
+    client = TestClient(app)
+    photo = io.BytesIO()
+    Image.new("RGB", (400, 240), "gray").save(photo, format="PNG")
+    uploaded = client.post("/api/v1/assets", files={"file": ("Product.png", photo.getvalue(), "image/png")})
+    asset = uploaded.json()["id"]
+
+    def respond(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Product launch", audience="Buyers", visual_direction="editorial", slide_count=2)
+        if schema is Outline:
+            return Outline(title="Product", slides=[
+                {"title": "Product", "layout": "cover", "use_uploaded_image": True},
+                {"title": "Features", "layout": "editorial"},
+            ])
+        if schema is SlideContent:
+            # The provider omits the assigned hero and erroneously asks for it later.
+            image_id = asset if data["slide_index"] == 1 else None
+            return SlideContent(title=data["item"]["title"], image_asset_id=image_id)
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", respond)
+    path = create(client, "Create two editorial slides for buyers with the photo on the cover only.", asset_ids=[asset])
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    cover, features = result["document"]["slides"]
+    photo, = [element for element in cover["elements"] if element["type"] == "image"]
+    assert photo["w"] * 960 / (photo["h"] * 540) == approx(400 / 240)
+    assert all(element["type"] != "image" for element in features["elements"])
+    exported = Presentation(io.BytesIO(client.post(path + "/export?format=pptx").content))
+    assert sum(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for slide in exported.slides for shape in slide.shapes) == 1

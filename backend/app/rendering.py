@@ -12,7 +12,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from reportlab.pdfgen import canvas
 
-from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
+from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text, display_value
 from app.lucide import bundled_icon, icon_asset_id
 
 
@@ -21,13 +21,25 @@ TEXT_LEADING = 1.13
 CELL_INSET_X = 6
 CELL_INSET_Y = 4
 MIN_TEXT_SIZE = 8
+FONT_FILES = {
+    "arial": ("arial.ttf", "arialbd.ttf"),
+    "arial black": ("ariblk.ttf", "ariblk.ttf"),
+    "calibri": ("calibri.ttf", "calibrib.ttf"),
+    "cambria": ("cambria.ttc", "cambriab.ttf"),
+    "georgia": ("georgia.ttf", "georgiab.ttf"),
+    "times new roman": ("times.ttf", "timesbd.ttf"),
+    "trebuchet ms": ("trebuc.ttf", "trebucbd.ttf"),
+    "verdana": ("verdana.ttf", "verdanab.ttf"),
+}
+SERIF_FAMILIES = {"cambria", "georgia", "source serif 4", "times new roman", "serif"}
 
 
 @lru_cache(maxsize=100)
 def font(size: int, bold: bool, family: str = "Arial"):
-    serif = family.lower() in {"georgia", "times new roman", "serif"}
+    family = family.strip().lower()
+    serif = family in SERIF_FAMILIES
     alternate = ("DejaVuSerif" if serif else "DejaVuSans") + ("-Bold" if bold else "") + ".ttf"
-    windows = ("georgiab.ttf" if bold else "georgia.ttf") if serif else ("arialbd.ttf" if bold else "arial.ttf")
+    windows = FONT_FILES.get(family, FONT_FILES["georgia" if serif else "arial"])[int(bold)]
     for candidate in (str(Path("C:/Windows/Fonts") / windows), alternate):
         try:
             return ImageFont.truetype(candidate, size)
@@ -98,7 +110,7 @@ def pdf_face(family, bold):
             return name
         except (OSError, TTFError):
             pass
-    serif = family.lower() in {"georgia", "times new roman", "serif"}
+    serif = family.strip().lower() in SERIF_FAMILIES
     return ("Times-Bold" if bold else "Times-Roman") if serif else ("Helvetica-Bold" if bold else "Helvetica")
 
 
@@ -118,6 +130,15 @@ def text_fits(value, width, height, size, bold, family="Arial", align="left"):
     lines = pdf_lines(value, width, face, size)
     extent = size + (len(lines) - 1) * size * TEXT_LEADING - pdfmetrics.getDescent(face, size)
     return extent <= height and all(pdfmetrics.stringWidth(line, face, size) <= width for line in lines)
+
+
+def text_height(value, width, size, bold, family):
+    """Return the larger required height in the preview and PDF text engines."""
+    pdf_font = pdf_face(family, bold)
+    pdf_rows = len(pdf_lines(value, width, pdf_font, size))
+    raster_rows = len(raster_text(value, round(width * TEXT_SCALE), 10000, size, bold, family).lines)
+    return max(raster_rows * size * TEXT_LEADING,
+               size + (pdf_rows - 1) * size * TEXT_LEADING - pdfmetrics.getDescent(pdf_font, size))
 
 
 def draw_raster_text(draw, layout, color, x=0, y=0):
@@ -227,7 +248,8 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
 def table_columns(table: Table, width: float) -> list[tuple[float, float]]:
     count = len(table.rows[0])
     compact = table.row_rule and width < 360
-    weights = [1.4 if compact and column not in table.numeric_columns else 1 for column in range(count)]
+    mixed = table.row_rule and count >= 4 and 0 < len(table.numeric_columns) < count
+    weights = [1.5 if (compact or mixed) and column not in table.numeric_columns else 1 for column in range(count)]
     total = sum(weights)
     widths = [width * weight / total for weight in weights]
     return list(zip(accumulate(widths, initial=0), widths))
@@ -299,9 +321,17 @@ def chart_marks(el: Chart, w: float, h: float):
                 thickness = band * .76 / len(el.series)
                 yield ("rect", shades[si % len(shades)], (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
             else:
+                if el.show_values and el.chart == "line":
+                    pos = h * .13 + pos * .82
                 points.append((band * (i + .5), pos))
         if el.chart == "line" and points:
             yield ("line", shades[si % len(shades)], points)
+
+
+def chart_values(element, points):
+    if element.show_values and len(element.series) == 1:
+        for value, (x, y) in zip(element.series[0].values, points):
+            yield display_value(value, element.value_prefix), x, y
 
 
 def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> bytes:
@@ -380,13 +410,19 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                 elif kind == "pie":
                     cx, cy, radius, begin, sweep = dims
                     draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color)
-                elif len(dims) > 1:
-                    draw.line(dims, fill=color, width=3)
+                else:
+                    if len(dims) > 1:
+                        draw.line(dims, fill=color, width=max(2, round(2 * scale)))
+                    for value, px, py in chart_values(el, dims):
+                        radius = 3 * scale
+                        draw.ellipse((px-radius, py-radius, px+radius, py+radius), fill=color)
+                        draw.text((px, py - 7 * scale), value, fill=el.label_color,
+                                  font=font(max(1, round(14 * scale)), True, el.font), anchor="mb")
             if el.chart not in {"pie", "bar"}:
                 stacked = el.chart == "stacked_column"
                 if stacked:
                     draw.line((0, plot_h, w, plot_h), fill=el.label_color)
-                face = font(max(1, round((13 if stacked else 10) * scale)), stacked, el.font)
+                face = font(max(1, round((13 if stacked or el.show_values else 10) * scale)), stacked, el.font)
                 for index, category in enumerate(el.category_labels()):
                     draw.text((w*(index+.5)/len(el.categories), plot_h+3), category if stacked else category[:20],
                               fill=el.label_color, font=face, anchor="mt")
@@ -501,14 +537,21 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         cx, cy, radius, begin, sweep = dims
                         pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=0, fill=1)
                     else:
+                        pdf.setLineWidth(2 if el.show_values else 1)
                         for (x1, y1), (x2, y2) in zip(dims, dims[1:]):
                             pdf.line(x1, h-y1, x2, h-y2)
+                        for value, px, py in chart_values(el, dims):
+                            pdf.setFillColor(HexColor(color))
+                            pdf.circle(px, h-py, 3, stroke=0, fill=1)
+                            pdf.setFillColor(HexColor(el.label_color))
+                            pdf.setFont(pdf_face(el.font, True), 14)
+                            pdf.drawCentredString(px, h-py+8, value)
                 if el.chart not in {"pie", "bar"}:
                     stacked = el.chart == "stacked_column"
                     if stacked:
                         pdf.setStrokeColor(HexColor(el.label_color))
                         pdf.line(0, h - plot_h, w, h - plot_h)
-                    pdf.setFont(pdf_face(el.font, stacked), 13 if stacked else 10)
+                    pdf.setFont(pdf_face(el.font, stacked), 13 if stacked or el.show_values else 10)
                     pdf.setFillColor(HexColor(el.label_color))
                     for i, category in enumerate(el.category_labels()):
                         pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])

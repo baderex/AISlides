@@ -3,7 +3,7 @@ import io
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
-from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+from pptx.enum.chart import XL_CHART_TYPE, XL_DATA_LABEL_POSITION, XL_LEGEND_POSITION, XL_MARKER_STYLE
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
 from pptx.enum.text import MSO_AUTO_SIZE, MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -217,6 +217,13 @@ def style_native_chart(chart, element):
         shade = color(palette[index % len(palette)])
         if element.chart == "line":
             mark.format.line.color.rgb = shade
+            if element.show_values:
+                mark.format.line.width = Pt(2)
+                mark.marker.style = XL_MARKER_STYLE.CIRCLE
+                mark.marker.size = 6
+                mark.marker.format.fill.solid()
+                mark.marker.format.fill.fore_color.rgb = shade
+                mark.marker.format.line.color.rgb = shade
         else:
             mark.format.fill.solid()
             mark.format.fill.fore_color.rgb = shade
@@ -225,7 +232,17 @@ def style_native_chart(chart, element):
         for axis in (chart.category_axis, chart.value_axis):
             axis.tick_labels.font.name = element.font
             axis.tick_labels.font.color.rgb = color(element.label_color)
-            axis.tick_labels.font.size = Pt(10)
+            axis.tick_labels.font.size = Pt(13 if element.show_values else 10)
+    if element.show_values and element.chart == "line" and len(element.series) == 1:
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        labels = plot.data_labels
+        labels.show_value = True
+        labels.position = XL_DATA_LABEL_POSITION.ABOVE
+        labels.font.name = element.font
+        labels.font.size = Pt(14)
+        labels.font.bold = True
+        labels.font.color.rgb = color(element.label_color)
     if element.chart == "stacked_column":
         chart.value_axis.minimum_scale = 0
         chart.legend.position = XL_LEGEND_POSITION.BOTTOM

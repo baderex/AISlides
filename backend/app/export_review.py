@@ -17,8 +17,8 @@ import pypdfium2 as pdfium
 from pypdfium2.raw import FPDF_PAGEOBJ_TEXT
 
 from app.config import settings
-from app.domain import Document, Text
-from app.rendering import flattened
+from app.domain import Document, Table, Text
+from app.rendering import flattened, table_columns
 
 
 class ReviewUnavailable(RuntimeError):
@@ -104,6 +104,24 @@ def intersection(a, b):
     return area((max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])))
 
 
+def cell_content(value):
+    value = unicodedata.normalize("NFKC", value).casefold().replace("−", "-")
+    return "".join(ch for ch in value if ch.isalnum() or ch in "-+.%$€£¥")
+
+
+def missing_table_cells(text, table, x, top, width, height):
+    row_height = height / len(table.rows)
+    columns = table_columns(table, width)
+    for row_index, row in enumerate(table.rows):
+        upper = top - row_index * row_height
+        for column_index, (cell, (offset, cell_width)) in enumerate(zip(row, columns)):
+            expected = cell_content(cell)
+            if expected:
+                actual = text.get_text_bounded(x + offset, upper - row_height, x + offset + cell_width, upper)
+                if expected != cell_content(actual):
+                    yield row_index + 1, column_index + 1, cell
+
+
 def page_findings(page, slide):
     issues = []
 
@@ -117,6 +135,10 @@ def page_findings(page, slide):
                 for obj in islice(page.get_objects(filter=[FPDF_PAGEOBJ_TEXT], textpage=text), 800)]
         runs = [run for run in runs if run.text and area(run.box) > 0]
         for element, x, y, w, h in flattened(slide.elements):
+            if isinstance(element, Table) and element.rotation % 360 == 0 and element.opacity > 0:
+                for row, column, cell in islice(missing_table_cells(text, element, x * width, (1-y) * height,
+                                                                   w * width, h * height), 3):
+                    report("table-content", f"Rendered table cell {row}, {column} is missing or clipped: {cell[:55]}")
             if not isinstance(element, Text) or not (expected := normalized(element.text)) or element.opacity == 0:
                 continue
             if element.rotation % 360:

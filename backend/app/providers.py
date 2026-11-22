@@ -43,6 +43,8 @@ def validation_hint(error: ValidationError) -> str:
         limits = issue.get("ctx", {})
         if kind == "slide_count":
             hint = f"return exactly {limits['expected']} slides (received {limits['actual']})"
+        elif kind == "point_count":
+            hint = f"return exactly {limits['expected']} items in points and no extra items"
         elif kind == "required_exhibit":
             hint = f"populate the {limits['exhibit']} object for this slide"
         elif kind == "literal_error":
@@ -128,6 +130,8 @@ class Intelligence:
         if required_exhibit:
             validation_context = {"required_exhibit": required_exhibit,
                                   "omit_phase_quantities": data.get("omit_phase_quantities", False)}
+        elif stage == "slide" and data.get("point_count"):
+            validation_context = {"point_count": data["point_count"]}
         if self.provider == "demo":
             from app.demo import demo_response
             return schema.model_validate(demo_response(schema.__name__, data), context=validation_context)

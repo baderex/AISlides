@@ -1,0 +1,27 @@
+[
+  {
+    "id": "van-pilot",
+    "slide_count": 6,
+    "prompt": "Create exactly six 16:9 slides for the executive committee of a fictional logistics company. The decision is whether to fund a 90-day electric delivery van pilot. Recommend approving a capped $180,000 pilot for 12 vans at North and Central, with no fleetwide rollout commitment.\n\nUse only these illustrative inputs. Sites (daily route miles / vans eligible today / spare depot charging ports): North 72 / 8 / 4, Central 86 / 6 / 3, South 118 / 2 / 0. Plan six vans each at North and Central. Per-van monthly operating cost: diesel $1,060 ($620 fuel, $440 maintenance), electric $680 ($380 energy, $300 maintenance). Pilot budget: $96,000 vehicle leases, $54,000 charging and installation, $18,000 training and telemetry, $12,000 contingency. Treat the operating savings as illustrative and separate from pilot spend. Day-90 gates: at least 97% on-time delivery, at least 95% overnight charge readiness, and at least 20% lower cost per mile versus matched diesel routes. If any gate misses, pause expansion and diagnose. Risks are installation delay and route disruption. Use staged commissioning and retain diesel backup as mitigations.\n\nSlides in order: 1 decision-led cover with an editorial visual, 2 case for the pilot with a labeled cost comparison chart, 3 site selection with a three-site comparison table, 4 pilot budget, 5 deployment timeline and operational risks, 6 day-90 decision gates and the approval ask. Use a restrained navy and teal editorial style, strong hierarchy, and readable labels. Vary the composition to suit each slide. Label figures as illustrative. Do not add external statistics or invented claims. Generate the finished deck directly.",
+    "research": true
+  },
+  {
+    "id": "financial-review",
+    "slide_count": 4,
+    "prompt": "Build four 4:3 slides for the finance committee of fictional Alder Works. Generate directly in a restrained light financial-report style. Use only this illustrative dataset, in USD millions unless indicated. 1: Cover titled Alder Works quarterly review. 2: Revenue by quarter as an editable line chart: Q1 30, Q2 34, Q3 31, Q4 38. 3: A full operating results table, with columns Metric, Q1, Q2, Q3, Q4 and all rows: Revenue 30, 34, 31, 38; Cost of revenue 18, 20, 19, 22; Gross profit 12, 14, 12, 16; Operating expenses 10, 12, 13, 12; Operating profit 2, 2, -1, 4; Capital expenditure 3, 1, 2, 4; Cash and equivalents 19, 20, 18, 20. 4: A closing readout on Q3's operating loss and Q4's recovery, with Q4 operating profit of $4m and cash of $20m. Preserve all table values and the negative sign. Identify the figures as illustrative.",
+    "aspect_ratio": "4:3"
+  },
+  {
+    "id": "product-launch",
+    "slide_count": 4,
+    "prompt": "Create four widescreen launch slides for retail buyers introducing Cove, a fictional compact LED lantern. Use the supplied lantern photo as the cover hero and retain the full photograph. The photo illustrates the product category. Credit 'Working By Emergency Light' by Alan Levine (cogdogblog), CC BY 2.0, in the cover notes. Use an outdoors editorial look with deep greens and warm neutral colors. 1: Cover title Cove with the photo and a short subtitle. 2: Present the dimmable warm beam, USB-C charging, and fold-flat loop. 3: Show two use cases, a campsite table and a reading corner, using the supplied product description. 4: Close with a request to try the buyer demo. Keep copy short and generate directly. Use the photo only once and omit specifications or performance claims beyond those supplied.",
+    "image": true,
+    "mode": "creative"
+  },
+  {
+    "id": "technical-explainer",
+    "slide_count": 4,
+    "prompt": "Make four square slides for new software engineers explaining how a browser cache works. Use a clean, diagram-friendly technology style and generate directly. Slide 1 defines a browser cache. Slide 2 shows three labeled steps with clear sequence: browser requests a resource, browser receives the response and cache instructions, browser stores the response when permitted. Slide 3 compares a fresh cache hit with revalidation. Explain that a fresh hit can reuse the response and that the server may return 304 Not Modified during revalidation. Slide 4 gives a worked example with logo.svg and a short recap. Use large readable labels, preserve the exact terms Cache-Control and 304 Not Modified, and omit numeric performance claims.",
+    "aspect_ratio": "1:1"
+  }
+]

@@ -134,6 +134,21 @@ def test_planned_exhibit_is_required_and_repaired(monkeypatch):
     assert "populate the decision object for this slide" in prompts[1]
 
 
+def test_explicit_visible_point_count_is_repaired(monkeypatch):
+    client = openrouter(monkeypatch)
+    prompts = []
+    points = [{"title": "Camp table"}, {"title": "Reading corner"}, {"title": "Extra use case"}]
+
+    def request(model, system, content, image, contract):
+        prompts.append(system)
+        return json.dumps({"title": "Use cases", "points": points if len(prompts) == 1 else points[:2]}), 90, 30
+
+    monkeypatch.setattr(client, "_request", request)
+    slide = client.structured(SlideContent, "Show the two use cases.", {"point_count": 2}, "slide")
+    assert [point.title for point in slide.points] == ["Camp table", "Reading corner"]
+    assert "return exactly 2 items in points and no extra items" in prompts[1]
+
+
 def test_outline_falls_back_and_repairs_the_count_without_rejecting_extra_fields(monkeypatch):
     client = openrouter(monkeypatch)
     calls = []

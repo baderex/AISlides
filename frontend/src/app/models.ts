@@ -26,7 +26,7 @@ export interface TableElement extends Geometry {
   header_rule?: string | null; numeric_columns?: number[];
 }
 export interface ChartElement extends Geometry {
-  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string;
+  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; show_values?: boolean;
   chart: 'bar' | 'column' | 'line' | 'pie' | 'stacked_column'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }
