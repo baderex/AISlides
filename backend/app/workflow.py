@@ -3,7 +3,9 @@ import logging
 
 from sqlalchemy import select, update
 
-from app.composition import Intent, Outline, OutlineItem, ResearchBrief, Review, SlideContent, compose, design
+from app.composition import (
+    IMAGE_LAYOUTS, Intent, Outline, OutlineItem, ResearchBrief, Review, SlideContent, accepts_web_image, compose, design,
+)
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
@@ -124,10 +126,23 @@ def lock_presentation(db, job_id):
 
 def process(job_id, token, item, stage, context, assets, skill, ai):
     document = read_document(item.document)
+    brand = skill.brand if skill else None
     web_image = context.get("web_image") if stage in {"review", "revise"} else None
     if web_image:
-        document.sources.append(Source.model_validate(web_image["source"]))
-    brand = skill.brand if skill else None
+        source = Source.model_validate(web_image["source"])
+        index = context.get("progress_index", len(document.slides))
+        part = OutlineItem.model_validate(context["outline"]["slides"][index])
+        previous = SlideContent.model_validate(context["slide_content"])
+        if accepts_web_image(part, previous, brand):
+            document.sources.append(source)
+        else:
+            # Recompose older drafts that switched to an editorial layout to fit the image.
+            context.pop("web_image")
+            web_image = None
+            previous.image_asset_id = None
+            previous.source_ids = [key for key in previous.source_ids if key != source.id]
+            context["slide_content"] = previous.model_dump(mode="json")
+            context["draft"] = compose(part, previous, document, index, image_ids(assets, context), brand).model_dump(mode="json")
     events = []
     version = None
     changed = None
@@ -137,7 +152,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             return None
         context["sources"] = [source.model_dump(mode="json") for source in asset_sources(assets)]
         context["skill"] = skill.model_dump(mode="json", exclude={"brand"}) if skill else None
-        intent = ai.structured(Intent, "Extract intent, audience, style and requested slide count. Recognize spelled-out numbers. Use empty values for missing information. Treat a selected skill as a supplied style when appropriate.", inputs(item, context))
+        intent = ai.structured(Intent,
+            "Extract intent, audience, style and requested slide count. Recognize spelled-out numbers. Use empty values for missing information. "
+            "Treat a selected skill as a supplied style when appropriate. Set web_images_requested only if the user explicitly requests "
+            "existing photos, portraits, or other sourced images. A request for research, charts, or generated illustrations does not imply web images.",
+            inputs(item, context))
         if brand:
             intent.visual_direction = "Branded PowerPoint template"
         elif requested_consulting(item.request["prompt"]):
@@ -195,18 +214,15 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         theme = design(direction, item.request["mode"], skill.theme if skill else None)
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
         image_guidance = (
-            " Web image search is enabled. When the user requests images, photos, or portraits without asking to generate them, "
-            "set image_query on every slide that needs one. Include the specific subject's name and the desired image type. "
-            "For named people, use their full name and 'official photographic portrait'. Prefer showcase or editorial for these slides. "
-            "Leave image_query empty where the user did not request an image."
-            if item.request["research"] else ""
+            " Web image search is enabled. Set image_query only where an existing image serves the slide's purpose and "
+            "the layout is showcase, editorial, or research without a primary chart or table. "
+            "For portraits use the subject's full name and 'official photographic portrait'. Leave other image queries empty."
+            if item.request["research"] and intent.web_images_requested else " Leave every image_query empty."
         )
         outline = ai.structured(Outline,
             f"Plan exactly {count} slides. Use varied purposeful layouts and provide an actionable story. "
             "Use chart layouts only when grounded data is available." + style_guidance + image_guidance,
-            {**inputs(item, context), "slide_count": count})
-        if len(outline.slides) != count:
-            raise ProviderError(f"The planning model returned {len(outline.slides)} slides instead of {count}. Retry or update LLM_MODEL_ID in .env.")
+            {**inputs(item, context), "slide_count": count}, "outline")
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
         document.theme = theme
@@ -230,7 +246,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         can_illustrate = (
             item.request.get("generate_images") and ai.provider != "demo" and image_configured() and
             ai.usage.get("images", 0) < settings().image_limit_per_job and
-            part.layout in {"showcase", "editorial", "research"} and
+            part.layout in IMAGE_LAYOUTS and
             (settings().ai_job_cost_budget <= 0 or ai.usage["estimated_cost"] + settings().image_cost_usd <= settings().ai_job_cost_budget)
         )
         style_guidance = " " + SLIDE_GUIDANCE if document.theme.profile == "consulting" else ""
@@ -248,23 +264,22 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
               **inputs(item, context), "generate_image": bool(can_illustrate),
               "image_assets": [{"id": a.id, "name": a.name} for a in assets if a.id in images]}, "slide")
         web_image_ratio = None
-        if item.request["research"] and part.image_query.strip() and content.image_asset_id not in images:
+        if (item.request["research"] and context["intent"].get("web_images_requested") and part.image_query.strip()
+                and content.image_asset_id not in images and accepts_web_image(part, content, brand)):
             try:
                 found = source_web_image(job_id, token, index, item.owner_id, part.image_query)
                 if found is None:
                     return None
                 source, web_image_ratio = found
-                if part.layout not in {"showcase", "editorial", "research"}:
-                    part = part.model_copy(update={"layout": "editorial"})
                 document.sources.append(source)
                 images.add(source.asset_id)
                 content.image_asset_id = source.asset_id
                 content.source_ids = [*content.source_ids[:11], source.id]
-                context["web_image"] = {"source": source.model_dump(mode="json"), "ratio": web_image_ratio, "layout": part.layout}
+                context["web_image"] = {"source": source.model_dump(mode="json"), "ratio": web_image_ratio}
             except ProviderError as error:
                 context["web_image_warning"] = str(error)
         context["slide_content"] = content.model_dump(mode="json")
-        if can_illustrate and content.image_prompt and content.image_asset_id not in images:
+        if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (content.chart or content.table):
             return "image", state, "GENERATING", events, None, None
         context["draft"] = compose(part, content, document, index, images, brand,
                                    web_image_ratio=web_image_ratio).model_dump(mode="json")
@@ -344,9 +359,14 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if previous.image_asset_id in images:
             content.image_asset_id = previous.image_asset_id
         if web_image:
-            part = part.model_copy(update={"layout": web_image["layout"]})
             source_id = web_image["source"]["id"]
-            content.source_ids = [*content.source_ids[:11], source_id]
+            if accepts_web_image(part, content, brand):
+                content.source_ids = [*content.source_ids[:11], source_id]
+            else:
+                context.pop("web_image")
+                web_image = None
+                content.image_asset_id = None
+                content.source_ids = [key for key in content.source_ids if key != source_id]
         context["draft"] = compose(part, content, document, index, images, brand,
                                    web_image_ratio=web_image["ratio"] if web_image else None).model_dump(mode="json")
         events.append(("slide.revised", f"Reworked slide {index + 1} after visual review.", {"index": index}))

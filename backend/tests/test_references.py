@@ -10,9 +10,10 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Inches
 from sqlalchemy import select
 
-from app.composition import Outline, ResearchBrief
+from app.composition import Intent, Outline, ResearchBrief, SlideContent
 from app.config import settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
+from app.domain import Source
 from app.main import app
 from app.providers import Intelligence
 from app.questions import Clarification
@@ -156,7 +157,10 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in deck.slides[0].shapes)
 
 
-def test_web_research_embeds_and_credits_a_requested_portrait(monkeypatch):
+@pytest.mark.parametrize(("direction", "requested"), [
+    ("Professional", True), ("Strategy consulting", True), ("Professional", False),
+])
+def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, direction, requested):
     client = TestClient(app)
     configuration = settings()
     monkeypatch.setattr(configuration, "research_api_key", "test-search-token")
@@ -190,24 +194,34 @@ def test_web_research_embeds_and_credits_a_requested_portrait(monkeypatch):
     structured = Intelligence.structured
 
     def plan(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Example", slide_count=1, visual_direction=direction, web_images_requested=requested)
         if schema is Clarification:
             return Clarification()
         if schema is Outline:
-            assert "Web image search is enabled" in task
+            assert ("Web image search is enabled" in task) == requested
             return Outline.model_validate({"title": "Example", "slides": [
-                {"title": "Example", "layout": "summary", "image_query": "Example official portrait"},
+                {"title": "Example", "layout": "editorial", "image_query": "Example official portrait"},
             ]})
         return structured(self, schema, task, data, stage, image)
 
     monkeypatch.setattr(Intelligence, "structured", plan)
-    path = create(client, "Create one slide for students with an official portrait of Example in a professional style.",
-                  research=True)
+    prompt = "Create one slide for students about Example."
+    if requested:
+        prompt += " Include an official portrait."
+    path = create(client, prompt, research=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
-    source, = result["document"]["sources"]
-    slide, = result["document"]["slides"]
-    portrait, = [element for element in slide["elements"] if element["type"] == "image"]
+    document = result["document"]
+    slide, = document["slides"]
+    assert slide["layout"] == "editorial"
+    portraits = [element for element in slide["elements"] if element["type"] == "image"]
+    if not requested:
+        assert not downloads and not portraits and not document["sources"]
+        return
+    source, = document["sources"]
+    portrait, = portraits
     assert downloads == [thumbnail]
     assert source["url"] == source_url and source["asset_id"] == portrait["asset_id"]
     assert source["id"] in slide["source_ids"]
@@ -218,3 +232,77 @@ def test_web_research_embeds_and_credits_a_requested_portrait(monkeypatch):
     deck = Presentation(io.BytesIO(exported.content))
     assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in deck.slides[0].shapes)
     assert source_url in deck.slides[0].notes_slide.notes_text_frame.text
+
+
+@pytest.mark.parametrize("direction", ["Professional", "Strategy consulting"])
+def test_image_queries_cannot_replace_planned_layouts_or_exhibits(monkeypatch, direction):
+    configuration = settings()
+    monkeypatch.setattr(configuration, "research_api_key", "test-search-token")
+    source = Source(id="results", title="Quarterly results", excerpt="A: 1, B: 2")
+    monkeypatch.setattr("app.workflow.collect", lambda query: [source])
+
+    def unexpected_image_search(*args):
+        pytest.fail("The planned slide has no slot for a web image")
+
+    monkeypatch.setattr("app.workflow.source_web_image", unexpected_image_search)
+    structured = Intelligence.structured
+
+    def plan(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Example", slide_count=5, visual_direction=direction, web_images_requested=True)
+        if schema is Clarification:
+            return Clarification()
+        if schema is Outline:
+            return Outline.model_validate({"title": "Example", "slides": [
+                {"title": "Intro", "layout": "cover", "image_query": "Photo A"},
+                {"title": "Overview", "layout": "summary", "image_query": "Photo B"},
+                {"title": "Results", "layout": "chart", "image_query": "Photo C"},
+                {"title": "Breakdown", "layout": "research", "image_query": "Photo D"},
+                {"title": "Action", "layout": "closing", "image_query": "Photo E"},
+            ]})
+        if schema is SlideContent:
+            item = data["item"]
+            if item["layout"] == "chart":
+                return SlideContent(title=item["title"], source_ids=[source.id],
+                                    chart={"label": "Results", "categories": ["A", "B"], "values": [1, 2]})
+            table = [["Group", "Result"], ["A", "1"]] if item["layout"] == "research" else None
+            return SlideContent(title=item["title"], source_ids=[source.id], table=table)
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", plan)
+    client = TestClient(app)
+    path = create(client, "Build a quarterly results deck with web research and photos.", research=True)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    slides = result["document"]["slides"]
+    assert [slide["layout"] for slide in slides] == ["cover", "summary", "chart", "research", "closing"]
+    assert any(element["type"] == "chart" for element in slides[2]["elements"])
+    assert any(element["type"] == "table" for element in slides[3]["elements"])
+    assert all(element["type"] != "image" for slide in slides for element in slide["elements"])
+    assert [item["id"] for item in result["document"]["sources"]] == [source.id]
+
+
+def test_resuming_an_older_image_draft_restores_the_planned_layout():
+    client = TestClient(app)
+    path = create(client, "Generate one slide in editorial style about accessibility for new hires.")
+    work(5)
+    identifier = path.rsplit("/", 1)[1]
+    source = Source(title="Old web photo", asset_id="old_asset")
+    with Session.begin() as db:
+        job = db.scalar(select(Job).where(Job.presentation_id == identifier))
+        assert job.checkpoint == "review"
+        job.context = {
+            **job.context,
+            "draft": {**job.context["draft"], "layout": "editorial", "source_ids": [source.id]},
+            "slide_content": {**job.context["slide_content"], "image_asset_id": source.asset_id,
+                              "source_ids": [source.id]},
+            "web_image": {"source": source.model_dump(mode="json"), "ratio": 1., "layout": "editorial"},
+        }
+
+    work()
+    final = client.get(path).json()
+    assert final["status"] == "COMPLETED"
+    slide, = final["document"]["slides"]
+    assert slide["layout"] == "cover"
+    assert not slide["source_ids"] and not final["document"]["sources"]

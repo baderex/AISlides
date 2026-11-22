@@ -73,13 +73,13 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
     points = content.points[:4]
     rows = content.table or []
     valid_table = 2 <= len(rows) <= 7 and 2 <= len(rows[0]) <= 5 and all(len(row) == len(rows[0]) for row in rows)
-    if not valid_table and item.layout in {"comparison", "research"} and points:
+    if not valid_table and item.layout in {"comparison", "research"} and points and not web_image_ratio:
         rows = [["Observation", "Implication"], *[[point.title, point.body] for point in points]]
         valid_table = True
 
     chart = content.chart
     exhibit = None
-    if chart and source_ids and not web_image_ratio:
+    if chart and source_ids:
         try:
             exhibit = Chart(x=.06, y=.39, w=.88, h=.50, chart=chart.chart, categories=chart.categories,
                             series=[{"name": chart.label, "values": chart.values}], color=theme.accent)
@@ -88,7 +88,7 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
 
     if exhibit:
         slide.elements.append(exhibit)
-    elif valid_table and not web_image_ratio:
+    elif valid_table:
         rows = [[cell[:180] for cell in row] for row in rows]
         slide.elements.append(Table(x=.06, y=.39, w=.88, h=.5, rows=rows, fill=theme.surface, color=theme.ink,
                                     size=max(8, min(17 * factor, 100 / len(rows))),

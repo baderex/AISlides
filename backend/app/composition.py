@@ -1,8 +1,9 @@
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator
+from pydantic_core import PydanticCustomError
 
-from app.branding import compose_branded
+from app.branding import choose_layout, compose_branded
 from app.consulting import compose_consulting, consulting_theme, requested_consulting
 from app.domain import BrandTemplate, Chart, Contract, Document, Image, Layout, Shape, ShortText, Slide, Table, Text, Theme
 from app.questions import Question
@@ -16,20 +17,35 @@ class Intent(Contract):
     tone: str = Field(default="", max_length=250)
     visual_direction: str = Field(default="", max_length=250)
     slide_count: int | None = Field(default=None, ge=1, le=30)
+    web_images_requested: bool = False
     missing: list[str] = Field(default_factory=list, max_length=8)
 
 
-class OutlineItem(Contract):
+class PlanningResponse(Contract):
+    # Some providers add slide copy to the outline, even in JSON mode.
+    model_config = ConfigDict(extra="ignore", json_schema_extra={"additionalProperties": False})
+
+
+class OutlineItem(PlanningResponse):
     title: ShortText
     layout: Layout
     purpose: str = Field(default="", max_length=500)
     image_query: str = Field(default="", max_length=380)
 
 
-class Outline(Contract):
+class Outline(PlanningResponse):
     title: ShortText
     narrative: str = Field(default="", max_length=1000)
     slides: list[OutlineItem] = Field(min_length=1, max_length=30)
+
+    @field_validator("slides")
+    @classmethod
+    def exact_slide_count(cls, slides: list[OutlineItem], info: ValidationInfo) -> list[OutlineItem]:
+        count = (info.context or {}).get("slide_count")
+        if count is not None and len(slides) != count:
+            raise PydanticCustomError("slide_count", "return exactly {expected} slides (received {actual})",
+                                      {"expected": count, "actual": len(slides)})
+        return slides
 
 
 class Point(Contract):
@@ -66,6 +82,17 @@ class ResearchBrief(Contract):
 class Review(Contract):
     issues: list[ShortText] = Field(default_factory=list, max_length=5)
     regenerate_content: bool = False
+
+
+IMAGE_LAYOUTS = frozenset({"showcase", "editorial", "research"})
+
+
+def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemplate | None) -> bool:
+    if item.layout not in IMAGE_LAYOUTS or content.chart or content.table:
+        return False
+    if brand:
+        return any(slot.kind == "picture" for slot in choose_layout(brand.layouts, item.layout).slots)
+    return True
 
 
 def design(direction: str, mode: str, selected: Theme | None) -> Theme:
@@ -133,7 +160,11 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     label(item.title, .068, .17, .87, .17, 35, ink, True)
     label(content.subtitle, .07, .352, .86, .08, 17, muted)
     points = content.points
-    if content.image_asset_id in image_ids and item.layout in {"showcase", "editorial", "research"}:
+    table = content.table
+    if item.layout == "research" and table and len({len(row) for row in table}) == 1 and 1 <= len(table[0]) <= 8:
+        rows = [[cell[:180] for cell in row] for row in table]
+        elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
+    elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
         if web_image_ratio:
             elements.append(fit_image(image, document, web_image_ratio))
@@ -154,9 +185,6 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                                   series=[{"name": data.label, "values": data.values}], chart=data.chart, color=t.accent))
         except ValueError:
             slide.warnings.append("The chart data could not be rendered.")
-    elif item.layout == "research" and content.table and len({len(row) for row in content.table}) == 1 and 1 <= len(content.table[0]) <= 8:
-        rows = [[cell[:180] for cell in row] for row in content.table]
-        elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
     elif item.layout == "timeline" and points:
         points = points[:3]
         width = .86 / len(points)
