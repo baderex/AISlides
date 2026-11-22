@@ -14,7 +14,7 @@ from app.composition import (
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
-from app.design import ArtDirection, DIRECTOR_PROMPT, font_family, reference_sheet
+from app.design import ArtDirection, DIRECTOR_PROMPT, apply_cover_direction, font_family, reference_sheet
 from app.domain import Image, Skill, Slide, Source, Theme, read_document
 from app.imagery import image_configured, render_image, source_web_image
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
@@ -60,12 +60,16 @@ COMPOSITION_PLAN = (
     "what is being explained. Aim for 4–9 words unless the user requires exact wording. Put units and qualifications "
     "in the subtitle or exhibit label when they make the headline unwieldy. "
     "Choose chart for a measured trend, research for exact lookup, process for ordered steps, "
-    "comparison for parallel alternatives, and summary for a definition or worked example. Use a section divider only "
+    "comparison for parallel alternatives, and summary for unrelated explanatory points. Use a section divider only "
     "for a transition. Mark use_uploaded_image on a slide explicitly assigned a reference image, including a cover. "
     "Set the exhibit field where the brief supports the composition: cover_callout only for a cover asking for a specific approval, "
     "stacked_comparison when comparable totals have supplied "
     "component figures, allocation for an itemized budget, rollout for a deployment timeline, and decision for an approval "
     "slide with success gates and a stop rule. Select the corresponding layouts cover, chart, metrics, timeline, and closing. "
+    "Use the diagram exhibit for a technical or educational slide about how entities relate, how steps follow in order, "
+    "how two paths differ, or a worked example of a process. Use process as its layout. "
+    "For a financial or analytical closing built around two or three sourced figures, select the readout exhibit "
+    "and metrics layout. For a product or action closing, use closing and plan one concrete next step. "
     "For a site table use research. A decision lead can state the action without putting every figure into the title. "
     "In required_details list the exact details the brief requires on the assigned slide, including named entities, "
     "allocations, amounts, conditions, and exact terms. Keep table cells in the table. Distribute all requirements across the deck. "
@@ -73,15 +77,19 @@ COMPOSITION_PLAN = (
     "Use null when the count is unspecified or covered by a structured exhibit or table."
 )
 COMPOSITION_GUIDANCE = {
-    "cover": " Keep title as the outline title. For an approval callout put the figure in value, its description in label, "
-             "and the scope in detail. Keep the subtitle factual and avoid repeating the headline.",
+    "cover": " Keep title as the outline title. For an approval callout put only the exact funding cap in value, "
+             "its description in label, and the supplied duration, locations and scope in detail or subtitle. "
+             "Preserve exact site names. For other covers the subtitle is optional. If used, identify the audience or "
+             "summarize the subject in a short factual phrase. Never tell the audience to proceed to a later slide.",
     "chart": " When comparable totals are made from supplied non-negative components, use stacked_comparison instead of "
              "chart or table. Set categories to the entities being compared, each series to one shared cost component, and "
              "series values to the component amounts in category order. Use short category and series names. Keep the unit "
              "and period in the label. Set value_prefix to the supplied currency symbol when applicable. Use the subtitle "
-             "for the headline difference and the exhibit caption for any required qualification.",
+             "for the main finding, difference_label for the units and period of a lower total, and the exhibit caption "
+             "for any required qualification. The renderer calculates the difference.",
     "research": " Use rows for the compared entities and columns for the supplied criteria. Keep every required row. "
-                "State a supplied selection or allocation in the visible subtitle. Do not infer capacity, "
+                "State a supplied selection or allocation in the visible subtitle and set table_focus to the exact "
+                "first-column labels of at most two focal or selected rows. Leave deferred rows unhighlighted. Do not infer capacity, "
                 "readiness, or feasibility from incomplete data. Call out material constraints using only the supplied figures.",
     "metrics": " For an itemized budget, use allocation with one line for every supplied cost item, including contingency. "
                "Keep individual amounts separate and set value_prefix to the supplied currency symbol. Do not include the total "
@@ -91,10 +99,13 @@ COMPOSITION_GUIDANCE = {
                 "Treat dates as a proposed plan when they were not supplied.",
     "closing": " Use decision.gates for the criteria. In threshold put only the comparator and measured value, such as ≥95% "
                "or ≤30 days. Put the measure in label and any necessary comparison basis in detail. The renderer joins "
-               "decision.action with decision.request, so request is a short noun phrase, including any funding cap. Put the "
-               "scope and no-rollout limits in decision.scope. Future expansion gates do not condition pilot approval today. "
+               "decision.action with decision.request, so start request with a noun or article, never a second verb. "
+               "Use request for the decision and any cap. Use scope for the remaining supplied limits, in one short "
+               "complete sentence with no repeated details or unfinished clauses. Future expansion gates do not condition pilot approval today. "
              "In decision.if_missed write a short complete sentence with the supplied trigger and the action to take. "
-             "If the subtitle describes the gates, describe their future review and keep the current approval separate.",
+             "If the subtitle describes the gates, describe their future review and keep the current approval separate. "
+             "For a closing without gates set next_step to a single actionable sentence addressed directly to the audience, "
+             "and leave redundant points empty.",
 }
 CALENDAR_YEARS = "one two three four five six seven eight nine ten".split()
 YEAR_IN_QUERY = re.compile(r"\b((?:19|20)\d{2})(?:(?:\s*(?:to|[-–])\s*)((?:19|20)\d{2})|(-\d{2}-\d{2}))?\b")
@@ -104,6 +115,20 @@ def inputs(item, context):
     return {"prompt": item.request["prompt"], "intent": context.get("intent"),
             "answers": context.get("answers", []), "skill": context.get("skill"),
             "sources": context.get("sources", []), "research": context.get("research")}
+
+
+EXPLICIT_FUNDING_CAP = re.compile(r"\b(?:capped|cap of)\s+([$€£¥]\s?\d[\d,]*(?:\.\d+)?(?:[kKmM]\b)?)", re.I)
+
+
+def preserve_cover_cap(content, prompt):
+    if content.cover_callout is None:
+        return
+    caps = set(EXPLICIT_FUNDING_CAP.findall(prompt))
+    if len(caps) == 1:
+        value = caps.pop()
+        if len(value) <= 25 and value != content.cover_callout.value:
+            content.cover_callout.value = value
+            content.cover_callout.label = "Funding cap"
 
 
 def omit_phase_quantities(part, intent):
@@ -515,6 +540,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if not locked:
             theme.font = font_family(theme.font)
             theme.design.heading_font = font_family(theme.design.heading_font)
+            apply_cover_direction(theme, direction)
         if locked:
             rules = proposed.design
             if baseline.design:
@@ -559,8 +585,13 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             {**planning_inputs, "slide_count": count, "design": theme.model_dump(),
              "uploaded_images": [asset.name for asset in assets if asset.media_type.startswith("image/")]}, "outline")
         use_exhibits = theme.design and theme.profile == "standard" and not brand
+        prompt = item.request["prompt"]
+        prefer_diagrams = bool(re.search(r"\b(diagram[- ]friendly|(?:use|include|draw|with)\s+(?:editable\s+)?diagrams?\b)",
+                                        prompt, re.I) and not re.search(r"\b(no|omit|avoid|without)\s+(?:any\s+)?diagrams?\b", prompt, re.I))
+        supplied_breakdown = len(re.findall(r"\([^()\n]*[$€£¥]\s*\d[^()\n]*[$€£¥]\s*\d[^()\n]*\)", prompt)) >= 2
         for part in outline.slides:
-            part.exhibit = planned_exhibit(part, bool(context["sources"])) if use_exhibits else None
+            part.exhibit = (planned_exhibit(part, bool(context["sources"]), prefer_diagrams=prefer_diagrams,
+                                            supplied_breakdown=supplied_breakdown) if use_exhibits else None)
             if part.exhibit:
                 part.layout = EXHIBIT_LAYOUTS[part.exhibit]
         context["outline"] = outline.model_dump(mode="json")
@@ -618,6 +649,27 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             f"The selected composition is {part.exhibit}. Populate that top-level object. "
             if part.exhibit else ""
         )
+        if part.exhibit == "diagram":
+            exhibit_instruction += (
+                "Draw the actual relationships as one or two ordered lanes. Use a flow lane for a sequence or an interaction. "
+                "Use two named flow lanes when the slide compares two paths and keep each result in its own path. "
+                "Use a branch lane for a decision with its test first, followed by two or three mutually exclusive outcomes. "
+                "Never separate an action and its result into two sibling outcomes. "
+                "For a definition, show the parts and their relationship. Use consistent roles for recurring actors, services and stores. "
+                "Use contains only for a system inside another system. Keep node labels under five words. Keep link labels empty "
+                "unless they provide a short transition or condition. Put exact protocol terms in node details. Preserve the prescribed step count. "
+                "Distinguish local lookups from network requests. If a path stays local, do not label an operation as sending HTTP to a server. "
+                "Keep a conditional response conditional. "
+                "For a worked example with an initial visit and a later decision to reuse or revalidate, keep the first "
+                "visit in its own flow lane. Begin the later branch lane with the later lookup or decision and put each "
+                "revalidation result within the same node as the conditional request. Use recap for the short requested takeaway. "
+            )
+        elif part.exhibit == "readout":
+            exhibit_instruction += (
+                "Put every explicitly requested result into metrics, with a compact exact signed value and unit in value "
+                "(for example, −$1m or $4m) and a short label in title. Set highlight to the index of the main result. Keep metrics in chronological "
+                "order for comparisons over time. Describe a change only when supported by the source values. "
+            )
         point_count = part.point_count if part.layout in {"summary", "comparison", "timeline", "process", "metrics",
                                                         "showcase", "editorial"} else None
         if point_count and not part.exhibit:
@@ -630,8 +682,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              "Include actionable detail and relevant speaker notes. Use at most three points unless the user requires more. "
              "Use short action phrases for process steps. The layout adds step numbers. Keep each point title within 65 characters "
              "and each point body within 130 characters. "
-             "Distinguish established results from forecasts or hypotheses. Qualify claims about speed, feasibility, causality and performance "
-             "whenever no comparative evidence is supplied. Never turn a possible application into a demonstrated capability. "
+             "Distinguish established results from forecasts or hypotheses. If the brief limits claims to supplied facts, omit "
+             "unsupported qualitative claims too, such as calling USB-C charging fast. If the brief asks to identify figures "
+             "as illustrative, label them explicitly in the visible copy on slides that report those figures. "
+             "Qualify claims about speed, feasibility, causality and performance when comparative evidence is absent. "
+             "Never turn a possible application into a demonstrated capability. "
              "Only include numerical charts if their values are grounded in sources. Provide a table as an array of rows, or null if absent. "
              "Keep repeated scope, units and commitments consistent with the brief and earlier exhibits. "
              "Preserve required terms, every requested table row, and negative signs. Keep unsupported explanations out of "
@@ -649,6 +704,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
               "earlier_slide_titles": [slide.title for slide in document.slides[-5:]],
               **slide_inputs(item, context, part if data_driven else None), "generate_image": bool(can_illustrate),
               "image_assets": [{"id": a.id, "name": a.name} for a in assets if a.id in images]}, "slide")
+        preserve_cover_cap(content, item.request["prompt"])
         uploaded_images = [asset.id for asset in assets if asset.id in images]
         if content.image_asset_id not in images:
             content.image_asset_id = None
@@ -767,6 +823,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "point_count": part.point_count if context["slide_content"].get("points") else None,
             "omit_phase_quantities": omit_phase_quantities(part, inferred_intent),
         }, "slide")
+        preserve_cover_cap(content, item.request["prompt"])
         images = image_ids(assets, context)
         previous = SlideContent.model_validate(context["slide_content"])
         if previous.image_asset_id in images:

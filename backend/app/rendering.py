@@ -2,6 +2,7 @@ import io
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import accumulate
+from math import hypot
 from pathlib import Path
 
 from PIL import Image as PILImage
@@ -139,6 +140,13 @@ def text_height(value, width, size, bold, family):
     raster_rows = len(raster_text(value, round(width * TEXT_SCALE), 10000, size, bold, family).lines)
     return max(raster_rows * size * TEXT_LEADING,
                size + (pdf_rows - 1) * size * TEXT_LEADING - pdfmetrics.getDescent(pdf_font, size))
+
+
+def longest_word_width(value, size, bold, family):
+    raster_font = font(round(size * TEXT_SCALE), bold, family)
+    pdf_font = pdf_face(family, bold)
+    return max((max(raster_font.getlength(word) / TEXT_SCALE, pdfmetrics.stringWidth(word, pdf_font, size))
+                for word in value.split()), default=0)
 
 
 def draw_raster_text(draw, layout, color, x=0, y=0):
@@ -334,6 +342,33 @@ def chart_values(element, points):
             yield display_value(value, element.value_prefix), x, y
 
 
+def stacked_labels(element):
+    if element.chart == "stacked_column" and element.show_values:
+        for values in zip(*(series.values for series in element.series)):
+            for value in values:
+                if value:
+                    yield display_value(value, element.value_prefix)
+
+
+def segment_ink(color):
+    return "#FFFFFF" if contrast(color, "#FFFFFF") >= 4.5 else "#000000"
+
+
+def arrowheads(line, start, end, size):
+    if line.arrows == "none":
+        return
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = hypot(dx, dy)
+    if length:
+        ux, uy = dx / length, dy / length
+        depth = min(size, length / (2 if line.arrows == "both" else 1))
+        tips = [(end, 1), (start, -1)] if line.arrows == "both" else [(end, 1)]
+        for tip, direction in tips:
+            base_x, base_y = tip[0] - direction * depth * ux, tip[1] - direction * depth * uy
+            yield (tip, (base_x - uy * depth * .45, base_y + ux * depth * .45),
+                   (base_x + uy * depth * .45, base_y - ux * depth * .45))
+
+
 def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> bytes:
     ptw, pth = physical(document)
     scale = pixel_width / ptw
@@ -359,7 +394,10 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             else:
                 draw.rectangle((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
         elif isinstance(el, Line):
-            draw.line((0, 0, w-1, h-1), fill=el.color, width=max(1, round(el.weight * scale)))
+            start, end = el.endpoints(w - 1, h - 1)
+            draw.line((start, end), fill=el.color, width=max(1, round(el.weight * scale)))
+            for tip in arrowheads(el, start, end, max(6, el.weight * 3.5) * scale):
+                draw.polygon(tip, fill=el.color)
         elif isinstance(el, Image):
             try:
                 with PILImage.open(io.BytesIO(get_asset(el.asset_id))) as source:
@@ -373,8 +411,8 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             columns = table_columns(el, nw * ptw)
             rh = nh * pth / len(el.rows)
             for row, cells in enumerate(el.rows):
-                fill, ink, _ = el.row_style(row)
                 for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
+                    fill, ink = el.cell_style(row, col)
                     top = row * rh
                     inset_x, inset_y = table_insets(el, cw, rh)
                     text_width = round((cw - 2 * inset_x) * TEXT_SCALE)
@@ -403,10 +441,15 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
             plot_h = h * .87
+            segment_labels = iter(stacked_labels(el))
             for kind, color, dims in chart_marks(el, w, plot_h):
                 if kind == "rect":
                     rx, ry, rw, rh = dims
                     draw.rectangle((rx, ry, rx+rw, ry+rh), fill=color)
+                    if value := next(segment_labels, None):
+                        face = font(max(1, round(12 * scale)), True, el.font)
+                        if face.getlength(value) <= rw and rh >= 13 * scale:
+                            draw.text((rx + rw / 2, ry + rh / 2), value, fill=segment_ink(color), font=face, anchor="mm")
                 elif kind == "pie":
                     cx, cy, radius, begin, sweep = dims
                     draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color)
@@ -484,13 +527,22 @@ def to_pdf(document: Document, get_asset) -> bytes:
             elif isinstance(el, Line):
                 pdf.setStrokeColor(HexColor(el.color))
                 pdf.setLineWidth(el.weight)
-                pdf.line(0, h, w, 0)
+                start, end = el.endpoints(w, h)
+                pdf.line(start[0], h - start[1], end[0], h - end[1])
+                pdf.setFillColor(HexColor(el.color))
+                for tip in arrowheads(el, start, end, max(6, el.weight * 3.5)):
+                    path = pdf.beginPath()
+                    path.moveTo(tip[0][0], h - tip[0][1])
+                    for px, py in tip[1:]:
+                        path.lineTo(px, h - py)
+                    path.close()
+                    pdf.drawPath(path, stroke=0, fill=1)
             elif isinstance(el, Table):
                 rh = h/len(el.rows)
                 columns = table_columns(el, w)
                 for row, cells in enumerate(el.rows):
-                    fill, ink, _ = el.row_style(row)
                     for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
+                        fill, ink = el.cell_style(row, col)
                         top = h-(row+1)*rh
                         inset_x, inset_y = table_insets(el, cw, rh)
                         tw, th = cw - 2 * inset_x, rh - 2 * inset_y
@@ -527,12 +579,19 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         pdf.line(0, rule_y, w, rule_y)
             elif isinstance(el, Chart):
                 plot_h = .87*h
+                segment_labels = iter(stacked_labels(el))
                 for kind, color, dims in chart_marks(el, w, plot_h):
                     pdf.setFillColor(HexColor(color))
                     pdf.setStrokeColor(HexColor(color))
                     if kind == "rect":
                         rx, ry, rw, rh = dims
                         pdf.rect(rx, h-ry-rh, rw, rh, stroke=0, fill=1)
+                        if value := next(segment_labels, None):
+                            face = pdf_face(el.font, True)
+                            if pdfmetrics.stringWidth(value, face, 12) <= rw and rh >= 13:
+                                pdf.setFont(face, 12)
+                                pdf.setFillColor(HexColor(segment_ink(color)))
+                                pdf.drawCentredString(rx + rw / 2, h - ry - rh / 2 - 4, value)
                     elif kind == "pie":
                         cx, cy, radius, begin, sweep = dims
                         pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=0, fill=1)

@@ -100,6 +100,10 @@ def demo_response(schema: str, data: dict) -> dict:
             points = [("What matters", "Identify the main problem, who it affects, and what would count as a meaningful improvement."),
                       ("What to validate", "Compare assumptions with available evidence and document open questions."),
                       ("What happens next", "Choose one practical next step with a clear owner and a review date.")]
+        if data.get("required_exhibit") == "diagram":
+            return {"title": title, "diagram": {"lanes": [{"nodes": [
+                {"label": name[:46], "detail": body[:90]} for name, body in points
+            ]}]}}
         return {"title": title, "subtitle": subtitle,
                 "points": [{"title": name, "body": body, "icon": icons.get(name)} for name, body in points],
                 "notes": "Offline Studio Demo content. Configure a model provider to generate source-grounded material."}

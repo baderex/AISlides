@@ -35,6 +35,13 @@ export class SlideCanvas {
 
   font(size: number) { return size / this.widthPoints() * 100 + 'cqw'; }
 
+  linePath(direction?: string) {
+    return ({
+      right: 'M 0 50 H 100', left: 'M 100 50 H 0',
+      down: 'M 50 0 V 100', up: 'M 50 100 V 0',
+    } as Record<string, string>)[direction ?? ''] || 'M 0 0 L 100 100';
+  }
+
   tableFormat(table: TableElement, width: number, height: number) {
     const points = width * this.widthPoints();
     const compact = !!table.row_rule && points < 360;
@@ -50,6 +57,11 @@ export class SlideCanvas {
         insetX: this.font(Math.min(12, points * weight / total * .1)),
       })),
     };
+  }
+
+  tableNegative(table: TableElement, row: number, column: number, cell: string) {
+    return !!table.negative_ink && row > 0 && table.numeric_columns?.includes(column)
+      && /^[-−]\s*[$€£¥]?\s*(?:\d[\d,]*(?:\.\d+)?|\.\d+)\s*%?$/.test(cell.trim());
   }
 
   radius(geometry: Change) {
@@ -114,9 +126,15 @@ export class SlideCanvas {
     }));
   }
 
-  chartPointValue(el: ChartElement, index: number) {
+  chartPointValue(el: ChartElement, index: number, series = 0) {
     const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
-    return (el.value_prefix ?? '') + number.format(el.series[0].values[index]);
+    return (el.value_prefix ?? '') + number.format(el.series[series].values[index]);
+  }
+
+  segmentInk(color: string) {
+    const channels = [1, 3, 5].map(index => parseInt(color.slice(index, index + 2), 16) / 255)
+      .map(channel => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4);
+    return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2] <= .1833 ? '#FFFFFF' : '#000000';
   }
 
   readonly stackedBaseline = 97;

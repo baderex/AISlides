@@ -107,7 +107,7 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
 def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
     structured = Intelligence.structured
     parts = [
-        ("Costs by option", "chart", "Compare costs broken down by component."),
+        ("Costs by option", "chart", "Compare monthly costs."),
         ("Budget", "summary", "Show the itemized allocation."),
         ("Delivery schedule", "process", "Show the deployment timeline and risks."),
         ("Release decision", "metrics", "Show performance gates and approval."),
@@ -134,7 +134,8 @@ def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
                           supplied_evidence_only=True)
         if schema is Outline:
             return Outline(title="Trial release", slides=[
-                {"title": title, "layout": layout, "purpose": purpose} for title, layout, purpose in parts])
+                {"title": title, "layout": layout, "purpose": purpose, "exhibit": "diagram" if index == 2 else None}
+                for index, (title, layout, purpose) in enumerate(parts)])
         if schema is SlideContent:
             assert data["required_exhibit"] == expected_exhibits[data["slide_index"]]
             return SlideContent(title=data["item"]["title"], source_ids=[data["brief_source_id"]],
@@ -147,7 +148,8 @@ def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
     monkeypatch.setattr(Intelligence, "structured", respond)
     monkeypatch.setattr("app.workflow.collect", unexpected_lookup)
     client = TestClient(app)
-    path = create(client, "Four slides for operations. Use only these supplied figures: monthly costs $100 and $60. "
+    path = create(client, "Four slides for operations. Use only these supplied figures: monthly costs $100 ($70 labor, $30 tools) "
+                         "and $60 ($35 labor, $25 tools). "
                          "Allocate $1,000, $800, $300 and $200.", research=True)
     work()
     result = client.get(path).json()
@@ -172,9 +174,15 @@ def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
     native = next(shape.chart for shape in ppt.slides[0].shapes if shape.has_chart)
     assert native.chart_type == XL_CHART_TYPE.COLUMN_STACKED
     assert native.value_axis.minimum_scale == 0
+    assert native.plots[0].data_labels.show_value
+    assert not native.has_legend
     assert [category.label for category in native.plots[0].categories] == ["Current  $100", "Proposed  $60"]
     pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
-    assert all(label in pdf.pages[0].extract_text() for label in chart.category_labels())
+    text = pdf.pages[0].extract_text()
+    assert all(label in text for label in chart.category_labels())
+    assert {"$40", "$70", "$30", "$35", "$25"} <= set(text.split())
+    strip = [el for el in budget["elements"] if el["type"] == "shape"][:4]
+    assert [el["w"] for el in strip] == approx([.86 * amount / 2300 for amount in (1000, 800, 300, 200)])
 
 
 def test_requested_cover_image_fits_and_is_used_once(monkeypatch):
@@ -207,6 +215,43 @@ def test_requested_cover_image_fits_and_is_used_once(monkeypatch):
     cover, features = result["document"]["slides"]
     photo, = [element for element in cover["elements"] if element["type"] == "image"]
     assert photo["w"] * 960 / (photo["h"] * 540) == approx(400 / 240)
+    assert photo["w"] * photo["h"] > .44
     assert all(element["type"] != "image" for element in features["elements"])
     exported = Presentation(io.BytesIO(client.post(path + "/export?format=pptx").content))
     assert sum(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for slide in exported.slides for shape in slide.shapes) == 1
+
+
+def test_explicit_diagram_style_routes_comparison_to_native_branch(monkeypatch):
+    structured = Intelligence.structured
+
+    def respond(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Review workflow", audience="Operators", visual_direction="Light", slide_count=1)
+        if schema is Outline:
+            return Outline(title="Review workflow", slides=[{"title": "Review workflow", "layout": "comparison"}])
+        if schema is SlideContent:
+            assert data["required_exhibit"] == "diagram"
+            return SlideContent(title="Review workflow", diagram={"lanes": [{
+                "kind": "branch", "nodes": [{"label": "Review request", "role": "decision"},
+                                            {"label": "Accepted", "detail": "Distribute the result"},
+                                            {"label": "Rework", "detail": "Return to the author"}],
+            }], "recap": "Route the request according to its review outcome."})
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", respond)
+    client = TestClient(app)
+    path = create(client, "Create one diagram-friendly slide about a review workflow for operators.", aspect_ratio="1:1")
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    slide = result["document"]["slides"][0]
+    assert slide["warnings"] == []
+    lines = [element for element in slide["elements"] if element["type"] == "line"]
+    assert [line["direction"] for line in lines] == ["down", "right", "down", "down"]
+    native = Presentation(io.BytesIO(client.post(path + "/export?format=pptx").content))
+    connectors = [shape for shape in native.slides[0].shapes if shape.shape_type == MSO_SHAPE_TYPE.LINE]
+    assert len(connectors) == 4
+    assert sum(connector._element.spPr.ln.find(qn("a:tailEnd")) is not None for connector in connectors) == 2
+    assert {"Accepted", "Rework"} <= {shape.text for shape in native.slides[0].shapes if shape.has_text_frame}
+    pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
+    assert "Distribute the result" in pdf.pages[0].extract_text()

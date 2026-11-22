@@ -22,7 +22,18 @@
             }
             @case ('shape') { <div class="slide-shape" [class]="el.shape" [style.background]="el.fill" [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div> }
             @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
-            @case ('line') { <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M 0 0 L 100 100" fill="none" [attr.stroke]="el.color" [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" /></svg> }
+            @case ('line') {
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-connector" aria-hidden="true">
+                <svg:path [attr.d]="linePath(el.direction)" fill="none" [attr.stroke]="el.color"
+                  [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" />
+              </svg>
+              @if (el.arrows === 'end' || el.arrows === 'both') {
+                <span class="connector-tip" [attr.data-direction]="el.direction || 'diagonal'" [style.background]="el.color"></span>
+                @if (el.arrows === 'both') {
+                  <span class="connector-tip start" [attr.data-direction]="el.direction || 'diagonal'" [style.background]="el.color"></span>
+                }
+              }
+            }
             @case ('table') {
               @let format = tableFormat(el, g.w * frameWidth, g.h * frameHeight);
               <table [style.font-family]="el.font || 'Arial'" [studioFitText]="el" [preferredFont]="font(el.size ?? 12)"
@@ -37,7 +48,7 @@
                     }
                   </colgroup>
                 }
-                @for (row of el.rows; track $index) {
+                @for (row of el.rows; track $index; let rowIndex = $index) {
                   @if ($first && el.header_fill) {
                     <tr [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">
                       @for (cell of row; track $index) {
@@ -46,10 +57,12 @@
                       }
                     </tr>
                   } @else {
-                    <tr>
+                    <tr [style.background]="el.focus_rows?.includes(rowIndex) ? el.focus_fill : null">
                       @for (cell of row; track $index) {
                         <td [class.numeric-cell]="el.numeric_columns?.includes($index)"
                           [class.row-label]="$first && !el.numeric_columns?.includes($index)"
+                          [class.negative-value]="tableNegative(el, rowIndex, $index, cell)"
+                          [style.color]="tableNegative(el, rowIndex, $index, cell) ? el.negative_ink : null"
                           [style.--cell-inset-x]="format.columns[$index].insetX">{{ cell }}</td>
                       }
                     </tr>
@@ -86,6 +99,18 @@
                   }
                   }
                 </svg>
+                @if (el.chart === 'stacked_column' && el.show_values) {
+                  @for (series of stackedColumns(el); track $index; let seriesIndex = $index) {
+                    @for (mark of series; track $index) {
+                      @if (mark.height > 0) {
+                        <span class="stacked-point-value" [style.left.%]="mark.x + mark.width / 2"
+                          [style.top.%]="(mark.y + mark.height / 2) * .90"
+                          [style.color]="segmentInk(chartColor(el, seriesIndex))" [style.font-family]="el.font"
+                          [style.font-size]="font(12)">{{ chartPointValue(el, $index, seriesIndex) }}</span>
+                      }
+                    }
+                  }
+                }
                 @if (el.chart === 'line' && el.show_values && el.series.length === 1) {
                   @for (mark of chart(el)[0]; track $index) {
                     <span class="chart-point-value" [style.left.%]="mark.cx" [style.top.%]="mark.cy"

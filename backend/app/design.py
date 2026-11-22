@@ -32,6 +32,8 @@ DIRECTOR_PROMPT = (
     "Use background for content slides and cover_background for the cover and closing. When a brief names a dark "
     "brand color without requiring dark slides throughout, consider a quiet light background for analytical slides "
     "and use the dark color on decision slides. Make ink and muted text readable on both background and surface. "
+    "For an explicitly light or restrained financial-report brief, use light backgrounds on the cover and content slides. "
+    "Reserve saturated accents for small marks. Use a distinct heading face for editorial covers when appropriate. "
     "Use a contrasting, quieter dense_surface for data tables. For dark luxury use a charcoal background, restrained "
     "gold accents, a rules-style cover, editorial typography and a light warm table surface unless the user specifies otherwise. "
     "Return only design JSON matching the schema. Do not produce slide content, layout assignments, HTML or CSS."
@@ -40,6 +42,13 @@ DIRECTOR_PROMPT = (
 
 def font_family(value):
     return re.sub(r"\s+(?:bold|regular)$", "", value.strip(), flags=re.IGNORECASE)
+
+
+def apply_cover_direction(theme, direction):
+    """Keep explicit light presentation styles light on display slides as well."""
+    if re.search(r"\blight[- ](?:background|palette|theme|financial|report|analytical|editorial|corporate|style)\b",
+                 direction, re.I) and contrast(theme.design.cover_background, "#FFFFFF") > 2:
+        theme.design.cover_background = theme.background if contrast(theme.background, "#FFFFFF") <= 2 else "#F7F5EF"
 
 
 def reference_sheet(assets):
@@ -83,6 +92,13 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
         table.header_fill = blend(table.fill, background, .42)
         table.header_color = readable(theme.ink, table.header_fill, table.color, background)
         table.font = theme.font
+        if rules:
+            table.focus_fill = blend(table.fill, theme.accent, .16) if table.focus_rows else None
+            if table.focus_fill and contrast(table.color, table.focus_fill) < 4.5:
+                table.focus_fill = blend(table.fill, theme.accent, .07)
+            table.negative_ink = "#8B3533" if contrast("#8B3533", table.focus_fill or table.fill) >= 4.5 else "#FFBBB4"
+            if any(contrast(table.negative_ink, fill) < 4.5 for fill in (table.fill, table.focus_fill or table.fill)):
+                table.negative_ink = table.color
         if table.w >= .65:
             table.size = max(table.size, 15 if dense else 18)
     table.row_rule = blend(table.fill, table.color, .27)
