@@ -2,6 +2,42 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 
+test('edit exhibit values and composition, then save and reload the rebuilt slide', async ({ page, request }) => {
+  const title = 'Operating profit bridge';
+  const created = await request.post('/api/v1/presentations', { data: { prompt: title, generate: false } });
+  expect(created.ok()).toBe(true);
+  const { id, revision, document } = await created.json();
+  document.sources = [{ id: 'ledger', title: 'Profit ledger' }];
+  document.slides = [{
+    id: 'bridge', title, layout: 'chart', source_ids: ['ledger'],
+    spec: {
+      plan: { title, layout: 'chart' }, available_recipes: ['standard', 'exhibit_callouts'],
+      content: { title, visual: {
+        type: 'waterfall', start_label: 'Opening', end_label: 'Closing', baseline: 120,
+        rows: [{ label: 'Pricing', values: [-15] }, { label: 'Volume', values: [8] }],
+      } },
+    },
+  }];
+  const seeded = await request.patch('/api/v1/presentations/' + id, { data: { revision, document } });
+  expect(seeded.ok()).toBe(true);
+
+  await page.goto('/presentation/' + id);
+  await page.getByRole('button', { name: 'Edit exhibit', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit exhibit' });
+  await dialog.getByRole('group', { name: 'Pricing' }).getByRole('spinbutton', { name: 'Value' }).fill('-18');
+  await dialog.getByLabel('Composition').selectOption({ label: 'With callout' });
+  await dialog.getByRole('button', { name: 'Apply exhibit changes' }).click();
+  await expect(dialog).toBeHidden();
+  const canvas = page.locator('.canvas-frame');
+  await expect(canvas.getByText('110', { exact: true })).toBeVisible();
+  await expect(canvas.getByText('Exhibit data: unverified', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByText('Presentation saved.', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(canvas.getByText('110', { exact: true })).toBeVisible();
+  await expect(canvas.getByText(/Largest adjustment/)).toBeVisible();
+});
+
 test('clarify, reload, generate, edit, save and export an editable PowerPoint', async ({ page }, info) => {
   await page.route('**/api/v1/capabilities', route => route.fulfill({ json: { research: false, images: false } }));
   await page.goto('/');

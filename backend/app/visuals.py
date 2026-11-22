@@ -52,7 +52,9 @@ CONTENT_GUIDANCE = (
     " Populate visual with its requested type and variant and actual exhibit data. "
     "Use semantic values, relationships and time buckets; never give slide coordinates. "
     "Include units, axes, scale meaning, legend labels, and conditions where applicable. "
-    "For ranked bars, funnels and Pareto charts, include the exact source metric name in metric. "
+    "For ranked bars, funnels, Pareto charts and waterfalls, include the exact source metric name in metric. "
+    "Use separate units for bubble axes and size when they differ. In a Mekko, unit describes widths and segment_unit "
+    "describes the composition inputs. Use column_units for matrix criteria with different units. "
     "For a qualitative two-by-two, place each label in a named quadrant without assigning scores. "
     "Use decorations only when meaningful: kicker with an optional icon, key_metric, delta, status (0–4), "
     "a highlight_band matching a row or period, callout or footnote. "
@@ -105,6 +107,7 @@ class MetricRow(Contract):
 class QuantitativeVisual(VisualBase):
     type: QuantitativeType
     metric: str = Field(default="", max_length=80, description="Source metric name for a single-value series.")
+    segment_unit: str = Field(default="", max_length=22, description="Unit of the inputs used to calculate Mekko shares.")
     rows: list[MetricRow] = Field(min_length=2, max_length=8)
     series: list[Label] = Field(default_factory=list, max_length=4)
     highlight: Label | None = None
@@ -148,6 +151,7 @@ class MatrixRow(Contract):
 class MatrixVisual(VisualBase):
     type: MatrixType
     columns: list[Label] = Field(min_length=1, max_length=6)
+    column_units: list[Annotated[str, Field(max_length=22)]] = Field(default_factory=list, max_length=6)
     rows: list[MatrixRow] = Field(min_length=1, max_length=8)
     weights: list[Positive] = Field(default_factory=list, max_length=6)
     recommended: Label | None = None
@@ -160,6 +164,8 @@ class MatrixVisual(VisualBase):
     def valid_matrix(self):
         if any(len(row.cells) != len(self.columns) for row in self.rows):
             raise ValueError("every row must have a cell for each column")
+        if self.column_units and len(self.column_units) != len(self.columns):
+            raise ValueError("supply one unit per criterion, using an empty unit where appropriate")
         if self.weights and (len(self.weights) != len(self.columns) or len(self.columns) == 6):
             raise ValueError("supply one weight per criterion and at most five weighted criteria")
         cells = [cell for row in self.rows for cell in row.cells]
@@ -188,6 +194,9 @@ class ScatterVisual(VisualBase):
     type: ScatterType
     horizontal_label: Label
     vertical_label: Label
+    horizontal_unit: str | None = Field(default=None, max_length=22)
+    vertical_unit: str | None = Field(default=None, max_length=22)
+    size_unit: str | None = Field(default=None, max_length=22)
     points: list[PlotPoint] = Field(min_length=1, max_length=8)
     horizontal_split: Number | None = None
     vertical_split: Number | None = None

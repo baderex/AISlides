@@ -26,6 +26,7 @@ export class SlideCanvas {
   textEdit = output<string>();
   readonly draft = signal<{id: string; change: Change} | null>(null);
   readonly ratio = computed(() => this.aspect().replace(':', '/'));
+  polygonPoints(points: [number, number][]) { return points.map(([x, y]) => `${x * 100},${y * 100}`).join(' '); }
   private readonly widthPoints = computed(() => ({'16:9': 960, '4:3': 720, '1:1': 540})[this.aspect()]);
   private drag: Drag | null = null;
   readonly shades = ['#574ADB', '#8B72DA', '#279990', '#BF693F', '#637B92'];

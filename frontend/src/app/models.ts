@@ -20,7 +20,7 @@ export interface TextElement extends Geometry {
   spans?: TextSpan[];
   type: 'text'; text: string; size: number; color: string; font: string; bold: boolean; align: 'left' | 'center' | 'right';
 }
-export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle' | 'diamond'; fill: string }
+export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle' | 'diamond'; fill: string; polygon?: [number, number][] | null }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
 export interface ConnectorAnchor { shape_id: string; side: 'top' | 'left' | 'bottom' | 'right' }
 export interface LineElement extends Geometry {
@@ -47,7 +47,46 @@ export interface ChartElement extends Geometry {
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }
 export type SlideElement = TextElement | ShapeElement | ImageElement | LineElement | TableElement | ChartElement | GroupElement;
-export interface Slide { id: string; title: string; layout: Layout; background: string; elements: SlideElement[]; notes: string; source_ids: string[]; warnings: string[]; brand_layout_index?: number | null }
+export type ExhibitRecipe = 'standard' | 'exhibit_callouts' | 'exhibit_horizontal' | 'exhibit_milestones';
+export interface ExhibitVisual {
+  type: string;
+  baseline?: number | null;
+  start_label?: string;
+  series?: string[];
+  columns?: string[];
+  column_units?: string[];
+  weights?: number[];
+  recommended?: string | null;
+  rows?: {label: string; values?: number[]; cells?: (number | string)[]; width?: number | null}[];
+  horizontal_label?: string;
+  vertical_label?: string;
+  size_label?: string;
+  horizontal_unit?: string | null;
+  vertical_unit?: string | null;
+  size_unit?: string | null;
+  horizontal_split?: number | null;
+  vertical_split?: number | null;
+  points?: {label: string; horizontal?: number | null; vertical?: number | null; size?: number | null; quadrant?: string | null}[];
+  nodes?: {id: string; label: string}[];
+  edges?: {source: string; target: string; label: string; weight?: number | null}[];
+  periods?: string[];
+  boundaries?: number[];
+  items?: {id: string; label: string; start: number; end: number; predecessors: string[]}[];
+}
+export interface ExhibitBinding {
+  path: string; label: string; value: string; status: 'verified' | 'illustrative' | 'derived' | 'unverified';
+  source_observation_id?: string | null; calculation?: string | null; inputs: string[];
+}
+export interface ExhibitSpec {
+  recipe: ExhibitRecipe;
+  available_recipes?: ExhibitRecipe[];
+  value_bindings?: ExhibitBinding[];
+  content: {visual?: ExhibitVisual | null; illustrative_exhibit?: boolean};
+}
+export interface Slide {
+  id: string; title: string; layout: Layout; background: string; elements: SlideElement[]; notes: string;
+  source_ids: string[]; warnings: string[]; brand_layout_index?: number | null; spec?: ExhibitSpec | null;
+}
 export interface Deck { schema_version: 1; title: string; aspect_ratio: Aspect; theme: Theme; sources: Source[]; slides: Slide[] }
 export interface PresentationSummary {
   id: string; title: string; status: Status; revision: number; created: string; updated: string; slide_count: number;

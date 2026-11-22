@@ -14,17 +14,22 @@
         [style.left.%]="g.x * 100" [style.top.%]="g.y * 100" [style.width.%]="g.w * 100" [style.height.%]="g.h * 100"
         [style.z-index]="el.z + 1000" [style.transform]="'rotate(' + el.rotation + 'deg)'"
         [attr.aria-label]="el.type === 'text' ? el.text : el.type"
-        (pointerdown)="root && pointerStart($event, el.id, false, canvas)"
-        (dblclick)="root && editable() && el.type === 'text' && textEdit.emit(el.id)">
+        (pointerdown)="root && el.element_key !== 'exhibit:evidence' && pointerStart($event, el.id, false, canvas)"
+        (dblclick)="root && editable() && el.element_key !== 'exhibit:evidence' && el.type === 'text' && textEdit.emit(el.id)">
         <div class="slide-content" [style.opacity]="el.opacity"
-          [style.border]="el.border && (el.type !== 'shape' || el.shape !== 'diamond') ? '1px solid ' + el.border : null">
+          [style.border]="el.border && (el.type !== 'shape' || (el.shape !== 'diamond' && !el.polygon)) ? '1px solid ' + el.border : null">
           @switch (el.type) {
             @case ('text') {
               <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="el.font" [style.color]="el.color"
                 [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">@for (run of textRuns(el); track $index) {<span [style.color]="run.color" [style.font-weight]="run.bold ? 700 : 400">{{ run.text }}</span>}</div>
             }
             @case ('shape') {
-              @if (el.shape === 'diamond') {
+              @if (el.polygon) {
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  <svg:polygon [attr.points]="polygonPoints(el.polygon)" [attr.fill]="el.fill"
+                    [attr.stroke]="el.border" vector-effect="non-scaling-stroke" />
+                </svg>
+              } @else if (el.shape === 'diamond') {
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                   <svg:polygon points="50,1 99,50 50,99 1,50" [attr.fill]="el.fill"
                     [attr.stroke]="el.border" vector-effect="non-scaling-stroke" />

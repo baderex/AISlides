@@ -6,7 +6,7 @@ from time import monotonic
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import Field
+from pydantic import Field, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
@@ -14,10 +14,11 @@ from starlette.concurrency import run_in_threadpool
 from app.auth import COOKIE, authenticate, digest, login_session, passwords, resolve
 from app.branding import PPTX, inspect_template, layout_for_slide
 from app.config import settings
+from app.composition import OutlineItem, SlideContent
 from app.db import Asset, ExportRecord, Job, LoginSession, PresentationRecord, Session, SkillRecord, SlidePreview, StudioEvent, User, Version, now, uid
-from app.domain import Contract, CreatePresentation, Document, Layout, Skill, Slide, read_document
+from app.domain import Contract, CreatePresentation, Document, Layout, Recipe, Skill, Slide, read_document
 from app.edits import ApplyEdit, ChatRequest, apply, propose
-from app.export_review import ReviewBusy, ReviewUnavailable, render_native_pdf, renderer, review_powerpoint
+from app.export_review import ReviewBusy, ReviewUnavailable, add_pdf_evidence, render_native_pdf, renderer, review_powerpoint
 from app.imagery import image_configured
 from app.lucide import bundled_icon, icon_png
 from app.master_artwork import master_artwork
@@ -30,8 +31,10 @@ from app.previews import get_preview
 from app.questions import Answers, Clarification, Choice, SlideCount, validate_answers
 from app.queue import notify
 from app.rendering import fit_slide_text, to_pdf
+from app.slide_design import recipe_options, recompose_slide
 from app.skills import list_skills
 from app.storage import Storage, parse_upload
+from app.visuals import Visual
 
 api = APIRouter(prefix="/api/v1")
 owner = Depends(resolve)
@@ -53,6 +56,12 @@ class Save(Contract):
 class SaveSlide(Contract):
     revision: int = Field(ge=0)
     slide: Slide
+
+
+class EditExhibit(SaveSlide):
+    visual: Visual
+    recipe: Recipe | None = None
+    illustrative: bool | None = None
 
 
 def limit_auth(request):
@@ -511,6 +520,50 @@ def save_slide(item_id: str, slide_id: str, data: SaveSlide, owner_id: str = own
         return details(item)
 
 
+@api.post("/presentations/{item_id}/slides/{slide_id}/exhibit", response_model=Slide)
+def edit_exhibit(item_id: str, slide_id: str, data: EditExhibit, owner_id: str = owner):
+    with Session() as db:
+        item = item_for(db, item_id, owner_id)
+        assert_editable(item, data.revision)
+        document = read_document(item.document)
+        draft = data.slide
+        if draft.id != slide_id:
+            raise HTTPException(404, "Slide not found.")
+        original = next((slide for slide in document.slides if slide.id == slide_id), None)
+        if not original and draft.spec:
+            original = next((slide for slide in document.slides if slide.spec and
+                             slide.spec.id_namespace == draft.spec.id_namespace), None)
+        # Existing slides can be edited locally more than once before saving.
+        # Accept their generated baseline along with the current visual overrides.
+        if not original or not draft.spec or not draft.spec.content.get("visual"):
+            raise HTTPException(422, "This slide has no editable exhibit.")
+        if not set(draft.source_ids) <= {source.id for source in document.sources}:
+            raise HTTPException(422, "The slide cites an unknown source.")
+        brand = presentation_brand(db, item, owner_id)
+        try:
+            content = SlideContent.model_validate(draft.spec.content)
+            part = OutlineItem.model_validate(draft.spec.plan)
+        except ValidationError as error:
+            raise HTTPException(422, "The saved exhibit data is invalid.") from error
+        if not content.visual or content.visual.type != data.visual.type:
+            raise HTTPException(422, "The exhibit type must match the slide.")
+        content.visual = data.visual
+        if data.illustrative is not None:
+            content.illustrative_exhibit = data.illustrative
+        options = ["standard"] if brand else recipe_options(part, content, document)
+        if data.recipe is not None and data.recipe not in options:
+            raise HTTPException(422, "That layout is unavailable for this exhibit.")
+        index = next(i for i, slide in enumerate(document.slides) if slide.id == original.id)
+        result = recompose_slide(draft, document, index, keep_recipe=True, replacement_content=content,
+                                 selected_recipe=data.recipe, brand=brand)
+        if result is None:
+            raise HTTPException(422, "The exhibit could not be rebuilt with these values and edits.")
+        validate_document_assets(db, owner_id, document.model_copy(update={"slides": [result]}))
+        from app.exhibit_evidence import display_evidence
+
+        return display_evidence(document, result)
+
+
 @api.get("/presentations/{item_id}/slides/{slide_id}/preview")
 def slide_preview(item_id: str, slide_id: str, owner_id: str = owner):
     with Session() as db:
@@ -642,6 +695,7 @@ def export(item_id: str, format: str = "pptx", owner_id: str = owner):
     elif brand and (executable := renderer()):
         try:
             raw = render_native_pdf(executable, to_pptx(document, storage.get, brand))
+            raw = add_pdf_evidence(raw, document)
         except ReviewUnavailable as error:
             raise HTTPException(503, str(error)) from error
         except ReviewBusy as error:

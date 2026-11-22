@@ -139,6 +139,8 @@ class Shape(ElementBase):
     type: Literal["shape"] = "shape"
     shape: Literal["rect", "round", "ellipse", "triangle", "diamond"] = "rect"
     fill: Color = "#4C52D9"
+    polygon: list[tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, le=1)]]] | None = Field(
+        default=None, min_length=3, max_length=48)
 
 
 class Image(ElementBase):
@@ -345,6 +347,7 @@ Recipe = Literal[
     "feature_panels", "feature_rows", "diagram_flow", "diagram_paths", "diagram_vertical",
     "diagram_swimlane",
     "dense_table", "dense_table_full", "chart", "readout", "allocation", "rollout", "decision",
+    "exhibit_callouts", "exhibit_horizontal", "exhibit_milestones",
 ]
 
 
@@ -363,6 +366,8 @@ class SlideSpec(Contract):
     deleted_ids: list[Identifier] = Field(default_factory=list, max_length=1000)
     generated_background: Color | None = None
     generated_notes: str = Field(default="", max_length=7000)
+    value_bindings: list[dict[str, JsonValue]] = Field(default_factory=list, max_length=150)
+    available_recipes: list[Recipe] = Field(default_factory=list, max_length=3)
 
 
 class Slide(Contract):

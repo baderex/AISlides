@@ -436,6 +436,14 @@ def requested_closing_action(prompt: str) -> str:
 
 def resolve_headline(part, content, prompt: str, sources, *, strict_copy: bool = False, observations=()):
     """Reconcile supported observations and choose a grounded display headline."""
+    if content.visual or content.chart or content.stacked_comparison:
+        supplied = [*observations, *content.exhibit_observations]
+        checked = list(verified_observations(supplied, sources))
+        content.exhibit_observations = list({row.model_dump_json(): row for row in checked}.values())[:96]
+        illustrative = r"\b(?:illustrative|hypothetical|synthetic)\s+(?:figures|data|numbers|values|example)"
+        excluded = rf"\b(?:no|exclude|avoid|without)\s+(?:any\s+)?{illustrative}"
+        content.illustrative_exhibit = bool(re.search(illustrative, prompt, re.I) and not re.search(excluded, prompt, re.I))
+        observations = content.exhibit_observations
     evidence = [prompt, *(source.excerpt for source in sources if source.id in content.source_ids and source.excerpt != prompt)]
     structured = verified_metrics(observations, sources)
     covered = {(metric.source_ids[0], key(metric.label)) for metric in structured}

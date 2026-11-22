@@ -12,11 +12,11 @@ from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout,
                         Slide, Table, Text, Theme, display_value)
 from app.exhibit_layout import ExhibitCanvas, compose_exhibit
 from app.evidence import EvidenceObservation
+from app.exhibit_evidence import STATUS_KEY, UNVERIFIED, evidence_label, exhibit_bindings
 from app.lucide import ICON_NAMES
 from app.questions import Question
 from app.rendering import contrast, fit_image, longest_word_width, physical, slide_icon, text_height
-from app.visuals import (Annotation, Copy, Decorations, QuantitativeVisual, ScatterVisual, VISUAL_LAYOUTS, Visual,
-                         VisualChoice)
+from app.visuals import Annotation, Copy, Decorations, VISUAL_LAYOUTS, Visual, VisualChoice
 
 
 class Intent(Contract):
@@ -312,6 +312,8 @@ class SlideContent(Contract):
     swimlane: Swimlane | None = None
     readout: Readout | None = None
     visual: Visual | None = None
+    exhibit_observations: list[EvidenceObservation] = Field(default_factory=list, max_length=96)
+    illustrative_exhibit: bool = False
     annotations: list[Copy | Annotation] = Field(default_factory=list, max_length=3)
     decorations: Decorations | None = None
     table_focus: list[ShortText] = Field(default_factory=list, max_length=4,
@@ -455,7 +457,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     source_ids = {source.id for source in document.sources}
     rules = document.theme.design
     if content.visual:
-        return compose_visual_slide(item, content, document, brand, image_ids, source_ids)
+        return compose_visual_slide(item, content, document, brand, image_ids, source_ids, recipe)
     consulting = document.theme.profile == "consulting"
     if consulting and not brand and not content.table and not content.chart and not content.diagram and not content.swimlane and not (
         content.stacked_comparison or content.image_asset_id or recipe in {"feature_panels", "feature_rows"}
@@ -911,7 +913,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     return style_slide_tables(slide, t, preserve_palette=consulting)
 
 
-def compose_visual_slide(item, content, document, brand, image_ids, source_ids):
+def compose_visual_slide(item, content, document, brand, image_ids, source_ids, recipe):
     role = VISUAL_LAYOUTS[content.visual.type]
     heading = item.title.strip() or content.title.strip() or "Untitled slide"
     source_ids = list(dict.fromkeys(key for key in content.source_ids if key in source_ids))
@@ -943,18 +945,20 @@ def compose_visual_slide(item, content, document, brand, image_ids, source_ids):
     if content.subtitle:
         frame.label(content.subtitle, 0, 0, 1, .115, 15, color=frame.muted)
     start = .13 if content.subtitle else 0
-    frame.line((0, start), (1, start), color=frame.rule)
+    frame.line((0, start), (1, start), color=frame.rule, element_key="exhibit:header-rule")
     bounds = (frame.x, frame.y + frame.h * (start + .025), frame.w, frame.h * (1 - start - .025))
-    visual = content.visual
-    numerical = (isinstance(visual, QuantitativeVisual) or
-                 (isinstance(visual, ScatterVisual) and not visual.points[0].quadrant) or
-                 visual.type == "sankey" or
-                 (visual.type in {"heatmap", "scoring-matrix", "decision-matrix"} and
-                  any(isinstance(cell, (int, float)) for row in visual.rows for cell in row.cells)))
-    if numerical and not slide.source_ids:
+    status = evidence_label(exhibit_bindings(content, document.sources, slide.source_ids,
+                                             planned_annotations=item.annotations))
+    if status == UNVERIFIED and not slide.source_ids:
         slide.warnings.append("Quantitative exhibit omitted because no source was cited.")
-        frame.label("Source data needed", 0, start + .18, 1, .18, 20, color=frame.muted)
+        frame.label("Source data needed", 0, start + .18, 1, .18, 20, color=frame.muted,
+                    element_key="exhibit:missing-data")
         return slide
+    if status == UNVERIFIED:
+        slide.warnings.append("Some exhibit values lack matching source observations.")
+    if status:
+        frame.label(status, 0, .956, 1, .044, 11, color=frame.ink, bold=True, element_key=STATUS_KEY)
+        bounds = (*bounds[:3], bounds[3] - frame.h * .06)
     compose_exhibit(document, slide, content, bounds, annotations=content.annotations,
-                    planned_annotations=item.annotations)
+                    planned_annotations=item.annotations, recipe=recipe)
     return slide

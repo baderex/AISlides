@@ -2,6 +2,7 @@ import { computed, Injectable, signal } from '@angular/core';
 import { Deck, Geometry, ShapeElement, Slide, SlideElement, TextElement } from '../models';
 
 type ElementUpdate = Partial<Geometry> & {text?: string; size?: number; color?: string; bold?: boolean; align?: 'left' | 'center' | 'right'; fill?: string; shape?: ShapeElement['shape']};
+const dataGeometry = ['x', 'y', 'w', 'h', 'rotation'] as const;
 
 export function slideId() { return crypto.randomUUID(); }
 export function baseGeometry(z = 0): Geometry {
@@ -74,14 +75,32 @@ export class Editor {
     this.updateSlide(slide => {
       const element = slide.elements.find(el => el.id === id);
       if (!element) return;
-      if (element.type === 'text' && change.text !== undefined && change.text !== element.text) element.spans = [];
+      const changedText = element.type === 'text' && change.text !== undefined && change.text !== element.text;
+      const visualType = slide.spec?.content.visual?.type;
+      const dataShape = (element.type === 'shape' || element.type === 'line') && visualType &&
+        element.element_key?.startsWith(visualType + ':');
+      if (changedText && element.type === 'text') element.spans = [];
+      if (changedText || (dataShape && (dataGeometry.some(key => change[key] !== undefined && change[key] !== element[key])
+        || (element.type === 'shape' && change.shape !== undefined && change.shape !== element.shape)))) {
+        this.markExhibitUnverified(slide);
+      }
       Object.assign(element, change, {edited: true});
     });
   }
 
   removeElement() {
     const id = this.selected();
-    if (id) this.updateSlide(slide => { slide.elements = slide.elements.filter(element => element.id !== id); });
+    if (id) this.updateSlide(slide => {
+      this.markExhibitUnverified(slide);
+      slide.elements = slide.elements.filter(element => element.id !== id);
+    });
+  }
+
+  private markExhibitUnverified(slide: Slide) {
+    const badge = slide.elements.find(element => element.element_key === 'exhibit:evidence');
+    if (badge?.type === 'text' && badge.text.startsWith('Exhibit data: source verified')) {
+      badge.text = 'Exhibit data: unverified';
+    }
   }
 
   addElement(element: SlideElement) {

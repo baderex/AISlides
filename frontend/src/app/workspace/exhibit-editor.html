@@ -1,0 +1,150 @@
+<form class="dialog-form" (ngSubmit)="apply.emit({visual, recipe, illustrative})">
+  @if ((spec().available_recipes?.length ?? 0) > 1) {
+    <label>Composition
+      <select class="field" [(ngModel)]="recipe" [ngModelOptions]="model">
+        @for (option of spec().available_recipes; track option) {
+          <option [ngValue]="option">{{ recipeNames[option] }}</option>
+        }
+      </select>
+    </label>
+  }
+  <div class="values">
+    @if (visual.type === 'waterfall' || visual.type === 'tornado') {
+      <label>{{ visual.type === 'waterfall' ? visual.start_label : 'Baseline' }}
+        <input class="field" type="number" step="any" [(ngModel)]="visual.baseline" [ngModelOptions]="model" />
+      </label>
+    }
+    @for (row of visual.rows; track $index) {
+      <fieldset class="fields">
+        <legend>{{ row.label }}</legend>
+        @if (row.values; as values) {
+          @for (amount of values; track $index; let i = $index) {
+            <label>{{ visual.series?.[i] || (values.length === 1 ? 'Value' : i === 0 ? 'Low / first' : 'High / second') }}
+              <input class="field" type="number" step="any" [(ngModel)]="values[i]" [ngModelOptions]="model" />
+            </label>
+          }
+        }
+        @if (row.cells; as cells) {
+          @for (cell of cells; track $index; let i = $index) {
+            <label>{{ labelWithUnit(visual.columns?.[i], visual.column_units?.[i]) }}
+              @if (typeof cell === 'number' || cell === null) {
+                <input class="field" type="number" step="any" [(ngModel)]="cells[i]" [ngModelOptions]="model" />
+              } @else {
+                <input class="field" type="text" [(ngModel)]="cells[i]" [ngModelOptions]="model" />
+              }
+            </label>
+          }
+        }
+        @if (visual.type === 'mekko') {
+          <label>Category width<input class="field" type="number" step="any" [(ngModel)]="row.width" [ngModelOptions]="model" /></label>
+        }
+      </fieldset>
+    }
+    @if (visual.weights?.length && visual.weights; as weights) {
+      <fieldset class="fields">
+        <legend>Criteria weights</legend>
+        @for (weight of weights; track $index; let i = $index) {
+          <label>{{ visual.columns?.[i] }}
+            <input class="field" type="number" step="any" [(ngModel)]="weights[i]" [ngModelOptions]="model" />
+          </label>
+        }
+      </fieldset>
+    }
+    @if (visual.type === 'decision-matrix' || visual.type === 'scoring-matrix') {
+      <label>Recommended option
+        <select class="field" [(ngModel)]="visual.recommended" [ngModelOptions]="model">
+          <option [ngValue]="null">None</option>
+          @for (row of visual.rows; track $index) { <option [ngValue]="row.label">{{ row.label }}</option> }
+        </select>
+      </label>
+    }
+    @for (point of visual.points; track $index) {
+      <fieldset class="fields">
+        <legend>{{ point.label }}</legend>
+        @if (point.quadrant) {
+          <label>Quadrant
+            <select class="field" [(ngModel)]="point.quadrant" [ngModelOptions]="model">
+              <option value="upper-left">Upper left</option><option value="upper-right">Upper right</option>
+              <option value="lower-left">Lower left</option><option value="lower-right">Lower right</option>
+            </select>
+          </label>
+        } @else {
+          <label>{{ labelWithUnit(visual.horizontal_label, visual.horizontal_unit) }}<input class="field" type="number" step="any" [(ngModel)]="point.horizontal" [ngModelOptions]="model" /></label>
+          <label>{{ labelWithUnit(visual.vertical_label, visual.vertical_unit) }}<input class="field" type="number" step="any" [(ngModel)]="point.vertical" [ngModelOptions]="model" /></label>
+          @if (visual.type === 'bubble-chart') {
+            <label>{{ labelWithUnit(visual.size_label, visual.size_unit) }}<input class="field" type="number" step="any" [(ngModel)]="point.size" [ngModelOptions]="model" /></label>
+          }
+        }
+      </fieldset>
+    }
+    @if (visual.type === 'two-by-two' && !visual.points?.[0]?.quadrant) {
+      <fieldset class="fields">
+        <legend>Decision thresholds</legend>
+        <label>{{ visual.horizontal_label }}<input class="field" type="number" step="any" [(ngModel)]="visual.horizontal_split" [ngModelOptions]="model" /></label>
+        <label>{{ visual.vertical_label }}<input class="field" type="number" step="any" [(ngModel)]="visual.vertical_split" [ngModelOptions]="model" /></label>
+      </fieldset>
+    }
+    @if (visual.nodes && visual.edges; as edges) {
+      @for (edge of edges; track edge; let i = $index) {
+        <fieldset class="fields">
+          <legend>Relationship {{ i + 1 }}</legend>
+          <label>Origin<select class="field" [(ngModel)]="edge.source" [ngModelOptions]="model">
+            @for (node of visual.nodes; track node.id) { <option [ngValue]="node.id">{{ node.label }}</option> }
+          </select></label>
+          <label>Destination<select class="field" [(ngModel)]="edge.target" [ngModelOptions]="model">
+            @for (node of visual.nodes; track node.id) { <option [ngValue]="node.id">{{ node.label }}</option> }
+          </select></label>
+          <label>Label<input class="field" type="text" maxlength="38" [(ngModel)]="edge.label" [ngModelOptions]="model" /></label>
+          @if (visual.type === 'sankey') {
+            <label>Flow<input class="field" type="number" step="any" [(ngModel)]="edge.weight" [ngModelOptions]="model" /></label>
+          }
+          <button class="button" type="button" (click)="edges.splice(i, 1)">Remove relationship</button>
+        </fieldset>
+      }
+      <div><button class="button" type="button" [disabled]="edges.length >= 12" (click)="addRelationship()">Add relationship</button></div>
+    }
+    @for (item of visual.items; track item.id) {
+      <fieldset class="fields">
+        <legend>{{ item.label }}</legend>
+        <label>Start<select class="field" [(ngModel)]="item.start" [ngModelOptions]="model">
+          @for (period of visual.periods; track $index) { <option [ngValue]="$index">{{ period }}</option> }
+        </select></label>
+        <label>End<select class="field" [(ngModel)]="item.end" [ngModelOptions]="model">
+          @for (period of visual.periods; track $index) { <option [ngValue]="$index">{{ period }}</option> }
+        </select></label>
+        <label>Depends on<select class="field" multiple [(ngModel)]="item.predecessors" [ngModelOptions]="model">
+          @for (candidate of visual.items; track candidate.id) {
+            @if (candidate.id !== item.id) { <option [ngValue]="candidate.id">{{ candidate.label }}</option> }
+          }
+        </select></label>
+      </fieldset>
+    }
+    @if (visual.boundaries?.length && visual.boundaries; as boundaries) {
+      <fieldset class="fields">
+        <legend>Time boundaries</legend>
+        @for (boundary of boundaries; track $index; let i = $index) {
+          <label>{{ visual.periods?.[i] || 'End' }}
+            <input class="field" type="number" step="any" [(ngModel)]="boundaries[i]" [ngModelOptions]="model" />
+          </label>
+        }
+      </fieldset>
+    }
+  </div>
+  @if (visual.rows?.[0]?.values || visual.rows?.[0]?.cells || visual.points?.[0]?.horizontal != null || visual.type === 'sankey' || visual.boundaries?.length) {
+    <label class="check"><input type="checkbox" [(ngModel)]="illustrative" [ngModelOptions]="model" /> Mark exhibit figures as illustrative</label>
+  }
+  @if (spec().value_bindings?.length) {
+    <details>
+      <summary>Evidence for the current slide</summary>
+      <ul class="evidence">
+        @for (binding of spec().value_bindings; track binding.path) {
+          <li>{{ binding.label }} · {{ binding.value }} · {{ binding.status }}
+            @if (binding.source_observation_id) { ({{ binding.source_observation_id }}) }
+          </li>
+        }
+      </ul>
+    </details>
+  }
+  @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
+  <div class="dialog-actions"><button type="submit" class="primary" [disabled]="busy()">{{ busy() ? 'Rebuilding…' : 'Apply exhibit changes' }}</button></div>
+</form>
