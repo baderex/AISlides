@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 
 test('clarify, reload, generate, edit, save and export an editable PowerPoint', async ({ page }, info) => {
+  await page.route('**/api/v1/capabilities', route => route.fulfill({ json: { research: false, images: false } }));
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Bring your ideas into focus.' })).toBeVisible();
   await expect(page.getByLabel('AI model provider')).toHaveCount(0);
@@ -71,6 +72,36 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
     'assert any(s.shape_type == MSO_SHAPE_TYPE.TEXT_BOX and s.text == "Quantum Computing for Directors" for s in deck.slides[0].shapes)',
     'assert any(s.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE for s in deck.slides[0].shapes)',
   ].join('\n'), output]);
+});
+
+test('Web research defaults to checked when available and can be turned off', async ({ page }) => {
+  let researchAvailable = true;
+  await page.route('**/api/v1/capabilities', route => route.fulfill({ json: { research: researchAvailable, images: false } }));
+  await page.route('**/api/v1/presentations', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 400, json: { detail: 'Test submission' } })
+    : route.continue());
+  await page.goto('/');
+  const research = page.getByRole('checkbox', { name: 'Web research' });
+  const generate = page.getByRole('button', { name: 'Generate slides' });
+  const submit = async () => {
+    const [request] = await Promise.all([
+      page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/presentations')),
+      generate.click(),
+    ]);
+    return request.postDataJSON().research;
+  };
+
+  await expect(research).toBeChecked();
+  await page.getByLabel('Describe your presentation').fill('Search for sources');
+  expect(await submit()).toBe(true);
+  await research.uncheck();
+  expect(await submit()).toBe(false);
+
+  researchAvailable = false;
+  await page.reload();
+  await expect(research).toHaveCount(0);
+  await page.getByLabel('Describe your presentation').fill('Create a presentation');
+  expect(await submit()).toBe(false);
 });
 
 test('the Skills page opens a reusable skill without losing the draft', async ({ page }) => {

@@ -81,6 +81,8 @@ def demo_response(schema: str, data: dict) -> dict:
                       ("What happens next", "Choose one practical next step with a clear owner and a review date.")]
         return {"title": title, "subtitle": subtitle, "points": [{"title": name, "body": body} for name, body in points],
                 "notes": "Offline Studio Demo content. Configure a model provider to generate source-grounded material."}
+    if schema == "ResearchQueries":
+        return {"queries": [data["intent"]["subject"]]}
     if schema == "ResearchBrief":
         return {"summary": "Reference material is available for review.", "uncertainties": []}
     if schema == "Review":

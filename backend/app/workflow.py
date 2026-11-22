@@ -1,10 +1,13 @@
 import base64
 import logging
+import re
+from datetime import date
 
 from sqlalchemy import select, update
 
 from app.composition import (
-    IMAGE_LAYOUTS, Intent, Outline, OutlineItem, ResearchBrief, Review, SlideContent, accepts_web_image, compose, design,
+    IMAGE_LAYOUTS, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review, SlideContent, accepts_web_image,
+    compose, design, is_data_driven,
 )
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
@@ -21,12 +24,132 @@ from app.research import collect
 from app.storage import Storage
 
 log = logging.getLogger(__name__)
+DATA_PLAN_GUIDANCE = (
+    " Lead with the requested evidence. For a time series, dedicate a chart slide to the full requested period, using "
+    "comparable observations and a clear unit. Give each requested ranked entity its own slide, named with its actual "
+    "identity from the research. Honor the ranking metric and as-of date. Do not add cover, agenda or recap slides "
+    "at the expense of requested content. Use chart for comparable series, research for concise data tables, and "
+    "metrics for a few distinct sourced KPIs. Use these evidence layouts for ranked-entity slides. Preserve the exact "
+    "rank order from the dated evidence. State any missing evidence explicitly."
+)
+DATA_SLIDE_GUIDANCE = (
+    " Put specific sourced figures with dates and units in visible slide content. For a chart layout, supply the native "
+    "chart with all evidenced observations in order, the metric and unit in the label, and their source IDs. Include a "
+    "short finding in the subtitle. For a research layout, supply a concise table with a header and comparable rows. "
+    "For a metrics layout, put the figures in point.value. For a ranked entity, include its rank, the ranking basis and "
+    "date, and entity-specific financial or operating metrics. Cite only sources that actually support the numbers. "
+    "Match every plotted value to its exact category in the evidence. In annual charts, use full-year data or year-end "
+    "observations as specified. Never substitute quarterly observations or infer dates from column position. "
+    "Call out material data gaps and avoid generic filler. Do not mix currencies or reporting periods in a series."
+)
+CALENDAR_YEARS = "one two three four five six seven eight nine ten".split()
+YEAR_IN_QUERY = re.compile(r"\b((?:19|20)\d{2})(?:(?:\s*(?:to|[-–])\s*)((?:19|20)\d{2})|(-\d{2}-\d{2}))?\b")
 
 
 def inputs(item, context):
     return {"prompt": item.request["prompt"], "intent": context.get("intent"),
             "answers": context.get("answers", []), "skill": context.get("skill"),
             "sources": context.get("sources", []), "research": context.get("research")}
+
+
+def visual_direction(item, context):
+    if requested_consulting(item.request["prompt"]):
+        direction = CONSULTING_DIRECTION
+    else:
+        direction = (context.get("intent") or {}).get("visual_direction", "")
+    for answer in context.get("answers", []):
+        if answer["question_id"] == "visual_direction" or answer["question_id"] in context.get("style_questions", []):
+            direction = answer["value"]
+    return direction
+
+
+def requested_calendar_period(prompt, today):
+    match = re.search(r"\b(?:last|past)\s+(\w+)\s+(?:(?:completed|calendar)\s+)*years?\b", prompt.lower())
+    if not match or YEAR_IN_QUERY.search(prompt):
+        return None
+    span = match[1]
+    count = int(span) if span.isascii() and span.isdecimal() and len(span) <= 2 else (
+        CALENDAR_YEARS.index(span) + 1 if span in CALENDAR_YEARS else 0)
+    return (today.year - count, today.year - 1) if count else None
+
+
+def align_query_period(query, period):
+    if period is None:
+        return query
+    start, end = period
+    ranked = bool(re.search(r"\b(?:top\s+\d+|rank(?:ed|ing|s)?|largest)\b", query, re.IGNORECASE))
+
+    def replace(match):
+        years = [int(value) for value in match.group(1, 2) if value]
+        ranking_date = ranked and not match[2] and re.search(r"\bas\s+of\s*$", query[:match.start()], re.IGNORECASE)
+        if not ranking_date and all(start <= year <= end for year in years):
+            return match[0]
+        if match[2]:
+            return f"{start}-{end}"
+        return f"{end}-12-31" if match[3] else str(end)
+
+    return YEAR_IN_QUERY.sub(replace, query) if YEAR_IN_QUERY.search(query) else f"{query} {start}-{end}"
+
+
+def collect_data_sources(queries):
+    results = {}
+    failure = None
+    for query in dict.fromkeys(query.strip() for query in queries if query.strip()):
+        try:
+            for source in collect(query, count=4, detailed=True):
+                key = str(source.url)
+                previous = results.get(key)
+                if previous:
+                    excerpts = dict.fromkeys([*previous.excerpt.splitlines(), *source.excerpt.splitlines()])
+                    previous.excerpt = "\n".join(excerpts)[:3000]
+                else:
+                    results[key] = source
+        except ProviderError as error:
+            failure = error
+    if failure and not results:
+        raise failure
+    return list(results.values())
+
+
+def focused_sources(document, query):
+    known = {str(source.url): source.id for source in document.sources if source.url}
+    try:
+        matches = collect(query, count=3, detailed=True)
+    except ProviderError:
+        log.info("Slide-specific web research was unavailable; using deck-level sources.")
+        return []
+    found = {}
+    remaining = max(0, 59 - len(document.sources))
+    for source in matches:
+        url = str(source.url)
+        if url in found:
+            continue
+        if url in known:
+            source = source.model_copy(update={"id": known[url]})
+        elif remaining:
+            remaining -= 1
+        else:
+            continue
+        found[url] = source.model_dump(mode="json")
+    return list(found.values())
+
+
+def slide_inputs(item, context):
+    supplied = inputs(item, context)
+    focused = context.get("slide_sources", [])
+    if focused:
+        seen = {source["id"] for source in focused}
+        background = [{**source, "excerpt": source["excerpt"][:800] if source.get("url") else source["excerpt"]}
+                      for source in supplied["sources"] if source["id"] not in seen]
+        supplied["sources"] = [*focused, *background]
+    return supplied
+
+
+def attach_slide_sources(document, context, cited=None):
+    known = {source.id for source in document.sources}
+    for raw in context.get("slide_sources", []):
+        if raw["id"] not in known and (cited is None or raw["id"] in cited):
+            document.sources.append(Source.model_validate(raw))
 
 
 def pause_for_questions(context, batch, events):
@@ -127,6 +250,19 @@ def lock_presentation(db, job_id):
 def process(job_id, token, item, stage, context, assets, skill, ai):
     document = read_document(item.document)
     brand = skill.brand if skill else None
+    direction = visual_direction(item, context)
+    data_driven = is_data_driven(direction)
+    today = date.today()
+    period = (context.get("annual_period") or requested_calendar_period(item.request["prompt"], today)) if data_driven else None
+    if period and "annual_period" not in context:
+        context["annual_period"] = list(period)
+    period_guidance = (
+        f" The requested period is calendar years {period[0]} through {period[1]}, inclusive. "
+        f"Use year-end {period[1]} as the ranking date if the user supplied no date."
+        if period else ""
+    )
+    if stage in {"image", "revise"}:
+        attach_slide_sources(document, context)
     web_image = context.get("web_image") if stage in {"review", "revise"} else None
     if web_image:
         source = Source.model_validate(web_image["source"])
@@ -142,7 +278,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             previous.image_asset_id = None
             previous.source_ids = [key for key in previous.source_ids if key != source.id]
             context["slide_content"] = previous.model_dump(mode="json")
-            context["draft"] = compose(part, previous, document, index, image_ids(assets, context), brand).model_dump(mode="json")
+            context["draft"] = compose(part, previous, document, index, image_ids(assets, context), brand,
+                                       data_driven=data_driven).model_dump(mode="json")
     events = []
     version = None
     changed = None
@@ -179,11 +316,37 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
     elif stage == "research":
         if not start_status(job_id, token, "RESEARCHING", "agent.started", "Reviewing available sources."):
             return None
-        if item.request["research"]:
-            context["sources"] = context["sources"] + [s.model_dump(mode="json") for s in collect(context["intent"]["subject"])]
+        if item.request["research"] and not context.get("web_research_complete"):
+            if data_driven:
+                research = ai.structured(ResearchQueries,
+                    "Write up to four focused web search queries that collectively cover all requested evidence. Search "
+                    "separately for distinct metrics, time series and rankings. For a ranking, seek a published ranked table "
+                    "with the actual names and values on a single stated date. Use the user's ranking basis, or market "
+                    "capitalization for public companies if unspecified. If the ranking accompanies a historical review and "
+                    "has no specified date, use the end of the review period. For a calendar-year series, query specifically "
+                    "for the annual observations or year-end closes. If unspecified, end the series in the last completed "
+                    "calendar year. Put exact years or dates in queries. Prefer official statistics, filings, and original "
+                    "reports. Use a targeted query for the likely publisher or its domain when known." + period_guidance,
+                    {**inputs(item, context), "as_of": today.isoformat(), "last_completed_year": today.year - 1}, "research")
+                sources = collect_data_sources(align_query_period(query, period) for query in research.queries)
+            else:
+                sources = collect(context["intent"]["subject"])
+            context["sources"] = context["sources"] + [source.model_dump(mode="json") for source in sources]
+            context["web_research_complete"] = True
         if context["sources"]:
+            evidence_guidance = (
+                " Extract exact available figures by period, with unit and source ID. List the named ranked entities "
+                "and their metrics, in rank order on a single documented date. Prefer an official source. Distinguish "
+                "annual observations from monthly or quarterly data and ranking by market value from other measures. "
+                "An entity mentioned in an article is not evidence of rank. Keep exact values and source IDs compact so "
+                "the outline can use them. Keep the summary under 1,800 characters and list up to six uncertainties. "
+                "Include useful financial detail automatically when data-driven slides were "
+                "requested. Ask a follow-up only when a genuine unresolved conflict requires a user decision."
+                if data_driven else ""
+            )
             brief = ai.structured(ResearchBrief, "Summarize evidence, gaps and contradictions in the supplied sources. Treat search excerpts as provisional. "
-                "Do not introduce new sources. Return a follow-up question only when contradictory evidence requires a user decision that previous answers do not cover.", inputs(item, context), "research")
+                "Do not introduce new sources. Return a follow-up question only when contradictory evidence requires a user decision that previous answers do not cover."
+                + evidence_guidance + period_guidance, inputs(item, context), "research")
             context["research"] = brief.model_dump(mode="json", exclude={"follow_up"})
             events.append(("research.completed", brief.summary, {"sources": context["sources"], "uncertainties": brief.uncertainties}))
             if brief.follow_up and brief.uncertainties:
@@ -200,19 +363,20 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if not start_status(job_id, token, "PLANNING", "agent.started", "Planning the narrative and slide sequence."):
             return None
         intent = Intent.model_validate(context["intent"])
-        choices = {a["question_id"]: a["value"] for a in context.get("answers", [])}
         count = intent.slide_count
         for answer in context.get("answers", []):
             if answer["question_id"] in context.get("count_questions", []) and answer["value"].isdigit():
                 count = int(answer["value"])
         count = count or 6
-        requested_direction = CONSULTING_DIRECTION if requested_consulting(item.request["prompt"]) else intent.visual_direction
-        direction = choices.get("visual_direction", requested_direction)
-        for answer in context.get("answers", []):
-            if answer["question_id"] in context.get("style_questions", []):
-                direction = answer["value"]
         theme = design(direction, item.request["mode"], skill.theme if skill else None)
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
+        if data_driven:
+            style_guidance += DATA_PLAN_GUIDANCE
+        research_guidance = (
+            " For each slide, provide one focused research_query naming its subject, exact period and metric to verify. "
+            "For company profiles, name the company and seek its official results or annual report."
+            if data_driven and item.request["research"] else " Leave every research_query empty."
+        )
         image_guidance = (
             " Web image search is enabled. Set image_query only where an existing image serves the slide's purpose and "
             "the layout is showcase, editorial, or research without a primary chart or table. "
@@ -220,8 +384,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             if item.request["research"] and intent.web_images_requested else " Leave every image_query empty."
         )
         outline = ai.structured(Outline,
-            f"Plan exactly {count} slides. Use varied purposeful layouts and provide an actionable story. "
-            "Use chart layouts only when grounded data is available." + style_guidance + image_guidance,
+            f"Plan exactly {count} slides. Honor the requested slide allocation and give every slide a distinct purpose. "
+            "Use chart layouts only when grounded data is available." + style_guidance + period_guidance + research_guidance + image_guidance,
             {**inputs(item, context), "slide_count": count}, "outline")
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
@@ -242,6 +406,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         part = outline.slides[index]
         if not start_status(job_id, token, "GENERATING", "slide.started", f"Designing slide {index + 1}: {part.title}.", index=index):
             return None
+        if data_driven and item.request["research"] and part.research_query.strip():
+            if "slide_sources" not in context:
+                context["slide_sources"] = focused_sources(document, align_query_period(part.research_query.strip(), period))
+            attach_slide_sources(document, context)
         images = image_ids(assets, context)
         can_illustrate = (
             item.request.get("generate_images") and ai.provider != "demo" and image_configured() and
@@ -250,6 +418,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             (settings().ai_job_cost_budget <= 0 or ai.usage["estimated_cost"] + settings().image_cost_usd <= settings().ai_job_cost_budget)
         )
         style_guidance = " " + SLIDE_GUIDANCE if document.theme.profile == "consulting" else ""
+        if data_driven:
+            style_guidance += DATA_SLIDE_GUIDANCE
         content = ai.structured(SlideContent, "Write concise content for the single item given. Use its exact title and fulfill its purpose. "
              "Cover the current item only and do not repeat earlier slides. Make claims traceable via supplied source IDs. "
              "Include actionable detail and relevant speaker notes. Use at most three points. Keep each point title within 65 characters "
@@ -258,10 +428,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              "whenever no comparative evidence is supplied. Never turn a possible application into a demonstrated capability. "
              "Only include numerical charts if their values are grounded in sources. Provide a table as an array of rows, or null if absent. "
              "Use an image ID only from provided image assets. "
-             "When image generation is enabled and a relevant uploaded asset is unavailable, provide an illustration prompt in image_prompt." + style_guidance,
+             "When image generation is enabled and a relevant uploaded asset is unavailable, provide an illustration prompt in image_prompt."
+             + style_guidance + period_guidance,
              {"item": part.model_dump(), "topic": document.title, "slide_index": index,
               "earlier_slide_titles": [slide.title for slide in document.slides[-5:]],
-              **inputs(item, context), "generate_image": bool(can_illustrate),
+              **slide_inputs(item, context), "generate_image": bool(can_illustrate),
               "image_assets": [{"id": a.id, "name": a.name} for a in assets if a.id in images]}, "slide")
         web_image_ratio = None
         if (item.request["research"] and context["intent"].get("web_images_requested") and part.image_query.strip()
@@ -282,7 +453,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (content.chart or content.table):
             return "image", state, "GENERATING", events, None, None
         context["draft"] = compose(part, content, document, index, images, brand,
-                                   web_image_ratio=web_image_ratio).model_dump(mode="json")
+                                   web_image_ratio=web_image_ratio, data_driven=data_driven).model_dump(mode="json")
         stage, status = "review", "REVIEWING"
     elif stage == "image":
         index = context.get("progress_index", len(document.slides))
@@ -305,7 +476,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             ai.usage["estimated_cost"] = round(ai.usage["estimated_cost"] + settings().image_cost_usd, 6)
         except ProviderError as error:
             warning = str(error)
-        slide = compose(part, content, document, index, image_ids(assets, context), brand)
+        slide = compose(part, content, document, index, image_ids(assets, context), brand, data_driven=data_driven)
         if warning:
             slide.warnings.append(warning)
         context["draft"], context["slide_content"] = slide.model_dump(mode="json"), content.model_dump(mode="json")
@@ -315,9 +486,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if not start_status(job_id, token, "REVIEWING", "agent.started", f"Rendering and reviewing slide {index + 1}.", index=index):
             return None
         slide = Slide.model_validate(context["draft"])
+        attach_slide_sources(document, context, set(slide.source_ids))
         images = image_ids(assets, context)
         if warning := context.get("web_image_warning"):
             slide.warnings.append(warning)
+        if data_driven and slide.layout == "chart" and not any(element.type == "chart" for element in slide.elements):
+            slide.warnings.append("The available evidence did not support the planned chart.")
         text_elements = [element for element, *_ in flattened(slide.elements) if element.type in {"text", "table"}]
         dimensions = [(element.size, element.h) for element in text_elements]
         slide.warnings.extend(validate_slide(document, slide, images))
@@ -347,13 +521,14 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         context.pop("review_issues", None)
         context.pop("web_image", None)
         context.pop("web_image_warning", None)
+        context.pop("slide_sources", None)
         events.append(("slide.completed", f"Slide {index + 1} is ready.", {"slide_id": slide.id, "index": index, "warnings": slide.warnings}))
         stage, status = "slide", "GENERATING"
     elif stage == "revise":
         index = context.get("progress_index", len(document.slides))
         part = OutlineItem.model_validate(context["outline"]["slides"][index])
         content = ai.structured(SlideContent, "Rewrite the content concisely to address the visual review findings. Preserve the meaning and supplied source IDs.", {
-            **inputs(item, context), "item": part.model_dump(), "topic": document.title,
+            **slide_inputs(item, context), "item": part.model_dump(), "topic": document.title,
             "previous": context["slide_content"], "issues": context["review_issues"],
         }, "slide")
         images = image_ids(assets, context)
@@ -370,7 +545,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 content.image_asset_id = None
                 content.source_ids = [key for key in content.source_ids if key != source_id]
         context["draft"] = compose(part, content, document, index, images, brand,
-                                   web_image_ratio=web_image["ratio"] if web_image else None).model_dump(mode="json")
+                                   web_image_ratio=web_image["ratio"] if web_image else None,
+                                   data_driven=data_driven).model_dump(mode="json")
         events.append(("slide.revised", f"Reworked slide {index + 1} after visual review.", {"index": index}))
         stage, status = "review", "REVIEWING"
     else:

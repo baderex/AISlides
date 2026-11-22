@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,7 +36,11 @@ class Settings(BaseSettings):
     image_cost_usd: float = 0.0
     compatible_structured: bool = False
     research_api_key: str = ""
-    research_api_url: str = "https://api.search.brave.com/res/v1/web/search"
+    research_api_url: str = Field(
+        default="https://api.search.brave.com/res/v1/web/search",
+        validation_alias=AliasChoices("research_api_url", "brave_web_search"),
+    )
+    research_context_api_url: str = ""
     research_image_api_url: str = "https://api.search.brave.com/res/v1/images/search"
     ai_timeout_seconds: int = 90
     ai_job_token_budget: int = 90000

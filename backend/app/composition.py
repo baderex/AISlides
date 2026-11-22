@@ -1,3 +1,4 @@
+import re
 from typing import Annotated, Literal
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator
@@ -31,6 +32,7 @@ class OutlineItem(PlanningResponse):
     layout: Layout = Field(description="Use one exact layout ID from the enum. Use chart for a sourced chart and research for a data table.")
     purpose: str = Field(default="", max_length=500)
     image_query: str = Field(default="", max_length=380)
+    research_query: str = Field(default="", max_length=260)
 
     @field_validator("layout", mode="before")
     @classmethod
@@ -88,6 +90,10 @@ class SlideContent(Contract):
     table: list[list[str]] | None = Field(default=None, max_length=8)
 
 
+class ResearchQueries(Contract):
+    queries: list[ShortText] = Field(min_length=1, max_length=4)
+
+
 class ResearchBrief(Contract):
     summary: str = Field(max_length=1800)
     uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
@@ -110,6 +116,10 @@ def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemp
     return True
 
 
+def is_data_driven(direction: str) -> bool:
+    return bool(re.search(r"\bdata[\s_-]+driven\b", direction, re.IGNORECASE))
+
+
 def design(direction: str, mode: str, selected: Theme | None) -> Theme:
     if selected:
         return selected
@@ -121,13 +131,15 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
         return Theme(background="#F7F2E9", ink="#27213D", accent="#9D3C30", muted="#625968", surface="#EEE2D2", font="Georgia")
     if "academic" in direction:
         return Theme(background="#F0F8F5", ink="#16352F", accent="#08745D", muted="#395E54", surface="#DAEDE6")
+    if is_data_driven(direction):
+        return Theme(background="#F3F6FA", ink="#122239", accent="#0F6B62", muted="#41566B", surface="#E3EDF0")
     if mode == "creative" or "bold" in direction:
         return Theme(background="#F1ECFF", ink="#281852", accent="#8737AC", muted="#57416B", surface="#E6D4F9")
     return Theme()
 
 
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
-            brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None) -> Slide:
+            brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None, data_driven: bool = False) -> Slide:
     if brand:
         return compose_branded(item, content, document, image_ids, brand)
     t = document.theme
@@ -196,10 +208,19 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     elif item.layout == "chart" and slide.source_ids and content.chart and len(content.chart.values) == len(content.chart.categories):
         data = content.chart
         try:
-            elements.append(Chart(x=.07, y=.45, w=.86, h=.46, categories=data.categories,
+            elements.append(Chart(x=.07, y=.51 if data_driven else .45, w=.54 if data_driven else .86,
+                                  h=.39 if data_driven else .46, categories=data.categories,
                                   series=[{"name": data.label, "values": data.values}], chart=data.chart, color=t.accent))
         except ValueError:
             slide.warnings.append("The chart data could not be rendered.")
+        else:
+            if data_driven:
+                label(data.label, .07, .45, .54, .05, 15, ink, True)
+                rows = [["Category", "Value"], *[[category, f"{value:,.8g}"]
+                        for category, value in zip(data.categories, data.values)]]
+                elements.append(Table(x=.635, y=.45, w=.295, h=min(.44, .060 * len(rows)), rows=rows,
+                                      size=max(9, min(14 * factor, 132 / len(rows))), color=ink, fill=t.surface,
+                                      header_fill=accent, header_color="#FFFFFF"))
     elif item.layout == "timeline" and points:
         points = points[:3]
         width = .86 / len(points)

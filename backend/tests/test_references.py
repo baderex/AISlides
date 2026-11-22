@@ -1,5 +1,6 @@
 import base64
 import io
+from datetime import date
 
 import httpx
 import pytest
@@ -10,15 +11,16 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Inches
 from sqlalchemy import select
 
-from app.composition import Intent, Outline, ResearchBrief, SlideContent
-from app.config import settings
+from app.composition import Intent, Outline, ResearchBrief, ResearchQueries, SlideContent
+from app.config import Settings, settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
 from app.domain import Source
 from app.main import app
 from app.providers import Intelligence
 from app.questions import Clarification
 from app.queue import claim
-from app.workflow import advance
+from app.research import collect
+from app.workflow import advance, align_query_period, requested_calendar_period
 from test_workflow import create, work
 
 
@@ -71,6 +73,112 @@ def test_research_follow_up_persists_earlier_answers(monkeypatch):
     work()
     assert client.get(path).json()["status"] == "COMPLETED"
     assert len(client.get(path + "/questions").json()["answers"]) == 3
+
+
+@pytest.mark.parametrize("web_setting", [None, "RESEARCH_API_URL", "BRAVE_WEB_SEARCH"])
+@pytest.mark.parametrize("context_status", [None, 200, 403])
+def test_detailed_web_research_uses_configured_endpoints(monkeypatch, tmp_path, web_setting, context_status):
+    web_url = "https://search.example.test/web" if web_setting else "https://api.search.brave.com/res/v1/web/search"
+    context_url = "https://search.example.test/context" if context_status is not None else ""
+    for name in ("RESEARCH_API_URL", "BRAVE_WEB_SEARCH", "RESEARCH_CONTEXT_API_URL", "RESEARCH_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    dotenv = tmp_path / ".env"
+    url_setting = f"{web_setting}={web_url}\n" if web_setting else ""
+    dotenv.write_text(f"{url_setting}RESEARCH_API_KEY=test-search-token\n", encoding="utf-8")
+    if context_url:
+        monkeypatch.setenv("RESEARCH_CONTEXT_API_URL", context_url)
+    configuration = Settings(_env_file=dotenv)
+    monkeypatch.setattr("app.research.settings", lambda: configuration)
+    table = "| Year | Index close |\n| 2024 | 10 |\n| 2025 | 12 |"
+    calls = []
+
+    def get(url, *, params, headers, **kwargs):
+        calls.append(url)
+        assert headers["X-Subscription-Token"] == "test-search-token"
+        request = httpx.Request("GET", url)
+        result = {"title": "Exchange statistics", "url": "https://example.test/annual"}
+        if url == context_url:
+            if context_status != 200:
+                return httpx.Response(context_status, request=request)
+            return httpx.Response(200, request=request, json={"grounding": {"generic": [
+                {**result, "snippets": ["About the exchange", table]}]}})
+        assert params["extra_snippets"] is True
+        return httpx.Response(200, request=request, json={"web": {"results": [{**result, "extra_snippets": [table]}]}})
+
+    monkeypatch.setattr("app.research.httpx.get", get)
+    assert collect("Index close 2024 2025", detailed=True)[0].excerpt.startswith(table)
+    expected = [context_url] if context_url else []
+    if context_status != 200:
+        expected.append(web_url)
+    assert calls == expected
+
+
+def test_relative_annual_searches_correct_stale_model_dates():
+    period = requested_calendar_period("Index returns in the last five years", date(2026, 11, 22))
+    assert period == (2021, 2025)
+    assert align_query_period("Index annual returns 2019 to 2023", period) == "Index annual returns 2021-2025"
+    assert align_query_period("Top 5 by market cap as of 2023-12-31", period) == "Top 5 by market cap as of 2025-12-31"
+    assert align_query_period("Index return in 2022", period) == "Index return in 2022"
+    assert requested_calendar_period("Last 5 years before 2021", date(2026, 11, 22)) is None
+
+
+def test_data_driven_answer_retrieves_and_cites_focused_chart_evidence(monkeypatch):
+    overview = Source(id="overview", title="Exchange overview", url="https://example.test/index", excerpt="Index statistics")
+    ranking = Source(id="ranking", title="Exchange ranking", url="https://example.test/ranking", excerpt="A ranks first.")
+    series = Source(id="series", title="Index annual series", url="https://example.test/series", excerpt="2024: 10, 2025: 12")
+    filing = Source(id="filing", title="Company A filing", url="https://example.test/filing", excerpt="2025 net profit: $10M")
+    evidence = {"Index annual returns": overview, "Constituent ranking": ranking,
+                "Index annual closes": series, "Company A results": filing}
+    queries = []
+
+    def search(query, *, count, detailed):
+        assert detailed
+        queries.append((query, count))
+        return [evidence[query]]
+
+    structured = Intelligence.structured
+
+    def plan(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Index", slide_count=2)
+        if schema is Clarification:
+            return Clarification.model_validate({"questions": [{"id": "design", "type": "visual_style", "title": "Design",
+                "options": [{"id": "data", "label": "Data Driven"}, {"id": "visual", "label": "Visual"}]}]})
+        if schema is ResearchQueries:
+            assert data["answers"][0]["value"] == "Data Driven"
+            return ResearchQueries(queries=["Index annual returns", "Constituent ranking"])
+        if schema is Outline:
+            assert [source["id"] for source in data["sources"]] == [overview.id, ranking.id]
+            return Outline.model_validate({"title": "Index and Company A", "slides": [
+                {"title": "Index performance", "layout": "chart", "research_query": "Index annual closes"},
+                {"title": "Company A", "layout": "metrics", "research_query": "Company A results"},
+            ]})
+        if schema is SlideContent:
+            if data["item"]["layout"] == "chart":
+                assert data["sources"][0]["id"] == series.id
+                return SlideContent(title="Index performance", source_ids=[series.id], chart={
+                    "chart": "line", "label": "Index points", "categories": ["2024", "2025"], "values": [10, 12]})
+            assert data["sources"][0]["id"] == filing.id
+            return SlideContent(title="Company A", source_ids=[filing.id], points=[{"title": "2025 net profit", "value": "$10M"}])
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr("app.workflow.collect", search)
+    monkeypatch.setattr(Intelligence, "structured", plan)
+    client = TestClient(app)
+    path = create(client, "Two slides on the index and its top company", research=True)
+    work()
+    assert client.post(path + "/answers", json={"answers": [{"question_id": "design", "option_ids": ["data"]}]}).status_code == 202
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    assert queries == [("Index annual returns", 4), ("Constituent ranking", 4), ("Index annual closes", 3), ("Company A results", 3)]
+    index, company = result["document"]["slides"]
+    assert {series.id, filing.id} <= {source["id"] for source in result["document"]["sources"]}
+    assert index["source_ids"] == [series.id]
+    assert next(el for el in index["elements"] if el["type"] == "chart")["series"][0]["values"] == [10, 12]
+    assert next(el for el in index["elements"] if el["type"] == "table")["rows"][1:] == [["2024", "10"], ["2025", "12"]]
+    assert company["source_ids"] == [filing.id]
+    assert any(el.get("text") == "$10M" for el in company["elements"])
 
 
 def test_worker_heartbeat_recovers_checkpoint_without_waiting_for_lease():

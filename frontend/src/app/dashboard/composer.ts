@@ -20,7 +20,7 @@ export class Composer {
   readonly i = icons;
   readonly prompt = new FormControl('', { nonNullable: true, validators: [Validators.required, Validators.minLength(3)] });
   readonly aspect = new FormControl<Aspect>('16:9', { nonNullable: true });
-  readonly research = signal(false);
+  readonly research = signal(true);
   readonly images = signal(false);
   readonly formats = computed<Aspect[]>(() => this.skill()?.formats ?? ['16:9', '4:3', '1:1']);
 
@@ -42,7 +42,7 @@ export class Composer {
     this.generating.emit({ prompt: this.prompt.value.trim(),
       aspect_ratio: this.formats().includes(this.aspect.value) ? this.aspect.value : this.formats()[0],
       skill_id: this.skill()?.id ?? null, asset_ids: this.assets().map(asset => asset.id),
-      research: this.research(), generate_images: this.images(), generate: true });
+      research: this.capabilities()?.research === true && this.research(), generate_images: this.images(), generate: true });
   }
 
   start(prompt?: string) {
