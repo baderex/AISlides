@@ -9,9 +9,10 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.composition import OutlineItem, Point, SlideContent, compose
 from app.consulting import consulting_theme
+from app.design import style_table
 from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
 from app.powerpoint import to_pptx
-from app.rendering import physical, preview, table_text_fits, validate_slide
+from app.rendering import physical, preview, table_columns, table_insets, table_text_fits, validate_slide
 
 
 def test_native_objects_and_embedded_data():
@@ -52,6 +53,26 @@ def test_fit_validator_reduces_text_size():
     doc = Document(title="Fit", slides=[slide])
     validate_slide(doc, slide, set())
     assert 8 < element.size < 60
+
+
+@pytest.mark.parametrize("aspect", ["16:9", "4:3", "1:1"])
+def test_ruled_tables_adapt_to_available_space(aspect):
+    doc = Document(title="Operating expenses", aspect_ratio=aspect)
+    rows = [["Component", "Current", "New"], ["Maintenance", "$250", "$180"], ["Supplies", "$160", "$110"]]
+    table = Table(x=.60, y=.48, w=.32, h=.25, rows=rows)
+    style_table(table, doc.theme)
+    assert table.numeric_columns == [1, 2]
+    assert table.rows == rows
+    width, height = physical(doc)
+    columns = table_columns(table, table.w * width)
+    assert columns[0][1] > columns[1][1] == columns[2][1]
+    assert sum(size for _, size in columns) == pytest.approx(table.w * width)
+    assert table_insets(table, columns[1][1], table.h * height / len(rows))[0] < 12
+    assert validate_slide(doc, Slide(title=doc.title, elements=[table]), set()) == []
+
+    wide = table.model_copy(update={"x": .07, "w": .86})
+    style_table(wide, doc.theme)
+    assert [size for _, size in table_columns(wide, wide.w * width)] == pytest.approx([wide.w * width / 3] * 3)
 
 
 @pytest.mark.parametrize("theme", [{}, consulting_theme()])

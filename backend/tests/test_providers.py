@@ -114,6 +114,26 @@ def test_openrouter_reports_fields_when_corrections_fail(monkeypatch):
     assert "private model text" not in str(failure.value)
 
 
+def test_planned_exhibit_is_required_and_repaired(monkeypatch):
+    client = openrouter(monkeypatch)
+    prompts = []
+    decision = {"action": "Approve", "request": "the trial", "scope": "", "if_missed": "Pause expansion.",
+                "gates": [{"label": "Readiness", "threshold": "≥95%", "detail": ""}]}
+
+    def request(model, system, content, image, contract, **kwargs):
+        assert "decision" in contract["required"]
+        assert contract["properties"]["decision"]["$ref"] == "#/$defs/Decision"
+        assert "cover_callout" not in contract["properties"]
+        assert "response_schema" in kwargs
+        prompts.append(system)
+        return json.dumps({"title": "Decision", "decision": decision if len(prompts) > 1 else None}), 90, 30
+
+    monkeypatch.setattr(client, "_request", request)
+    slide = client.structured(SlideContent, "Write the decision slide.", {"required_exhibit": "decision"}, "slide")
+    assert slide.decision.model_dump() == decision
+    assert "populate the decision object for this slide" in prompts[1]
+
+
 def test_outline_falls_back_and_repairs_the_count_without_rejecting_extra_fields(monkeypatch):
     client = openrouter(monkeypatch)
     calls = []

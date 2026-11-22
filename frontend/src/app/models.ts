@@ -20,9 +20,14 @@ export interface TextElement extends Geometry {
 export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle'; fill: string }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
 export interface LineElement extends Geometry { type: 'line'; color: string; weight: number }
-export interface TableElement extends Geometry { type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number; header_fill?: string | null; header_color?: string | null }
+export interface TableElement extends Geometry {
+  type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
+  header_fill?: string | null; header_color?: string | null; row_rule?: string | null;
+  header_rule?: string | null; numeric_columns?: number[];
+}
 export interface ChartElement extends Geometry {
-  type: 'chart'; font?: string; label_color?: string; palette?: string[]; chart: 'bar' | 'column' | 'line' | 'pie'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
+  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string;
+  chart: 'bar' | 'column' | 'line' | 'pie' | 'stacked_column'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }
 export type SlideElement = TextElement | ShapeElement | ImageElement | LineElement | TableElement | ChartElement | GroupElement;

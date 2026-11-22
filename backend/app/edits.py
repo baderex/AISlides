@@ -103,8 +103,9 @@ def apply(document, proposal):
                         element.font = rules.heading_font if rules and element.text == slide.title else theme.font
                     elif rules and isinstance(element, Chart):
                         style_chart(element, theme, slide.background)
-                    elif rules and isinstance(element, Table):
-                        style_table(element, theme)
+                    elif isinstance(element, Table) and (rules or element.row_rule):
+                        style_table(element, theme, slide.background,
+                                    preserve_palette=theme.profile == "consulting" or element.placeholder_idx is not None)
             document.theme = theme
             continue
         slide = slides.get(operation.slide_id)

@@ -1,6 +1,7 @@
 import io
 from dataclasses import dataclass
 from functools import lru_cache
+from itertools import accumulate
 from pathlib import Path
 
 from PIL import Image as PILImage
@@ -223,13 +224,30 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
     return warnings
 
 
+def table_columns(table: Table, width: float) -> list[tuple[float, float]]:
+    count = len(table.rows[0])
+    compact = table.row_rule and width < 360
+    weights = [1.4 if compact and column not in table.numeric_columns else 1 for column in range(count)]
+    total = sum(weights)
+    widths = [width * weight / total for weight in weights]
+    return list(zip(accumulate(widths, initial=0), widths))
+
+
+def table_insets(table: Table, cell_width: float, row_height: float) -> tuple[float, float]:
+    if table.row_rule:
+        return min(12, cell_width * .1), min(6, row_height * .15)
+    return CELL_INSET_X, CELL_INSET_Y
+
+
 def table_text_fits(table: Table, width: float, height: float) -> bool:
-    cell_width = width / len(table.rows[0]) - 2 * CELL_INSET_X
-    cell_height = height / len(table.rows) - 2 * CELL_INSET_Y
+    columns = table_columns(table, width)
+    row_height = height / len(table.rows)
     for index, row in enumerate(table.rows):
-        _, _, header = table.row_style(index)
-        for cell in row:
-            if not text_fits(cell, cell_width, cell_height, table.size, header, table.font):
+        for column, (cell, (_, cell_width)) in enumerate(zip(row, columns)):
+            inset_x, inset_y = table_insets(table, cell_width, row_height)
+            if not text_fits(cell, cell_width - 2 * inset_x, row_height - 2 * inset_y,
+                             table.size, table.cell_bold(index, column),
+                             table.font, table.cell_align(column)):
                 return False
     return True
 
@@ -249,6 +267,16 @@ def chart_marks(el: Chart, w: float, h: float):
     span = high - low or 1
     band = w / len(el.categories)
     shades = el.colors()
+    if el.chart == "stacked_column":
+        scale = h * .95 / (max(el.totals()) or 1)
+        for i in range(len(el.categories)):
+            bottom = h
+            for si, series in enumerate(el.series):
+                height = series.values[i] * scale
+                if height:
+                    yield ("rect", shades[si % len(shades)], (band * (i + .26), bottom - height, band * .48, height))
+                bottom -= height
+        return
     if el.chart == "pie":
         total = sum(values) or 1
         angle = 0
@@ -312,24 +340,36 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             width, height = round(nw * ptw * TEXT_SCALE), round(nh * pth * TEXT_SCALE)
             table_layer = PILImage.new("RGBA", (max(1, width), max(1, height)))
             table_draw = ImageDraw.Draw(table_layer)
-            cw, rh = nw * ptw / len(el.rows[0]), nh * pth / len(el.rows)
-            text_width = round((cw - 2 * CELL_INSET_X) * TEXT_SCALE)
-            text_height = round((rh - 2 * CELL_INSET_Y) * TEXT_SCALE)
+            columns = table_columns(el, nw * ptw)
+            rh = nh * pth / len(el.rows)
             for row, cells in enumerate(el.rows):
-                fill, ink, header = el.row_style(row)
-                for col, cell in enumerate(cells):
-                    left, top = col * cw, row * rh
+                fill, ink, _ = el.row_style(row)
+                for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
+                    top = row * rh
+                    inset_x, inset_y = table_insets(el, cw, rh)
+                    text_width = round((cw - 2 * inset_x) * TEXT_SCALE)
+                    text_height = round((rh - 2 * inset_y) * TEXT_SCALE)
                     table_draw.rectangle(tuple(round(edge * TEXT_SCALE) for edge in (left, top, left + cw, top + rh)),
-                                         fill=fill, outline="#FFFFFF")
+                                         fill=fill, outline=None if el.row_rule else "#FFFFFF")
                     if text_width > 0 and text_height > 0 and cell.strip():
-                        layout = raster_text(cell, text_width, text_height, el.size, header, el.font)
-                        tx, ty = round((left + CELL_INSET_X) * TEXT_SCALE), round((top + CELL_INSET_Y) * TEXT_SCALE)
+                        layout = raster_text(cell, text_width, text_height, el.size, el.cell_bold(row, col), el.font,
+                                             el.cell_align(col))
+                        tx, ty = round((left + inset_x) * TEXT_SCALE), round((top + inset_y) * TEXT_SCALE)
+                        if el.row_rule:
+                            extent = len(layout.lines) * el.size * TEXT_SCALE * TEXT_LEADING
+                            ty += max(0, round((text_height - extent) / 2))
                         if layout.fits:
                             draw_raster_text(table_draw, layout, ink, tx, ty)
                         else:
                             cell_layer = PILImage.new("RGBA", (text_width, text_height))
                             draw_raster_text(ImageDraw.Draw(cell_layer), layout, ink)
                             table_layer.alpha_composite(cell_layer, (tx, ty))
+            for row in range(len(el.rows)):
+                if rule := el.rule_after(row):
+                    shade, weight = rule
+                    stroke = max(1, round(weight * TEXT_SCALE))
+                    rule_y = min(round((row + 1) * rh * TEXT_SCALE), height - (stroke + 1) // 2)
+                    table_draw.line((0, rule_y, width, rule_y), fill=shade, width=stroke)
             layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
             plot_h = h * .87
@@ -343,9 +383,13 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                 elif len(dims) > 1:
                     draw.line(dims, fill=color, width=3)
             if el.chart not in {"pie", "bar"}:
-                face = font(max(1, round(10 * scale)), False, el.font)
-                for index, category in enumerate(el.categories):
-                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category[:20], fill=el.label_color, font=face, anchor="mt")
+                stacked = el.chart == "stacked_column"
+                if stacked:
+                    draw.line((0, plot_h, w, plot_h), fill=el.label_color)
+                face = font(max(1, round((13 if stacked else 10) * scale)), stacked, el.font)
+                for index, category in enumerate(el.category_labels()):
+                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category if stacked else category[:20],
+                              fill=el.label_color, font=face, anchor="mt")
         if el.rotation:
             layer = layer.rotate(-el.rotation, expand=True, resample=PILImage.Resampling.BICUBIC)
         if el.opacity < 1:
@@ -406,28 +450,45 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 pdf.setLineWidth(el.weight)
                 pdf.line(0, h, w, 0)
             elif isinstance(el, Table):
-                rh, cw = h/len(el.rows), w/len(el.rows[0])
-                tw, th = cw - 2 * CELL_INSET_X, rh - 2 * CELL_INSET_Y
+                rh = h/len(el.rows)
+                columns = table_columns(el, w)
                 for row, cells in enumerate(el.rows):
-                    fill, ink, header = el.row_style(row)
-                    face = pdf_face(el.font, header)
-                    pdf.setFont(face, el.size)
-                    for col, cell in enumerate(cells):
-                        top, left = h-(row+1)*rh, col*cw
+                    fill, ink, _ = el.row_style(row)
+                    for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
+                        top = h-(row+1)*rh
+                        inset_x, inset_y = table_insets(el, cw, rh)
+                        tw, th = cw - 2 * inset_x, rh - 2 * inset_y
                         pdf.setFillColor(HexColor(fill))
                         pdf.setStrokeColor(HexColor("#FFFFFF"))
-                        pdf.rect(left, top, cw, rh, stroke=1, fill=1)
+                        pdf.rect(left, top, cw, rh, stroke=int(not el.row_rule), fill=1)
                         if tw <= 0 or th <= 0 or not cell.strip():
                             continue
+                        face = pdf_face(el.font, el.cell_bold(row, col))
+                        lines = pdf_lines(cell, tw, face, el.size)
+                        pad = inset_y
+                        if el.row_rule:
+                            extent = el.size + (len(lines) - 1) * el.size * TEXT_LEADING - pdfmetrics.getDescent(face, el.size)
+                            pad = max(inset_y, (rh - extent) / 2)
                         pdf.saveState()
                         path = pdf.beginPath()
-                        path.rect(left + CELL_INSET_X, top + CELL_INSET_Y, tw, th)
+                        path.rect(left + inset_x, top + inset_y, tw, th)
                         pdf.clipPath(path, stroke=0)
+                        pdf.setFont(face, el.size)
                         pdf.setFillColor(HexColor(ink))
-                        for j, line in enumerate(pdf_lines(cell, tw, face, el.size)):
-                            yy = top + rh - CELL_INSET_Y - el.size - j * el.size * TEXT_LEADING
-                            pdf.drawString(left + CELL_INSET_X, yy, line)
+                        for j, line in enumerate(lines):
+                            yy = top + rh - pad - el.size - j * el.size * TEXT_LEADING
+                            if el.cell_align(col) == "right":
+                                pdf.drawRightString(left + cw - inset_x, yy, line)
+                            else:
+                                pdf.drawString(left + inset_x, yy, line)
                         pdf.restoreState()
+                for row in range(len(el.rows)):
+                    if rule := el.rule_after(row):
+                        shade, weight = rule
+                        rule_y = max(weight / 2, h - (row + 1) * rh)
+                        pdf.setStrokeColor(HexColor(shade))
+                        pdf.setLineWidth(weight)
+                        pdf.line(0, rule_y, w, rule_y)
             elif isinstance(el, Chart):
                 plot_h = .87*h
                 for kind, color, dims in chart_marks(el, w, plot_h):
@@ -443,10 +504,14 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         for (x1, y1), (x2, y2) in zip(dims, dims[1:]):
                             pdf.line(x1, h-y1, x2, h-y2)
                 if el.chart not in {"pie", "bar"}:
-                    pdf.setFont(pdf_face(el.font, False), 10)
+                    stacked = el.chart == "stacked_column"
+                    if stacked:
+                        pdf.setStrokeColor(HexColor(el.label_color))
+                        pdf.line(0, h - plot_h, w, h - plot_h)
+                    pdf.setFont(pdf_face(el.font, stacked), 13 if stacked else 10)
                     pdf.setFillColor(HexColor(el.label_color))
-                    for i, category in enumerate(el.categories):
-                        pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category[:20])
+                    for i, category in enumerate(el.category_labels()):
+                        pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])
             pdf.restoreState()
         pdf.showPage()
     pdf.save()

@@ -6,8 +6,8 @@ from datetime import date
 from sqlalchemy import select, update
 
 from app.composition import (
-    IMAGE_LAYOUTS, EvidenceSummary, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review, SlideContent, accepts_web_image,
-    compose, design, is_data_driven, supports_point_icons,
+    EXHIBIT_LAYOUTS, IMAGE_LAYOUTS, EvidenceSummary, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review,
+    SlideContent, accepts_web_image, compose, design, is_data_driven, planned_exhibit, supports_point_icons,
 )
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
@@ -53,6 +53,35 @@ DATA_SLIDE_GUIDANCE = (
     "Every analytical slide should show a supported chart, data table, or numeric KPIs. If the evidence supports a "
     "stronger exhibit than planned, supply it. Call out material data gaps. Do not mix currencies or reporting periods."
 )
+COMPOSITION_PLAN = (
+    " Give each slide a short takeaway title and one primary exhibit. Set the exhibit field where the brief supports the "
+    "composition: cover_callout for a cover with an approval amount, stacked_comparison when comparable totals have supplied "
+    "component figures, allocation for an itemized budget, rollout for a deployment timeline, and decision for an approval "
+    "slide with success gates and a stop rule. Select the corresponding layouts cover, chart, metrics, timeline, and closing. "
+    "For a site table use research. A decision lead can state the action without putting every figure into the title. "
+    "Keep the slide purposes specific about the required evidence and decisions."
+)
+COMPOSITION_GUIDANCE = {
+    "cover": " Keep title as the outline title. The separately displayed cover_callout.headline should state the short "
+             "decision without the figure. Put the figure in value, its description in label, and the scope in detail.",
+    "chart": " When comparable totals are made from supplied non-negative components, use stacked_comparison instead of "
+             "chart or table. Set categories to the entities being compared, each series to one shared cost component, and "
+             "series values to the component amounts in category order. Use short category and series names. Keep the unit "
+             "and period in the label. Set value_prefix to the supplied currency symbol when applicable. Use the subtitle "
+             "for the headline difference and the exhibit caption for any required qualification.",
+    "research": " Use rows for the compared entities and columns for the supplied criteria. Do not infer capacity, "
+                "readiness, or feasibility from incomplete data. Call out material constraints using only the supplied figures.",
+    "metrics": " For an itemized budget, use allocation with one line for every supplied cost item, including contingency. "
+               "Keep individual amounts separate and set value_prefix to the supplied currency symbol. Do not include the total "
+               "as a line. The renderer sums the line items.",
+    "timeline": " Use rollout with concise period labels and complete milestone phrases of three to seven words. Put each risk "
+                "beside its specific mitigation in rollout.risks. Treat dates as a proposed plan when they were not supplied.",
+    "closing": " Use decision.gates for the criteria. In threshold put only the comparator and measured value, such as ≥95% "
+               "or ≤30 days. Put the measure in label and any necessary comparison basis in detail. The renderer joins "
+               "decision.action with decision.request, so request is a short noun phrase, including any funding cap. Put the "
+               "scope and no-rollout limits in decision.scope. Future expansion gates do not condition pilot approval today. "
+               "In decision.if_missed write a short complete sentence with the supplied trigger and the action to take.",
+}
 CALENDAR_YEARS = "one two three four five six seven eight nine ten".split()
 YEAR_IN_QUERY = re.compile(r"\b((?:19|20)\d{2})(?:(?:\s*(?:to|[-–])\s*)((?:19|20)\d{2})|(-\d{2}-\d{2}))?\b")
 
@@ -61,6 +90,10 @@ def inputs(item, context):
     return {"prompt": item.request["prompt"], "intent": context.get("intent"),
             "answers": context.get("answers", []), "skill": context.get("skill"),
             "sources": context.get("sources", []), "research": context.get("research")}
+
+
+def omit_phase_quantities(part, intent):
+    return part.exhibit == "rollout" and intent.get("supplied_evidence_only", False) and not intent.get("supplied_phase_quantities", False)
 
 
 def point_icon_guidance(part, document, brand):
@@ -192,6 +225,8 @@ def pause_for_questions(context, batch, events):
 
 
 def resolve_web_research(item, context, data_driven, events):
+    if (context.get("intent") or {}).get("supplied_evidence_only"):
+        return False
     if "web_research_enabled" in context:
         return context["web_research_enabled"]
     preference = item.request.get("research")
@@ -353,6 +388,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "Only supply visual_direction if the user specified a visual style or selected a skill. A request for impressive slides or a topic that "
             "needs charts does not specify a visual style. Set requires_quantitative_evidence for factual statistics, historical performance, "
             "rankings by measurable criteria, and numeric comparisons, even when no visual style is specified. "
+            "Set supplied_figures if the user includes quantitative evidence in their own brief. A requested slide count "
+            "or date range alone is not evidence. Set supplied_evidence_only if the user asks to use only the inputs or "
+            "references they supplied, or forbids external evidence. Set supplied_phase_quantities only if the brief assigns "
+            "quantities to specific rollout phases. Overall site or project totals do not establish phase allocations. "
             "Set web_images_requested only if the user explicitly requests "
             "existing photos, portraits, or other sourced images. A request for research, charts, or generated illustrations does not imply web images.",
             inputs(item, context))
@@ -360,6 +399,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             intent.visual_direction = "Branded PowerPoint template"
         elif requested_consulting(item.request["prompt"]):
             intent.visual_direction = CONSULTING_DIRECTION
+        if intent.supplied_figures:
+            brief = Source(title="User-provided brief", excerpt=item.request["prompt"][:3000])
+            context["sources"].append(brief.model_dump(mode="json"))
+            context["brief_source_id"] = brief.id
         context["intent"] = intent.model_dump(mode="json")
         events.append(("agent.progress", f"Identified the topic: {intent.subject}.", {"intent": context["intent"]}))
         stage, status = "clarify", "ANALYZING"
@@ -467,6 +510,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
         if data_driven:
             style_guidance += DATA_PLAN_GUIDANCE
+        if theme.design and theme.profile == "standard" and not brand:
+            style_guidance += COMPOSITION_PLAN
         research_guidance = (
             " For each slide, provide one focused research_query naming its subject, exact period and metric to verify. "
             "For company profiles, name the company and seek its official results or annual report."
@@ -484,6 +529,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "If the user requests a cover, use the cover layout and their supplied deck title as its headline. "
             "Use chart layouts only when grounded data is available." + style_guidance + period_guidance + research_guidance + image_guidance,
             {**planning_inputs, "slide_count": count, "design": theme.model_dump()}, "outline")
+        use_exhibits = theme.design and theme.profile == "standard" and not brand
+        for part in outline.slides:
+            part.exhibit = planned_exhibit(part, bool(context["sources"])) if use_exhibits else None
+            if part.exhibit:
+                part.layout = EXHIBIT_LAYOUTS[part.exhibit]
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
         document = read_document({**document.model_dump(mode="json"), "sources": context["sources"]})
@@ -517,7 +567,24 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         style_guidance = " " + SLIDE_GUIDANCE if document.theme.profile == "consulting" else ""
         if data_driven:
             style_guidance += DATA_SLIDE_GUIDANCE
-        content = ai.structured(SlideContent, "Write concise content for the single item given. Use its exact title and fulfill its purpose. "
+        if document.theme.design and document.theme.profile == "standard" and not brand:
+            style_guidance += COMPOSITION_GUIDANCE.get(part.layout, "")
+        if context.get("brief_source_id"):
+            style_guidance += (
+                " The user-provided brief is a valid source for the exact figures it supplies. Cite its source ID "
+                "for exhibits based on those figures. Keep explicit evidence qualifications visible."
+            )
+        phases_without_quantities = omit_phase_quantities(part, inferred_intent)
+        if phases_without_quantities:
+            style_guidance += (
+                " For rollout put dates in period and only tasks in milestone. The brief does not assign quantities "
+                "to phases, so omit such allocations. Include only the risks and mitigations supplied by the user."
+            )
+        exhibit_instruction = (
+            f"The selected composition is {part.exhibit}. Populate that top-level object. "
+            if part.exhibit else ""
+        )
+        content = ai.structured(SlideContent, exhibit_instruction + "Write concise content for the single item given. Use its exact title and fulfill its purpose. "
              "Cover the current item only and do not repeat earlier slides. Write for the audience. Keep visual instructions, "
              "color names and comments about the presentation design out of visible copy unless the subject is design. "
              "Make claims traceable via supplied source IDs. "
@@ -531,6 +598,9 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              + style_guidance + period_guidance + point_icon_guidance(part, document, brand),
              {"item": part.model_dump(), "topic": document.title, "slide_index": index,
               "imagery_direction": document.theme.design.imagery if document.theme.design else "",
+              "brief_source_id": context.get("brief_source_id"),
+              "required_exhibit": part.exhibit,
+              "omit_phase_quantities": phases_without_quantities,
               "earlier_slide_titles": [slide.title for slide in document.slides[-5:]],
               **slide_inputs(item, context, part if data_driven else None), "generate_image": bool(can_illustrate),
               "image_assets": [{"id": a.id, "name": a.name} for a in assets if a.id in images]}, "slide")
@@ -550,7 +620,9 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             except ProviderError as error:
                 context["web_image_warning"] = str(error)
         context["slide_content"] = content.model_dump(mode="json")
-        if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (content.chart or content.table):
+        if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (
+            content.chart or content.table or content.stacked_comparison
+        ):
             return "image", state, "GENERATING", events, None, None
         context["draft"] = compose(part, content, document, index, images, brand,
                                    web_image_ratio=web_image_ratio, data_driven=data_driven).model_dump(mode="json")
@@ -630,10 +702,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
     elif stage == "revise":
         index = context.get("progress_index", len(document.slides))
         part = OutlineItem.model_validate(context["outline"]["slides"][index])
-        content = ai.structured(SlideContent, "Rewrite the content concisely to address the visual review findings. Preserve the meaning and supplied source IDs."
+        content = ai.structured(SlideContent, "Rewrite the content concisely to address the visual review findings. Preserve the meaning, "
+            "exact figures, specialized exhibits, decision rules, and supplied source IDs."
             + point_icon_guidance(part, document, brand), {
             **slide_inputs(item, context, part if data_driven else None), "item": part.model_dump(), "topic": document.title,
-            "previous": context["slide_content"], "issues": context["review_issues"],
+            "previous": context["slide_content"], "issues": context["review_issues"], "required_exhibit": part.exhibit,
+            "omit_phase_quantities": omit_phase_quantities(part, inferred_intent),
         }, "slide")
         images = image_ids(assets, context)
         previous = SlideContent.model_validate(context["slide_content"])

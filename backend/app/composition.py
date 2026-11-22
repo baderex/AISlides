@@ -1,13 +1,14 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from app.branding import choose_layout, compose_branded
 from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
-from app.design import readable, style_chart, style_table
-from app.domain import BrandTemplate, Chart, Contract, Document, Image, Layout, Shape, ShortText, Slide, Table, Text, Theme
+from app.design import readable, style_chart, style_slide_tables
+from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Series, Shape, ShortText,
+                        Slide, Table, Text, Theme, display_value)
 from app.lucide import ICON_NAMES
 from app.questions import Question
 from app.rendering import fit_image, slide_icon
@@ -22,6 +23,9 @@ class Intent(Contract):
     requires_quantitative_evidence: bool = False
     slide_count: int | None = Field(default=None, ge=1, le=30)
     web_images_requested: bool = False
+    supplied_figures: bool = False
+    supplied_evidence_only: bool = False
+    supplied_phase_quantities: bool = False
     missing: list[str] = Field(default_factory=list, max_length=8)
 
 
@@ -30,12 +34,24 @@ class PlanningResponse(Contract):
     model_config = ConfigDict(extra="ignore", json_schema_extra={"additionalProperties": False})
 
 
+Exhibit = Literal["cover_callout", "stacked_comparison", "allocation", "rollout", "decision"]
+EXHIBIT_LAYOUTS: dict[Exhibit, Layout] = {
+    "cover_callout": "cover", "stacked_comparison": "chart", "allocation": "metrics",
+    "rollout": "timeline", "decision": "closing",
+}
+
+
 class OutlineItem(PlanningResponse):
     title: ShortText
     layout: Layout = Field(description="Use one exact layout ID from the enum. Use chart for a sourced chart and research for a data table.")
     purpose: str = Field(default="", max_length=500)
     image_query: str = Field(default="", max_length=380)
     research_query: str = Field(default="", max_length=260)
+    exhibit: Exhibit | None = Field(default=None, description=(
+        "Choose cover_callout for a cover with a specific decision amount, stacked_comparison for comparable "
+        "non-negative totals with supplied components, allocation for an itemized budget, rollout for deployment "
+        "phases, decision for approval with success gates and a stop rule. Leave null for other slides."
+    ))
 
     @field_validator("layout", mode="before")
     @classmethod
@@ -68,6 +84,30 @@ class Outline(PlanningResponse):
         return slides
 
 
+def planned_exhibit(item: OutlineItem, has_evidence: bool) -> Exhibit | None:
+    if item.exhibit:
+        return item.exhibit
+    # The outline may describe the right exhibit without selecting its field.
+    description = f"{item.title} {item.purpose}".lower()
+    if item.layout == "chart" and has_evidence and re.search(r"\b(costs?|expenses?)\b", description) and (
+        re.search(r"\bcompar\w*", description) and re.search(r"\b(components?|breakdown|broken down)\b", description)
+    ):
+        return "stacked_comparison"
+    if item.layout in {"metrics", "research", "chart"} and has_evidence and re.search(r"\bbudget\b", description) and (
+        re.search(r"\b(allocat\w*|line items?|breakdown|itemiz\w*|divided)\b", description)
+    ):
+        return "allocation"
+    if item.layout in {"timeline", "process"} and re.search(r"\b(timeline|rollout|deployment)\b", description) and (
+        re.search(r"\b(risks?|mitigat\w*)\b", description)
+    ):
+        return "rollout"
+    if item.layout in {"closing", "summary", "comparison"} and re.search(r"\b(gates?|go/no-go)\b", description) and (
+        re.search(r"\b(approval|approve|pause|stop rule)\b", description)
+    ):
+        return "decision"
+    return None
+
+
 class Point(Contract):
     title: Annotated[str, Field(min_length=1, max_length=65)]
     body: str = Field(default="", max_length=250)
@@ -91,6 +131,73 @@ class ChartContent(Contract):
     chart: Literal["column", "bar", "line", "pie"] = "column"
 
 
+class StackedComparison(Contract):
+    label: ShortText
+    categories: list[ShortText] = Field(min_length=2, max_length=4)
+    series: list[Series] = Field(min_length=2, max_length=4)
+    value_prefix: str = Field(default="", max_length=8)
+    caption: str = Field(default="", max_length=120)
+
+    @model_validator(mode="after")
+    def aligned_components(self):
+        if any(len(s.values) != len(self.categories) or any(v < 0 for v in s.values) for s in self.series):
+            raise ValueError("Provide a non-negative component value for each category in each series")
+        return self
+
+
+class AllocationLine(Contract):
+    label: Annotated[str, Field(min_length=1, max_length=58)]
+    amount: float = Field(ge=0)
+
+
+class Allocation(Contract):
+    value_prefix: str = Field(max_length=8, description="Currency symbol such as $ for supplied currency, otherwise empty.")
+    lines: list[AllocationLine] = Field(min_length=2, max_length=8)
+
+
+class Phase(Contract):
+    period: Annotated[str, Field(min_length=1, max_length=30)]
+    milestone: Annotated[str, Field(min_length=1, max_length=125, description="A short, complete milestone phrase.")]
+
+
+class RiskMitigation(Contract):
+    risk: Annotated[str, Field(min_length=1, max_length=50)]
+    mitigation: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class Rollout(Contract):
+    phases: list[Phase] = Field(min_length=2, max_length=4)
+    risks: list[RiskMitigation] = Field(default_factory=list, max_length=3)
+
+
+class DecisionGate(Contract):
+    label: Annotated[str, Field(min_length=1, max_length=48)]
+    threshold: Annotated[str, Field(min_length=1, max_length=24)]
+    detail: str = Field(default="", max_length=100)
+
+
+class Decision(Contract):
+    action: Literal["Approve", "Authorize", "Endorse"]
+    request: Annotated[str, Field(min_length=1, max_length=110, description="Noun phrase for the commitment being approved, with any explicit cap.")]
+    scope: str = Field(default="", max_length=135, description="Scope and limits of the current request, separate from future gates.")
+    if_missed: Annotated[str, Field(min_length=1, max_length=130)]
+    gates: list[DecisionGate] = Field(min_length=1, max_length=4)
+
+    @field_validator("request", "scope")
+    @classmethod
+    def separate_future_gates(cls, value: str) -> str:
+        if re.search(r"\b(conditional on|contingent on|subject to|provided that)\b.*\bgates?\b", value, re.IGNORECASE):
+            raise PydanticCustomError("decision_scope", "keep the future gate condition in if_missed")
+        return value.strip().rstrip(".")
+
+
+class CoverCallout(Contract):
+    headline: Annotated[str, Field(min_length=1, max_length=66)]
+    label: Annotated[str, Field(min_length=1, max_length=38)]
+    value: Annotated[str, Field(min_length=1, max_length=25)]
+    detail: str = Field(default="", max_length=95)
+
+
 class SlideContent(Contract):
     title: ShortText
     subtitle: str = Field(default="", max_length=220)
@@ -101,6 +208,23 @@ class SlideContent(Contract):
     image_prompt: str = Field(default="", max_length=400)
     chart: ChartContent | None = None
     table: list[list[str]] | None = Field(default=None, max_length=8)
+    stacked_comparison: StackedComparison | None = None
+    allocation: Allocation | None = None
+    rollout: Rollout | None = None
+    decision: Decision | None = None
+    cover_callout: CoverCallout | None = None
+
+    @model_validator(mode="after")
+    def planned_exhibit(self, info: ValidationInfo):
+        context = info.context or {}
+        exhibit = context.get("required_exhibit")
+        if exhibit and getattr(self, exhibit) is None:
+            raise PydanticCustomError("required_exhibit", "populate the {exhibit} object for this slide", {"exhibit": exhibit})
+        if self.rollout and context.get("omit_phase_quantities") and any(
+            re.search(r"\d", phase.milestone) for phase in self.rollout.phases
+        ):
+            raise PydanticCustomError("phase_quantities", "describe tasks without allocating unprovided quantities to phases")
+        return self
 
     @property
     def chart_ready(self) -> bool:
@@ -143,7 +267,7 @@ def supports_point_icons(layout: Layout, theme: Theme, brand: BrandTemplate | No
 
 
 def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemplate | None) -> bool:
-    if item.layout not in IMAGE_LAYOUTS or content.chart or content.table:
+    if item.layout not in IMAGE_LAYOUTS or content.chart or content.table or content.stacked_comparison:
         return False
     if brand:
         return any(slot.kind == "picture" for slot in choose_layout(brand.layouts, item.layout).slots)
@@ -174,6 +298,15 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
 
 def select_layout(item, content, document, images, *, data_driven, allow_variants):
     role = item.layout
+    if allow_variants:
+        if content.decision and role in {"summary", "closing"}:
+            return "closing"
+        if content.rollout and role in {"process", "timeline"}:
+            return "timeline"
+        if content.allocation and role in {"chart", "metrics", "research"}:
+            return "metrics"
+        if content.stacked_comparison and role == "chart":
+            return "chart"
     if role in DISPLAY_LAYOUTS:
         return role
     sourced = bool(set(content.source_ids).intersection(source.id for source in document.sources))
@@ -201,10 +334,12 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                            allow_variants=bool(rules and not brand and document.theme.profile == "standard"))
     item = item.model_copy(update={"layout": layout})
     if brand:
-        return compose_branded(item, content, document, image_ids, brand)
+        slide = compose_branded(item, content, document, image_ids, brand)
+        return style_slide_tables(slide, document.theme, preserve_palette=True)
     t = document.theme
     if t.profile == "consulting":
-        return compose_consulting(item, content, document, index, image_ids, web_image_ratio=web_image_ratio)
+        slide = compose_consulting(item, content, document, index, image_ids, web_image_ratio=web_image_ratio)
+        return style_slide_tables(slide, t, preserve_palette=True)
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     editorial = t.font == "Georgia"
@@ -223,11 +358,43 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     def rect(x, y, w, h, fill, shape="rect"):
         elements.append(Shape(x=x, y=y, w=w, h=h, fill=fill, shape=shape, z=-1))
 
-    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False):
+    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False, align="left"):
         if value.strip():
             face = rules.heading_font if rules and heading else t.font
             elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * factor),
-                                 color=color, bold=bold, font=face))
+                                 color=color, bold=bold, font=face, align=align))
+
+    points = content.points
+    if rules and item.layout == "cover" and content.cover_callout:
+        callout = content.cover_callout
+        panel_ink = readable(t.background, t.accent, t.ink)
+        rect(.07, .15, .86, .003, accent)
+        rect(.07, .85, .86, .003, accent)
+        rect(.668, .245, .262, .46, t.accent)
+        label(callout.headline, .07, .28, .548, .295, 43, ink, True, heading=True)
+        label(content.subtitle, .07, .62, .55, .176, 20, muted)
+        label(callout.label, .687, .30, .225, .073, 15, panel_ink, True)
+        label(callout.value, .687, .403, .225, .101, 34, panel_ink, True, heading=True)
+        label(callout.detail, .687, .553, .225, .111, 15, panel_ink)
+        return slide
+
+    if rules and item.layout == "closing" and content.decision:
+        decision = content.decision
+        panel_ink = readable(t.background, t.accent, t.ink)
+        label(item.title, .07, .10, .86, .14, 38, ink, True, heading=True)
+        label(content.subtitle, .07, .25, .86, .075, 18, muted)
+        step = .86 / len(decision.gates)
+        for i, gate in enumerate(decision.gates):
+            x = .07 + i * step
+            rect(x, .375, step - .022, .004, accent)
+            label(gate.threshold, x, .397, step - .024, .081, 31, accent, True, heading=True)
+            label(gate.label, x, .485, step - .024, .104, 16, ink, True)
+            label(gate.detail, x, .589, step - .024, .10, 14, muted)
+        rect(.07, .71, .86, .245, t.accent)
+        label(f"{decision.action} {decision.request}.", .09, .735, .82, .087, 22, panel_ink, True, heading=True)
+        label(decision.scope, .09, .826, .82, .044, 14, panel_ink)
+        label(decision.if_missed, .09, .881, .82, .064, 15, panel_ink)
+        return slide
 
     if not rules:
         label(f"{index + 1:02d}  /  {item.layout.upper()}", .068, .065, .65, .045, 12, accent, True)
@@ -250,9 +417,8 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         label(item.title, .068, .24, .86 if rules and rules.cover_style == "rules" else .66, .28, 47, ink, True, heading=True)
         if content.subtitle:
             label(content.subtitle, .07, .58, .64 if editorial else .70, .13, 23, muted)
-        points = content.points[:3]
         if points and item.layout == "closing":
-            for i, point in enumerate(points):
+            for i, point in enumerate(points[:3]):
                 label(point.title, .07 + .295 * i, .77, .274, .13, 18, ink, True)
         elif points and item.layout == "quote":
             label(points[0].title, .07, .77, .65, .08, 18, muted)
@@ -260,9 +426,50 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
 
     label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
     label(content.subtitle, .07, .352, .86, .08, 17, muted)
-    points = content.points
-    use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table)
-    if item.layout == "research" and content.table_ready:
+    use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table or content.stacked_comparison)
+    if rules and item.layout == "chart" and content.stacked_comparison and slide.source_ids:
+        data = content.stacked_comparison
+        chart = Chart(x=.07, y=.517, w=.55, h=.373, chart="stacked_column", categories=data.categories,
+                      series=data.series, value_prefix=data.value_prefix)
+        elements.append(chart)
+        label(data.label, .07, .449, .55, .057, 16, ink, True)
+        rows = [["Component", *data.categories]]
+        for component in data.series:
+            rows.append([component.name, *[display_value(value, data.value_prefix) for value in component.values]])
+        elements.append(Table(x=.646, y=.54, w=.284, h=.089 * len(rows), rows=rows, size=max(9, 13 * factor)))
+        label(data.caption, .07, .913, .86, .048, 13, muted)
+    elif rules and item.layout == "metrics" and content.allocation:
+        allocation = content.allocation
+        total = display_value(sum(line.amount for line in allocation.lines), allocation.value_prefix)
+        label(total, .07, .52, .32, .15, 39, accent, True, heading=True)
+        label("Total allocation", .07, .684, .32, .07, 16, muted)
+        step = .45 / len(allocation.lines)
+        for i, line in enumerate(allocation.lines):
+            y = .452 + i * step
+            rect(.414, y, .516, .003, t.surface)
+            size = min(18, max(11, step * 207))
+            label(line.label, .414, y + .009, .326, step - .011, size, ink, True)
+            label(display_value(line.amount, allocation.value_prefix), .747, y + .009,
+                  .183, step - .011, size, ink, True, align="right")
+    elif rules and item.layout == "timeline" and content.rollout:
+        rollout = content.rollout
+        phase_ink = readable(ink, t.surface, t.ink, bg)
+        step = .86 / len(rollout.phases)
+        for i, phase in enumerate(rollout.phases):
+            x = .07 + i * step
+            rect(x, .473, step - .009, .168, t.surface)
+            rect(x, .473, step - .009, .005, t.accent)
+            label(phase.period, x + .012, .491, step - .033, .053, 15, phase_ink, True)
+            label(phase.milestone, x + .012, .548, step - .033, .071, 16, phase_ink)
+        if rollout.risks:
+            label("Risk", .07, .676, .248, .04, 13, muted, True)
+            label("Mitigation", .338, .676, .59, .04, 13, muted, True)
+            for i, pair in enumerate(rollout.risks):
+                y = .725 + i * .075
+                rect(.07, y, .86, .002, t.surface)
+                label(pair.risk, .07, y + .008, .25, .065, 15, ink, True)
+                label(pair.mitigation, .338, y + .008, .592, .065, 15, ink)
+    elif item.layout == "research" and content.table_ready:
         rows = [[cell[:180] for cell in row] for row in content.table]
         elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
@@ -345,11 +552,9 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             label(point.body, text_x, y + .063, text_width, .075, 16, muted)
     if rules:
         for element in elements:
-            if isinstance(element, Table):
-                style_table(element, t)
-            elif isinstance(element, Chart):
+            if isinstance(element, Chart):
                 style_chart(element, t, bg)
     if len(points) > 3:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]
-    return slide
+    return style_slide_tables(slide, t)

@@ -4,13 +4,18 @@ from zipfile import ZipFile
 from fastapi.testclient import TestClient
 from PIL import Image, ImageColor
 from pptx import Presentation
+from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
+from pptx.oxml.ns import qn
 from pypdf import PdfReader
+from pytest import approx
 
-from app.composition import Outline, SlideContent
+from app.composition import Intent, Outline, SlideContent
 from app.design import ArtDirection
+from app.domain import Chart
 from app.main import app
 from app.providers import Intelligence, ProviderError
-from app.rendering import contrast
+from app.rendering import chart_marks, contrast
 from test_workflow import create, work
 
 
@@ -62,6 +67,8 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     chart = next(el for el in trend["elements"] if el["type"] == "chart")
     table = next(el for el in results["elements"] if el["type"] == "table")
     assert table["rows"] == rows and table["fill"] == "#F7F2E8"
+    assert table["numeric_columns"] == [1, 2, 3]
+    assert table["row_rule"] and table["header_rule"] == theme["accent"]
     assert contrast(table["color"], table["fill"]) >= 4.5
     assert contrast(table["header_color"], table["header_fill"]) >= 4.5
     assert contrast(chart["label_color"], trend["background"]) >= 4.5
@@ -76,6 +83,14 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     assert native.cell(4, 3).text == "20"
     assert str(native.cell(1, 0).fill.fore_color.rgb) == table["fill"][1:]
     assert str(native.cell(0, 0).fill.fore_color.rgb) == table["header_fill"][1:]
+    number_cell = native.cell(4, 3)
+    assert number_cell.vertical_anchor == MSO_VERTICAL_ANCHOR.MIDDLE
+    assert number_cell.text_frame.paragraphs[0].alignment == PP_ALIGN.RIGHT
+    assert native.cell(4, 0).text_frame.paragraphs[0].font.bold
+    borders = native.cell(0, 0)._tc.get_or_add_tcPr()
+    assert borders.find(qn("a:lnL")).find(qn("a:noFill")) is not None
+    header_line_color = borders.find(qn("a:lnB")).find(qn("a:solidFill")).find(qn("a:srgbClr"))
+    assert header_line_color.get("val") == table["header_rule"][1:]
     line = next(shape.chart for shape in ppt.slides[1].shapes if shape.has_chart)
     assert str(line.series[0].format.line.color.rgb) == chart["color"][1:]
     assert str(line.category_axis.tick_labels.font.color.rgb) == chart["label_color"][1:]
@@ -84,3 +99,76 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
     assert len(pdf.pages) == 3
     assert all(cell in pdf.pages[2].extract_text() for row in rows for cell in row)
+
+
+def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
+    structured = Intelligence.structured
+    parts = [
+        ("Costs by option", "chart", "Compare costs broken down by component."),
+        ("Budget", "metrics", "Show the itemized allocation."),
+        ("Delivery schedule", "process", "Show the deployment timeline and risks."),
+        ("Release decision", "comparison", "Show performance gates and approval."),
+    ]
+    expected_exhibits = ["stacked_comparison", "allocation", "rollout", "decision"]
+    exhibits = [
+        {"stacked_comparison": {"label": "Monthly cost", "value_prefix": "$", "categories": ["Current", "Proposed"],
+                                "series": [{"name": "Labor", "values": [70, 35]},
+                                           {"name": "Tools", "values": [30, 25]}]}},
+        {"allocation": {"value_prefix": "$", "lines": [
+            {"label": "Equipment", "amount": 1000}, {"label": "Training", "amount": 800},
+            {"label": "Support", "amount": 300}, {"label": "Contingency", "amount": 200}]}},
+        {"rollout": {"phases": [{"period": "Week 1", "milestone": "Setup"},
+                               {"period": "Week 2", "milestone": "Test"}],
+                     "risks": [{"risk": "Late hardware", "mitigation": "Keep spare units available"}]}},
+        {"decision": {"action": "Approve", "request": "the $2,300 trial", "if_missed": "Pause release and investigate.",
+                      "gates": [{"label": "Success rate", "threshold": "≥95%"}]}},
+    ]
+
+    def respond(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Trial release", audience="Operations", visual_direction="Editorial",
+                          slide_count=4, requires_quantitative_evidence=True, supplied_figures=True,
+                          supplied_evidence_only=True)
+        if schema is Outline:
+            return Outline(title="Trial release", slides=[
+                {"title": title, "layout": layout, "purpose": purpose} for title, layout, purpose in parts])
+        if schema is SlideContent:
+            assert data["required_exhibit"] == expected_exhibits[data["slide_index"]]
+            return SlideContent(title=data["item"]["title"], source_ids=[data["brief_source_id"]],
+                                **exhibits[data["slide_index"]])
+        return structured(self, schema, task, data, stage, image)
+
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("The supplied-evidence-only brief must not trigger a web lookup")
+
+    monkeypatch.setattr(Intelligence, "structured", respond)
+    monkeypatch.setattr("app.workflow.collect", unexpected_lookup)
+    client = TestClient(app)
+    path = create(client, "Four slides for operations. Use only these supplied figures: monthly costs $100 and $60. "
+                         "Allocate $1,000, $800, $300 and $200.", research=True)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    assert [source["title"] for source in result["document"]["sources"]] == ["User-provided brief"]
+    costs, budget, rollout, decision = result["document"]["slides"]
+    assert [slide["layout"] for slide in (costs, budget, rollout, decision)] == ["chart", "metrics", "timeline", "closing"]
+    chart = Chart.model_validate(next(el for el in costs["elements"] if el["type"] == "chart"))
+    assert chart.totals() == [100, 60]
+    current_base, current_top, proposed_base, proposed_top = [geometry for _, _, geometry in chart_marks(chart, 100, 100)]
+    assert current_base[1] + current_base[3] == approx(100)
+    assert proposed_base[1] + proposed_base[3] == approx(100)
+    assert (100 - proposed_top[1]) / (100 - current_top[1]) == approx(.6)
+    assert {"$2,300", "$1,000", "$800", "$300", "$200"} <= {el.get("text") for el in budget["elements"]}
+    labels = {el.get("text"): el for el in rollout["elements"] if el["type"] == "text"}
+    assert labels["Week 1"]["x"] < labels["Week 2"]["x"]
+    assert labels["Late hardware"]["y"] == labels["Keep spare units available"]["y"]
+    assert {"Approve the $2,300 trial.", "Pause release and investigate.", "≥95%"} <= {
+        el.get("text") for el in decision["elements"]}
+
+    ppt = Presentation(io.BytesIO(client.post(path + "/export?format=pptx").content))
+    native = next(shape.chart for shape in ppt.slides[0].shapes if shape.has_chart)
+    assert native.chart_type == XL_CHART_TYPE.COLUMN_STACKED
+    assert native.value_axis.minimum_scale == 0
+    assert [category.label for category in native.plots[0].categories] == ["Current  $100", "Proposed  $60"]
+    pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
+    assert all(label in pdf.pages[0].extract_text() for label in chart.category_labels())

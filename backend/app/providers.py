@@ -2,10 +2,12 @@ import json
 import logging
 import time
 from copy import deepcopy
+from types import NoneType
+from typing import get_args
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 
 from app.config import Settings, settings
 
@@ -27,6 +29,8 @@ VALIDATION_HINTS = {
     "missing": "supply required field",
     "string_type": "use text",
     "model_type": "use an object",
+    "decision_scope": "keep the future gate condition in if_missed",
+    "phase_quantities": "use dates in period only; describe milestones without inventing quantities",
 }
 
 
@@ -39,6 +43,8 @@ def validation_hint(error: ValidationError) -> str:
         limits = issue.get("ctx", {})
         if kind == "slide_count":
             hint = f"return exactly {limits['expected']} slides (received {limits['actual']})"
+        elif kind == "required_exhibit":
+            hint = f"populate the {limits['exhibit']} object for this slide"
         elif kind == "literal_error":
             hint = f"use one of {limits['expected']}"
         elif kind in {"string_too_long", "string_too_short"}:
@@ -100,6 +106,14 @@ def strict_response_schema(contract: dict) -> dict:
     return schema
 
 
+def exhibit_response_schema(schema: type[BaseModel], exhibit: str) -> dict:
+    keys = ("title", "subtitle", "notes", "source_ids")
+    fields = {key: (schema.model_fields[key].annotation, deepcopy(schema.model_fields[key])) for key in keys}
+    kind = next(variant for variant in get_args(schema.model_fields[exhibit].annotation) if variant is not NoneType)
+    fields[exhibit] = (kind, ...)
+    return create_model(schema.__name__, __config__=schema.model_config, **fields).model_json_schema()
+
+
 class Intelligence:
     def __init__(self, usage: dict | None = None):
         configuration = settings()
@@ -110,16 +124,20 @@ class Intelligence:
 
     def structured(self, schema: type[BaseModel], task: str, data: dict, stage: str = "planning", image: str | None = None):
         validation_context = {"slide_count": data["slide_count"]} if stage == "outline" else None
+        required_exhibit = data.get("required_exhibit") if stage == "slide" else None
+        if required_exhibit:
+            validation_context = {"required_exhibit": required_exhibit,
+                                  "omit_phase_quantities": data.get("omit_phase_quantities", False)}
         if self.provider == "demo":
             from app.demo import demo_response
             return schema.model_validate(demo_response(schema.__name__, data), context=validation_context)
         s = settings()
-        contract = schema.model_json_schema()
+        contract = exhibit_response_schema(schema, required_exhibit) if required_exhibit else schema.model_json_schema()
         response_schema = None
-        if validation_context:
+        if stage == "outline":
             count = validation_context["slide_count"]
             contract["properties"]["slides"].update(minItems=count, maxItems=count)
-        if stage in {"outline", "design"} and self.provider in {"openai", "openrouter"}:
+        if (stage in {"outline", "design"} or required_exhibit) and self.provider in {"openai", "openrouter"}:
             response_schema = strict_response_schema(contract)
         system = (
             "You are a presentation studio service. Reply with exactly one JSON object matching the supplied schema. "

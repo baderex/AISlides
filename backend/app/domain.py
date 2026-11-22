@@ -109,11 +109,29 @@ class Table(ElementBase):
     font: str = Field(default="Arial", max_length=60)
     header_fill: Color | None = None
     header_color: Color | None = None
+    row_rule: Color | None = None
+    header_rule: Color | None = None
+    numeric_columns: list[Annotated[int, Field(ge=0, le=7)]] = Field(default_factory=list, max_length=8)
 
     def row_style(self, index: int) -> tuple[str, str, bool]:
         if index == 0 and self.header_fill:
             return self.header_fill, self.header_color or self.color, True
         return self.fill, self.color, False
+
+    def cell_align(self, column: int) -> Literal["left", "right"]:
+        return "right" if self.row_rule and column in self.numeric_columns else "left"
+
+    def cell_bold(self, row: int, column: int) -> bool:
+        return (row == 0 and self.header_fill is not None) or bool(
+            self.row_rule and column == 0 and 0 not in self.numeric_columns
+        )
+
+    def rule_after(self, row: int) -> tuple[str, float] | None:
+        if not self.row_rule:
+            return None
+        if row == 0 and self.header_rule:
+            return self.header_rule, 1.5
+        return self.row_rule, .65
 
     @model_validator(mode="after")
     def rectangular(self):
@@ -128,9 +146,13 @@ class Series(Contract):
     values: list[float] = Field(min_length=1, max_length=16)
 
 
+def display_value(value: float, prefix: str = "") -> str:
+    return f"{prefix}{value:,.2f}".rstrip("0").rstrip(".")
+
+
 class Chart(ElementBase):
     type: Literal["chart"] = "chart"
-    chart: Literal["bar", "column", "line", "pie"] = "column"
+    chart: Literal["bar", "column", "line", "pie", "stacked_column"] = "column"
     categories: list[ShortText] = Field(min_length=1, max_length=16)
     series: list[Series] = Field(min_length=1, max_length=5)
     color: Color = "#4C52D9"
@@ -138,6 +160,16 @@ class Chart(ElementBase):
     palette: list[Color] = Field(default_factory=list, max_length=5)
     label_color: Color = "#292C49"
     font: str = Field(default="Arial", max_length=60)
+    value_prefix: str = Field(default="", max_length=8)
+
+    def totals(self) -> list[float]:
+        return [sum(values) for values in zip(*(series.values for series in self.series))]
+
+    def category_labels(self) -> list[str]:
+        if self.chart != "stacked_column":
+            return self.categories
+        return [f"{category}  {display_value(total, self.value_prefix)}"
+                for category, total in zip(self.categories, self.totals())]
 
     def colors(self):
         return self.palette or [self.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
@@ -148,6 +180,8 @@ class Chart(ElementBase):
             raise ValueError("Chart series must match its categories")
         if self.chart == "pie" and (len(self.series) != 1 or any(v < 0 for v in self.series[0].values)):
             raise ValueError("Pie charts need one non-negative series")
+        if self.chart == "stacked_column" and (len(self.series) < 2 or any(v < 0 for s in self.series for v in s.values)):
+            raise ValueError("Stacked columns require at least two non-negative series")
         return self
 
 
