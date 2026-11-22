@@ -470,11 +470,14 @@ def connector_points(line, x, y, width, height, nodes):
     return points
 
 
-def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> bytes:
+def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, artwork=None) -> bytes:
     ptw, pth = physical(document)
     scale = pixel_width / ptw
     bounds = pixel_width, round(pth * scale)
     image = PILImage.new("RGBA", bounds, slide.background)
+    if artwork is not None:
+        with PILImage.open(io.BytesIO(artwork)) as backdrop:
+            image.alpha_composite(backdrop.convert("RGBA").resize(bounds, PILImage.Resampling.LANCZOS))
     elements = list(flattened(slide.elements))
     nodes = {item.id: geometry for item, *geometry in elements if isinstance(item, Shape)}
     for el, nx, ny, nw, nh in elements:

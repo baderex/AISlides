@@ -113,11 +113,11 @@ def build_slide(part, content, document, index, images, brand=None, *, image_rat
     return slide
 
 
-def review_layouts(document, slide, index, images, get_asset):
+def review_layouts(document, slide, index, images, get_asset, *, artwork=None):
     """Render the planned layout and at most one eligible alternative."""
     original = slide
     slide.warnings.extend(validate_slide(document, slide, images))
-    png = preview(document, slide, get_asset)
+    png = preview(document, slide, get_asset, artwork=artwork)
     spec = slide.spec
     if not spec:
         return slide, png

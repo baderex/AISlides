@@ -44,7 +44,7 @@ export interface ChartElement extends Geometry {
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }
 export type SlideElement = TextElement | ShapeElement | ImageElement | LineElement | TableElement | ChartElement | GroupElement;
-export interface Slide { id: string; title: string; layout: Layout; background: string; elements: SlideElement[]; notes: string; source_ids: string[]; warnings: string[] }
+export interface Slide { id: string; title: string; layout: Layout; background: string; elements: SlideElement[]; notes: string; source_ids: string[]; warnings: string[]; brand_layout_index?: number | null }
 export interface Deck { schema_version: 1; title: string; aspect_ratio: Aspect; theme: Theme; sources: Source[]; slides: Slide[] }
 export interface PresentationSummary {
   id: string; title: string; status: Status; revision: number; created: string; updated: string; slide_count: number;

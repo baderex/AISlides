@@ -199,11 +199,16 @@ def review_powerpoint(raw: bytes, document: Document) -> list[dict]:
     executable = renderer()
     if not executable:
         raise ReviewUnavailable("Install LibreOffice Impress or configure POWERPOINT_RENDERER to review exported decks.")
-    if not review_slot.acquire(blocking=False):
-        raise ReviewBusy("Another PowerPoint review is running. Try again in a moment.")
     try:
-        return inspect_pdf(render_powerpoint(executable, raw), document)
+        return inspect_pdf(render_native_pdf(executable, raw), document)
     except pdfium.PdfiumError as error:
         raise ReviewUnavailable("The rendered PowerPoint could not be inspected.") from error
+
+
+def render_native_pdf(executable: str, raw: bytes) -> bytes:
+    if not review_slot.acquire(blocking=False):
+        raise ReviewBusy("Another PowerPoint render is running. Try again in a moment.")
+    try:
+        return render_powerpoint(executable, raw)
     finally:
         review_slot.release()

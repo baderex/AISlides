@@ -12,7 +12,7 @@ from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
-from app.branding import SLOT_TYPES, choose_layout, native_layouts
+from app.branding import SLOT_TYPES, layout_for_slide, native_layouts
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
 from app.rendering import TEXT_LEADING, segment_ink, table_columns, table_insets
 
@@ -214,7 +214,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
     for item in document.slides:
         placeholders = None
         if brand:
-            selected = choose_layout(brand.layouts, item.layout)
+            selected = layout_for_slide(brand, item)
             slide = presentation.slides.add_slide(layouts[selected.index])
             placeholders = {p.placeholder_format.idx: p for p in slide.placeholders}
         else:

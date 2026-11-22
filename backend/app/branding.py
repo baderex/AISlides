@@ -1,16 +1,20 @@
 import io
 import re
+from functools import lru_cache
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 from zipfile import ZipFile
 
 from defusedxml import ElementTree
 from pptx import Presentation
-from pptx.enum.shapes import PP_PLACEHOLDER as Placeholder
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_SHAPE_TYPE, PP_PLACEHOLDER as Placeholder
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 
-from app.domain import BrandLayout, BrandSlot, BrandTemplate, Chart, Image, Skill, Slide, Table, Text, Theme
+from app.design import readable
+from app.domain import BrandLayout, BrandPanel, BrandSlot, BrandTemplate, Chart, Image, Skill, Slide, Table, Text, Theme
+from app.rendering import contrast, physical, text_fits
+from app.storage import Storage
 
 
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -90,6 +94,29 @@ def drawing_color(parent, palette, default):
     return default
 
 
+def artwork_panel(layout, bg, slots, width, height, palette):
+    """Find a solid content panel over a gradient, such as the imported Green highlight layout."""
+    title = next((slot for slot in slots if slot.kind == "title"), None)
+    if title is None or bg is None or bg.find(f".//{qn('a:gradFill')}") is None:
+        return None
+    if any(slot.kind != "title" for slot in slots):
+        return None
+    for shape in reversed(layout.shapes):
+        if shape.shape_type != MSO_SHAPE_TYPE.AUTO_SHAPE or shape.auto_shape_type != MSO_AUTO_SHAPE_TYPE.RECTANGLE:
+            continue
+        left, top, w, h = shape.left, shape.top, shape.width, shape.height
+        if None in (left, top, w, h) or shape.rotation or abs(top) > .02 * height or h < .96 * height:
+            continue
+        left, right = max(0, left / width), min(1, (left + w) / width)
+        solid = shape._element.find(f"{qn('p:spPr')}/{qn('a:solidFill')}")
+        fill = drawing_color(solid, palette, None)
+        if not fill or contrast(fill, "#FFFFFF") > 1.5 or not .46 <= right - left <= .82:
+            continue
+        if left <= title.x and title.x + title.w <= right and title.y + title.h < .32:
+            return BrandPanel(x=left, w=right - left, color=fill)
+    return None
+
+
 def layout_metadata(layout, index, width, height, palette, fonts):
     bg = layout._element.find(f".//{qn('p:bg')}")
     if bg is None:
@@ -137,7 +164,8 @@ def layout_metadata(layout, index, width, height, palette, fonts):
     name = (layout.name or f"Layout {index + 1}")[:220]
     native_type = layout._element.get("type", "")
     return BrandLayout(index=index, name=name, background=background, slots=slots[:32],
-                       cover=native_type == "title" or "cover" in name.casefold(),
+                       artwork_panel=artwork_panel(layout, bg, slots, width, height, palette),
+                       cover=native_type == "title" or "cover" in name.casefold() or is_title_slide(name),
                        section=native_type == "secHead" or "section" in name.casefold())
 
 
@@ -165,29 +193,81 @@ def inspect_template(raw: bytes, asset_id: str, name: str) -> Skill:
                   muted=ink, surface=palette.get("bg2", "#E7E9FF"), font=fonts.get("+mn-lt", "Arial"))
     return Skill(name=name, category="Branded templates", description="PowerPoint masters, layouts and placeholders are reused on export.",
                  formats=[aspect], recipes=["cover", "summary", "closing"], theme=theme,
-                 brand=BrandTemplate(asset_id=asset_id, layouts=metadata))
+                 brand=BrandTemplate(asset_id=asset_id, layouts=metadata, artwork_scanned=True))
 
 
-def choose_layout(layouts, role):
+@lru_cache(maxsize=12)
+def scan_saved_artwork(asset_id):
+    return inspect_template(Storage().get(asset_id), asset_id, "PowerPoint template").brand
+
+
+def is_title_slide(name):
+    return bool(re.fullmatch(r"(?:[\w-]+\.\s*)?title slide", name.strip(), re.I))
+
+
+def choose_layout(layouts, role, *, legacy=False):
     def rank(layout):
         kinds = [slot.kind for slot in layout.slots]
         title, body = "title" in kinds, kinds.count("body")
+        cover = layout.cover or (not legacy and is_title_slide(layout.name))
         if role in {"cover", "closing"}:
-            return (layout.cover and title, title, "subtitle" in kinds, not layout.section, body)
+            return (cover and title, title, "subtitle" in kinds, not layout.section, body)
         if role == "section":
-            return (layout.section and title, title, not layout.cover, "subtitle" in kinds, body)
+            return (layout.section and title, title, not cover, "subtitle" in kinds, body)
         preferred = {"chart": "chart", "research": "table", "showcase": "picture", "editorial": "picture"}.get(role)
-        return (title and (body > 0 or preferred in kinds), not layout.cover and not layout.section,
-                preferred in kinds, body >= 2 if role == "comparison" else body == 1, title, body)
+        if legacy:
+            return (title and (body > 0 or preferred in kinds), not cover and not layout.section,
+                    preferred in kinds, body >= 2 if role == "comparison" else body == 1, title, body)
+        body_area = sum(slot.w * slot.h for slot in layout.slots if slot.kind == "body")
+        exhibit = preferred is not None and preferred in kinds
+        usable_body = body_area >= .10
+        return (title and (usable_body or exhibit), not cover and not layout.section,
+                exhibit, body >= 2 if role == "comparison" else body == 1, title, body)
 
     return max(layouts, key=rank)
 
 
+def layout_for_slide(brand, slide):
+    selected = next((layout for layout in brand.layouts if layout.index == slide.brand_layout_index), None)
+    return selected if selected is not None else choose_layout(brand.layouts, slide.layout, legacy=True)
+
+
 def compose_branded(item, content, document, image_ids, brand):
-    layout = choose_layout(brand.layouts, item.layout)
+    role = "summary" if item.layout == "section" and content.points else item.layout
     sources = {source.id for source in document.sources}
-    slide = Slide(title=item.title, layout=item.layout, background=layout.background, notes=content.notes,
-                  source_ids=list(dict.fromkeys(key for key in content.source_ids if key in sources)))
+    source_ids = list(dict.fromkeys(key for key in content.source_ids if key in sources))
+    points = [" — ".join(filter(None, (point.title, point.value if source_ids else "", point.body)))
+              for point in content.points]
+    if role in {"summary", "process", "timeline"} and points and not (
+        content.image_asset_id or content.chart or content.table
+    ):
+        body = "\n\n".join(filter(None, (content.subtitle, *points)))
+        ptw, pth = physical(document)
+        for layout in brand.layouts:
+            panel = layout.artwork_panel
+            if not panel or layout.cover or layout.section:
+                continue
+            title = next(slot for slot in layout.slots if slot.kind == "title")
+            font = document.theme.font
+            title_height = max(title.h, .14)
+            x, y = panel.x + .05, max(.27, title.y + title_height + .055)
+            w, h = panel.w - .10, .88 - y
+            if not text_fits(item.title, title.w * ptw, title_height * pth, 26, title.bold, title.font, title.align):
+                continue
+            if not text_fits(body, w * ptw, h * pth, 18, False, font):
+                continue
+            heading = Text(x=title.x, y=title.y, w=title.w, h=title_height, text=item.title,
+                           size=title.size, color=readable(title.color, panel.color, document.theme.accent),
+                           font=title.font, bold=title.bold, align=title.align, placeholder_idx=title.idx)
+            detail = Text(x=x, y=y, w=w, h=h, text=body, size=18,
+                          color=readable(document.theme.ink, panel.color), font=font)
+            return Slide(title=item.title, layout=role, brand_layout_index=layout.index, background=layout.background,
+                         elements=[heading, detail], notes=content.notes, source_ids=source_ids)
+
+    layout = choose_layout(brand.layouts, role)
+    slide = Slide(title=item.title, layout=role, brand_layout_index=layout.index,
+                  background=layout.background, notes=content.notes,
+                  source_ids=source_ids)
     theme = document.theme
     title = next((slot for slot in layout.slots if slot.kind == "title"), None)
     subtitle = next((slot for slot in layout.slots if slot.kind == "subtitle"), None)
@@ -200,14 +280,16 @@ def compose_branded(item, content, document, image_ids, brand):
         if not value.strip():
             return
         if slot:
-            slide.elements.append(Text(**geometry(slot), text=value, size=slot.size, color=slot.color, font=slot.font,
+            color = slot.color
+            if role not in {"cover", "section", "closing"}:
+                color = readable(color, slide.background, theme.accent, theme.ink)
+            slide.elements.append(Text(**geometry(slot), text=value, size=slot.size, color=color, font=slot.font,
                                        bold=slot.bold, align=slot.align, placeholder_idx=slot.idx))
         else:
-            slide.elements.append(Text(**fallback, text=value, font=theme.font, color=theme.ink))
+            color = readable(theme.ink, slide.background, theme.accent)
+            slide.elements.append(Text(**fallback, text=value, font=theme.font, color=color))
 
     text(item.title, title, {"x": .06, "y": .06, "w": .88, "h": .15, "size": 32, "bold": True})
-    points = [" — ".join(filter(None, (point.title, point.value if slide.source_ids else "", point.body)))
-              for point in content.points]
     if subtitle:
         text(content.subtitle, subtitle, {})
     elif content.subtitle:

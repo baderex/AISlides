@@ -17,14 +17,14 @@ def put_preview(db, presentation_id, document, slide, raw):
                         fingerprint=fingerprint(document, slide)))
 
 
-def get_preview(db, presentation_id, document, slide):
+def get_preview(db, presentation_id, document, slide, *, artwork=None):
     record = db.get(SlidePreview, (presentation_id, slide.id))
     storage = Storage()
-    if record and record.fingerprint == fingerprint(document, slide):
+    if artwork is None and record and record.fingerprint == fingerprint(document, slide):
         try:
             return storage.get(record.storage_key)
         except FileNotFoundError:
             pass
     fitted = slide.model_copy(deep=True)
     fit_slide_text(document, fitted)
-    return preview(document, fitted, storage.get)
+    return preview(document, fitted, storage.get, artwork=artwork)

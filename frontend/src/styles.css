@@ -384,7 +384,7 @@ input[type=color]:disabled { cursor: default; opacity: .5; }
 .present-nav .icon-button { color: #eee; }
 
 studio-canvas { display: block; width: 100%; }
-.slide-canvas { position: relative; width: 100%; overflow: hidden; container-type: inline-size; isolation: isolate; }
+.slide-canvas { position: relative; width: 100%; overflow: hidden; container-type: inline-size; isolation: isolate; background-size: 100% 100%; background-repeat: no-repeat; }
 .slide-canvas.editable { touch-action: none; }
 .slide-element { position: absolute; width: 0; height: 0; }
 .editable .slide-element { cursor: grab; }

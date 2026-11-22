@@ -82,7 +82,10 @@
                 @for (item of visiblePresentations(); track item.id) {
                   <article class="recent-card">
                     <a class="recent-card-link" [routerLink]="['/presentation', item.id]">
-                      @if (item.thumbnail; as thumbnail) { <div class="recent-art"><studio-canvas [slide]="thumbnail" [aspect]="item.aspect_ratio" /></div> }
+                      @if (item.thumbnail; as thumbnail) {
+                        <div class="recent-art"><studio-canvas [slide]="thumbnail" [aspect]="item.aspect_ratio"
+                          [artwork]="thumbnail.brand_layout_index == null ? null : api.artwork(item.id, thumbnail)" /></div>
+                      }
                       @else { <div class="recent-placeholder"><lucide-icon [img]="i.SquareStack" [size]="30" /></div> }
                       <strong>{{ item.title }}</strong>
                       <small>{{ item.slide_count }} slides <span>·</span> {{ item.updated | date:'MMM d, y' }}</small>

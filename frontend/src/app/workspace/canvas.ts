@@ -17,6 +17,7 @@ function bounded(value: number, min: number, max: number) { return Math.min(max,
 export class SlideCanvas {
   slide = input.required<Slide>();
   aspect = input<Aspect>('16:9');
+  artwork = input<string | null>(null);
   editable = input(false);
   selected = input<string | null>(null);
   snap = input(true);

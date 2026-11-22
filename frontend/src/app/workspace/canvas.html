@@ -1,4 +1,5 @@
-<div #canvas class="slide-canvas" [class.editable]="editable()" [style.aspect-ratio]="ratio()" [style.background]="slide().background"
+<div #canvas class="slide-canvas" [class.editable]="editable()" [style.aspect-ratio]="ratio()" [style.background-color]="slide().background"
+  [style.background-image]="artwork() ? 'url(' + artwork() + ')' : null"
   [attr.tabindex]="editable() ? 0 : null" [attr.aria-label]="slide().title" (pointerdown)="selection.emit(null)"
   (pointermove)="pointerMove($event, canvas)" (pointerup)="pointerEnd($event, true)"
   (pointercancel)="pointerEnd($event, false)" (lostpointercapture)="pointerEnd($event, false)">

@@ -4,7 +4,7 @@ import re
 from collections import defaultdict, deque
 from time import monotonic
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import Field
 from sqlalchemy import select, update
@@ -12,14 +12,15 @@ from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
 from app.auth import COOKIE, authenticate, digest, login_session, passwords, resolve
-from app.branding import PPTX, inspect_template
+from app.branding import PPTX, inspect_template, layout_for_slide
 from app.config import settings
 from app.db import Asset, ExportRecord, Job, LoginSession, PresentationRecord, Session, SkillRecord, SlidePreview, StudioEvent, User, Version, now, uid
-from app.domain import Contract, CreatePresentation, Document, Skill, Slide, read_document
+from app.domain import Contract, CreatePresentation, Document, Layout, Skill, Slide, read_document
 from app.edits import ApplyEdit, ChatRequest, apply, propose
-from app.export_review import ReviewBusy, ReviewUnavailable, review_powerpoint
+from app.export_review import ReviewBusy, ReviewUnavailable, render_native_pdf, renderer, review_powerpoint
 from app.imagery import image_configured
 from app.lucide import bundled_icon, icon_png
+from app.master_artwork import master_artwork
 from app.powerpoint import to_pptx
 from app.presentations import (
     Conflict, assert_editable, assets_for, begin_write, details, emit, image_ids, latest_job, persist,
@@ -85,6 +86,16 @@ def validate_document_assets(db, owner_id, document):
     source_ids = {source.asset_id for source in document.sources if source.asset_id}
     if len(assets_for(db, owner_id, source_ids)) != len(source_ids):
         raise HTTPException(422, "The deck references an inaccessible source asset.")
+
+
+def presentation_brand(db, item, owner_id):
+    record = skill_for(db, owner_id, item.request.get("skill_id"), include_deleted=True)
+    brand = Skill.model_validate(record.manifest).brand if record else None
+    if brand:
+        asset = db.get(Asset, brand.asset_id)
+        if not asset or asset.owner_id != owner_id or asset.media_type != PPTX:
+            raise HTTPException(409, "The original PowerPoint template is unavailable.")
+    return brand
 
 
 @api.get("/session")
@@ -493,13 +504,45 @@ def save_slide(item_id: str, slide_id: str, data: SaveSlide, owner_id: str = own
 @api.get("/presentations/{item_id}/slides/{slide_id}/preview")
 def slide_preview(item_id: str, slide_id: str, owner_id: str = owner):
     with Session() as db:
-        document = read_document(item_for(db, item_id, owner_id).document)
+        item = item_for(db, item_id, owner_id)
+        document = read_document(item.document)
         slide = next((entry for entry in document.slides if entry.id == slide_id), None)
         if not slide:
             raise HTTPException(404, "Slide not found.")
         validate_document_assets(db, owner_id, document)
-        raw = get_preview(db, item_id, document, slide)
+        brand = presentation_brand(db, item, owner_id)
+    artwork = None
+    if brand and (executable := renderer()):
+        artwork = render_slide_artwork(executable, brand, slide, document.aspect_ratio)
+    with Session() as db:
+        raw = get_preview(db, item_id, document, slide, artwork=artwork)
     return Response(raw, media_type="image/png")
+
+
+def render_slide_artwork(executable, brand, slide, aspect):
+    try:
+        return master_artwork(executable, brand.asset_id, layout_for_slide(brand, slide),
+                              slide.background, aspect)
+    except (ReviewUnavailable, FileNotFoundError) as error:
+        raise HTTPException(503, str(error)) from error
+    except ReviewBusy as error:
+        raise HTTPException(429, str(error)) from error
+
+
+@api.get("/presentations/{item_id}/master-artwork")
+def slide_master_artwork(item_id: str, layout: Layout, background: str = Query(pattern=r"^#[0-9a-fA-F]{6}$"),
+                         index: int | None = Query(default=None, ge=0), owner_id: str = owner):
+    with Session() as db:
+        item = item_for(db, item_id, owner_id)
+        brand = presentation_brand(db, item, owner_id)
+        aspect = item.document["aspect_ratio"]
+    if not brand or not (executable := renderer()):
+        return Response(status_code=204)
+    if index is not None and not any(entry.index == index for entry in brand.layouts):
+        raise HTTPException(404, "PowerPoint layout not found.")
+    slide = Slide(title="Master artwork", layout=layout, background=background.upper(), brand_layout_index=index)
+    raw = render_slide_artwork(executable, brand, slide, aspect)
+    return Response(raw, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @api.get("/presentations/{item_id}/versions")
@@ -582,7 +625,17 @@ def export(item_id: str, format: str = "pptx", owner_id: str = owner):
         raise HTTPException(422, "Select pptx or pdf.")
     document, revision, brand = export_snapshot(item_id, owner_id)
     storage = Storage()
-    raw = to_pptx(document, storage.get, brand) if format == "pptx" else to_pdf(document, storage.get)
+    if format == "pptx":
+        raw = to_pptx(document, storage.get, brand)
+    elif brand and (executable := renderer()):
+        try:
+            raw = render_native_pdf(executable, to_pptx(document, storage.get, brand))
+        except ReviewUnavailable as error:
+            raise HTTPException(503, str(error)) from error
+        except ReviewBusy as error:
+            raise HTTPException(429, str(error)) from error
+    else:
+        raw = to_pdf(document, storage.get)
     store_export(item_id, owner_id, revision, format, raw, storage)
     return download(raw, MIME[format], document.title, format)
 
@@ -626,12 +679,7 @@ def export_snapshot(item_id, owner_id, expected=None):
             raise Conflict("Generate or add a slide before exporting.")
         validate_document_assets(db, owner_id, document)
         revision = item.revision
-        record = skill_for(db, owner_id, item.request.get("skill_id"), include_deleted=True)
-        brand = Skill.model_validate(record.manifest).brand if record else None
-        if brand:
-            asset = db.get(Asset, brand.asset_id)
-            if not asset or asset.owner_id != owner_id or asset.media_type != PPTX:
-                raise HTTPException(409, "The original PowerPoint template is unavailable.")
+        brand = presentation_brand(db, item, owner_id)
         for slide in document.slides:
             fit_slide_text(document, slide)
     return document, revision, brand

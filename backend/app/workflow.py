@@ -7,6 +7,7 @@ from datetime import date
 from PIL import Image as PILImage
 from sqlalchemy import select, update
 
+from app.branding import layout_for_slide, scan_saved_artwork
 from app.composition import (
     EXHIBIT_LAYOUTS, IMAGE_LAYOUTS, EvidenceSummary, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review,
     SlideContent, accepts_web_image, design, is_data_driven, planned_exhibit, supports_point_icons,
@@ -17,7 +18,9 @@ from app.db import Job, PresentationRecord, Session, now
 from app.design import ArtDirection, DIRECTOR_PROMPT, enforce_constraints, explicit_constraints, font_family, reference_sheet
 from app.domain import Image, Skill, Slide, Source, Theme, read_document
 from app.evidence import resolve_headline
+from app.export_review import ReviewBusy, ReviewUnavailable, renderer
 from app.imagery import image_configured, render_image, source_web_image
+from app.master_artwork import master_artwork
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
 from app.previews import put_preview
 from app.providers import Intelligence, ProviderError
@@ -400,6 +403,11 @@ def lock_presentation(db, job_id):
 def process(job_id, token, item, stage, context, assets, skill, ai):
     document = read_document(item.document)
     brand = skill.brand if skill else None
+    if brand and not brand.artwork_scanned and stage in {"slide", "image", "revise"}:
+        try:
+            brand = scan_saved_artwork(brand.asset_id)
+        except (FileNotFoundError, ValueError):
+            log.warning("Could not refresh artwork metadata for PowerPoint template %s", brand.asset_id)
     direction = visual_direction(item, context)
     inferred_intent = context.get("intent") or {}
     data_driven = (is_data_driven(direction) or inferred_intent.get("requires_quantitative_evidence", False)
@@ -628,8 +636,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         index = context.get("progress_index", len(document.slides))
         outline = Outline.model_validate(context["outline"])
         if index == len(outline.slides):
+            has_review_notes = any(slide.warnings for slide in document.slides)
+            message = ("The presentation was generated. Check the slide review notes before exporting."
+                       if has_review_notes else "The presentation is ready to edit and export.")
             return ("done", "complete", "COMPLETED",
-                    [("generation.completed", "The presentation is ready to edit and export.", {"slides": index, "usage": ai.usage})],
+                    [("generation.completed", message, {"slides": index, "usage": ai.usage})],
                     document, "Generated presentation")
         part = outline.slides[index]
         if not start_status(job_id, token, "GENERATING", "slide.started", f"Designing slide {index + 1}: {part.title}.", index=index):
@@ -820,7 +831,14 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         text_elements = [element for element, *_ in flattened(slide.elements) if element.type in {"text", "table"}]
         dimensions = [(element.size, element.h) for element in text_elements]
         storage = Storage()
-        slide, png = review_layouts(document, slide, index, images, storage.get)
+        artwork = None
+        if brand and (executable := renderer()):
+            try:
+                artwork = master_artwork(executable, brand.asset_id, layout_for_slide(brand, slide),
+                                         slide.background, document.aspect_ratio)
+            except (ReviewBusy, ReviewUnavailable, FileNotFoundError):
+                log.warning("Could not render inherited artwork for slide %s", slide.id)
+        slide, png = review_layouts(document, slide, index, images, storage.get, artwork=artwork)
         if slide.spec and original_recipe != slide.spec.recipe:
             events.append(("slide.revised", f"Selected a clearer layout for slide {index + 1}.",
                            {"index": index, "recipe": slide.spec.recipe}))

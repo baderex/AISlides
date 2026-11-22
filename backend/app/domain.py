@@ -346,6 +346,7 @@ class Slide(Contract):
     source_ids: list[Identifier] = Field(default_factory=list, max_length=20)
     warnings: list[str] = Field(default_factory=list, max_length=30)
     spec: SlideSpec | None = None
+    brand_layout_index: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def unique_elements(self):
@@ -411,6 +412,12 @@ class BrandSlot(Contract):
     align: Literal["left", "center", "right"] = "left"
 
 
+class BrandPanel(Contract):
+    x: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    color: Color
+
+
 class BrandLayout(Contract):
     index: int = Field(ge=0)
     name: ShortText
@@ -418,11 +425,13 @@ class BrandLayout(Contract):
     section: bool = False
     background: Color
     slots: list[BrandSlot] = Field(max_length=32)
+    artwork_panel: BrandPanel | None = None
 
 
 class BrandTemplate(Contract):
     asset_id: Identifier
     layouts: list[BrandLayout] = Field(min_length=1, max_length=100)
+    artwork_scanned: bool = False
 
 
 Skill.model_rebuild()
