@@ -48,6 +48,7 @@ def export_checks(output, raw_document):
         tables = [shape.table for shape in shapes if shape.has_table]
         texts = [shape.text for shape in shapes if shape.has_text_frame and shape.text]
         counts = {"chart": len(charts), "table": len(tables), "text": len(texts),
+                  "line": sum(shape.shape_type == MSO_SHAPE_TYPE.LINE for shape in shapes),
                   "image": sum(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in shapes)}
         if any(sum(element.type == kind for element in elements) != count for kind, count in counts.items()):
             raise RuntimeError(f"PowerPoint objects differ on slide {rendered['number']}")

@@ -1,3 +1,4 @@
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
@@ -98,6 +99,17 @@ class Line(ElementBase):
     type: Literal["line"] = "line"
     color: Color = "#4C52D9"
     weight: float = Field(default=2, ge=0.5, le=20)
+    direction: Literal["diagonal", "right", "left", "down", "up"] = "diagonal"
+    arrows: Literal["none", "end", "both"] = "none"
+
+    def endpoints(self, width, height):
+        return {
+            "diagonal": ((0, 0), (width, height)),
+            "right": ((0, height / 2), (width, height / 2)),
+            "left": ((width, height / 2), (0, height / 2)),
+            "down": ((width / 2, 0), (width / 2, height)),
+            "up": ((width / 2, height), (width / 2, 0)),
+        }[self.direction]
 
 
 class Table(ElementBase):
@@ -112,17 +124,31 @@ class Table(ElementBase):
     row_rule: Color | None = None
     header_rule: Color | None = None
     numeric_columns: list[Annotated[int, Field(ge=0, le=7)]] = Field(default_factory=list, max_length=8)
+    focus_rows: list[Annotated[int, Field(ge=1, le=11)]] = Field(default_factory=list, max_length=11)
+    focus_fill: Color | None = None
+    negative_ink: Color | None = None
 
     def row_style(self, index: int) -> tuple[str, str, bool]:
         if index == 0 and self.header_fill:
             return self.header_fill, self.header_color or self.color, True
+        if self.focus_fill and index in self.focus_rows:
+            return self.focus_fill, self.color, False
         return self.fill, self.color, False
+
+    def negative_cell(self, row: int, column: int) -> bool:
+        return bool(self.negative_ink and row > 0 and column in self.numeric_columns and re.fullmatch(
+            r"[-−]\s*[$€£¥]?\s*(?:\d[\d,]*(?:\.\d+)?|\.\d+)\s*%?", self.rows[row][column].strip()
+        ))
+
+    def cell_style(self, row: int, column: int) -> tuple[str, str]:
+        fill, ink, _ = self.row_style(row)
+        return fill, self.negative_ink if self.negative_cell(row, column) else ink
 
     def cell_align(self, column: int) -> Literal["left", "right"]:
         return "right" if self.row_rule and column in self.numeric_columns else "left"
 
     def cell_bold(self, row: int, column: int) -> bool:
-        return (row == 0 and self.header_fill is not None) or bool(
+        return (row == 0 and self.header_fill is not None) or self.negative_cell(row, column) or bool(
             self.row_rule and column == 0 and 0 not in self.numeric_columns
         )
 

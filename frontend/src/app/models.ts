@@ -19,11 +19,16 @@ export interface TextElement extends Geometry {
 }
 export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle'; fill: string }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
-export interface LineElement extends Geometry { type: 'line'; color: string; weight: number }
+export interface LineElement extends Geometry {
+  type: 'line'; color: string; weight: number;
+  direction?: 'diagonal' | 'right' | 'left' | 'down' | 'up';
+  arrows?: 'none' | 'end' | 'both';
+}
 export interface TableElement extends Geometry {
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
   header_fill?: string | null; header_color?: string | null; row_rule?: string | null;
   header_rule?: string | null; numeric_columns?: number[];
+  focus_rows?: number[]; focus_fill?: string | null; negative_ink?: string | null;
 }
 export interface ChartElement extends Geometry {
   type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; show_values?: boolean;

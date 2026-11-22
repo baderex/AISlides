@@ -13,7 +13,7 @@ from pptx.util import Inches, Pt
 
 from app.branding import SLOT_TYPES, choose_layout, native_layouts
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
-from app.rendering import TEXT_LEADING, table_columns, table_insets
+from app.rendering import TEXT_LEADING, segment_ink, table_columns, table_insets
 
 
 def color(value):
@@ -101,10 +101,17 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 if el.shape == "round":
                     obj.adjustments[0] = .12
             elif isinstance(el, Line):
-                obj = shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x, y, x+w, y+h)
+                start, end = el.endpoints(w, h)
+                obj = shapes.add_connector(MSO_CONNECTOR.STRAIGHT, round(x + start[0]), round(y + start[1]),
+                                           round(x + end[0]), round(y + end[1]))
                 obj.line.width = Pt(el.weight)
                 obj.line.color.rgb = color(el.color)
                 alpha(obj._element.spPr.ln.solidFill, el.opacity)
+                if el.arrows != "none":
+                    for side in ("headEnd", "tailEnd") if el.arrows == "both" else ("tailEnd",):
+                        arrow = OxmlElement(f"a:{side}")
+                        arrow.set("type", "triangle")
+                        obj._element.spPr.ln.append(arrow)
             elif isinstance(el, Image):
                 raw_image = io.BytesIO(get_asset(el.asset_id))
                 filled = slot_kind == "picture"
@@ -125,9 +132,9 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                         column.width = column_widths[j] if j < columns - 1 else w - sum(column_widths[:-1])
                 insets = [table_insets(el, cw.pt, h.pt / row_count) for cw in column_widths]
                 for i, row in enumerate(el.rows):
-                    fill, ink, _ = el.row_style(i)
                     rule = el.rule_after(i)
                     for j, value in enumerate(row):
+                        fill, ink = el.cell_style(i, j)
                         cell = obj.table.cell(i, j)
                         inset_x, inset_y = insets[j]
                         cell.text = value
@@ -158,7 +165,8 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                         "line": XL_CHART_TYPE.LINE, "pie": XL_CHART_TYPE.PIE}[el.chart]
                 filled = slot_kind == "chart"
                 obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
-                obj.chart.has_legend = len(el.series) > 1 or el.chart == "pie"
+                obj.chart.has_legend = (len(el.series) > 1 and not (el.chart == "stacked_column" and el.show_values)
+                                        or el.chart == "pie")
                 if el.palette or el.chart == "stacked_column":
                     style_native_chart(obj.chart, el)
                 elif el.chart not in {"line", "pie"}:
@@ -245,7 +253,24 @@ def style_native_chart(chart, element):
         labels.font.color.rgb = color(element.label_color)
     if element.chart == "stacked_column":
         chart.value_axis.minimum_scale = 0
-        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        if chart.has_legend:
+            chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        if element.show_values:
+            plot = chart.plots[0]
+            plot.has_data_labels = True
+            labels = plot.data_labels
+            labels.show_value = True
+            labels.position = XL_DATA_LABEL_POSITION.CENTER
+            decimals = ".00" if any(val % 1 for series in element.series for val in series.values) else ""
+            prefix = element.value_prefix.replace('"', '""')
+            labels.number_format = f'"{prefix}"#,##0{decimals}' if prefix else f"#,##0{decimals}"
+            labels.font.name = element.font
+            labels.font.size = Pt(12)
+            labels.font.bold = True
+            for index, series in enumerate(chart.series):
+                ink = color(segment_ink(palette[index % len(palette)]))
+                for point in series.points:
+                    point.data_label.font.color.rgb = ink
 
 
 def remove_sample_slides(presentation):
