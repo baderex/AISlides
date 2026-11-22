@@ -15,13 +15,24 @@
         [attr.aria-label]="el.type === 'text' ? el.text : el.type"
         (pointerdown)="root && pointerStart($event, el.id, false, canvas)"
         (dblclick)="root && editable() && el.type === 'text' && textEdit.emit(el.id)">
-        <div class="slide-content" [style.opacity]="el.opacity" [style.border]="el.border ? '1px solid ' + el.border : null">
+        <div class="slide-content" [style.opacity]="el.opacity"
+          [style.border]="el.border && (el.type !== 'shape' || el.shape !== 'diamond') ? '1px solid ' + el.border : null">
           @switch (el.type) {
             @case ('text') {
               <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="el.font" [style.color]="el.color"
                 [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">@for (run of textRuns(el); track $index) {<span [style.color]="run.color" [style.font-weight]="run.bold ? 700 : 400">{{ run.text }}</span>}</div>
             }
-            @case ('shape') { <div class="slide-shape" [class]="el.shape" [style.background]="el.fill" [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div> }
+            @case ('shape') {
+              @if (el.shape === 'diamond') {
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  <svg:polygon points="50,1 99,50 50,99 1,50" [attr.fill]="el.fill"
+                    [attr.stroke]="el.border" vector-effect="non-scaling-stroke" />
+                </svg>
+              } @else {
+                <div class="slide-shape" [class]="el.shape" [style.background]="el.fill"
+                  [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div>
+              }
+            }
             @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
             @case ('line') {
               <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-connector" aria-hidden="true">
@@ -60,12 +71,16 @@
                       }
                     </tr>
                   } @else {
-                    <tr [style.background]="el.focus_rows?.includes(rowIndex) ? el.focus_fill : null">
+                    @let focusRow = el.focus_rows?.includes(rowIndex);
+                    <tr [style.background]="focusRow ? el.focus_fill : null">
                       @for (cell of row; track $index) {
+                        @let focusCell = focusRow && el.focus_columns?.includes($index);
+                        @let negative = tableNegative(el, rowIndex, $index, cell);
                         <td [class.numeric-cell]="el.numeric_columns?.includes($index)"
                           [class.row-label]="$first && !el.numeric_columns?.includes($index)"
-                          [class.negative-value]="tableNegative(el, rowIndex, $index, cell)"
-                          [style.color]="tableNegative(el, rowIndex, $index, cell) ? el.negative_ink : null"
+                          [class.negative-value]="negative" [class.focus-value]="focusCell"
+                          [style.background]="focusCell ? el.focus_cell_fill : null"
+                          [style.color]="negative ? el.negative_ink : focusCell || (focusRow && $first) ? el.focus_ink : null"
                           [style.--cell-inset-x]="format.columns[$index].insetX">{{ cell }}</td>
                       }
                     </tr>
@@ -77,7 +92,7 @@
               @if (el.chart === 'pie') { <div class="slide-pie" [style.background]="pie(el)"></div> }
               @else {
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart"
-                  [class.labeled-line]="el.chart === 'line' && el.show_values" aria-hidden="true">
+                  [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values" aria-hidden="true">
                   @if (el.chart === 'stacked_column') {
                     @for (series of stackedColumns(el); track $index; let index = $index) {
                       @for (mark of series; track $index) {
@@ -90,12 +105,15 @@
                   @for (series of chart(el); track $index; let index = $index) {
                     @let color = chartColor(el, index);
                     @for (mark of series; track $index; let j = $index) {
+                      @let markColor = chartMarkColor(el, j, index);
                       @switch (el.chart) {
-                        @case ('bar') { <svg:rect [attr.x]="mark.bx" [attr.y]="mark.by + mark.horizontal * index" [attr.width]="mark.bw" [attr.height]="mark.horizontal * .8" [attr.fill]="color" /> }
-                        @case ('column') { <svg:rect [attr.x]="mark.x + mark.w * 1.17 * index" [attr.y]="mark.y" [attr.width]="mark.w" [attr.height]="mark.h" [attr.fill]="color" /> }
+                        @case ('bar') { <svg:rect [attr.x]="mark.bx" [attr.y]="mark.by + mark.horizontal * index" [attr.width]="mark.bw" [attr.height]="mark.horizontal * .8" [attr.fill]="markColor" /> }
+                        @case ('column') { <svg:rect [attr.x]="mark.x + mark.w * 1.17 * index" [attr.y]="mark.y" [attr.width]="mark.w" [attr.height]="mark.h" [attr.fill]="markColor" /> }
                         @case ('line') {
-                          @if (j > 0) { <svg:line [attr.x1]="series[j-1].cx" [attr.y1]="series[j-1].cy" [attr.x2]="mark.cx" [attr.y2]="mark.cy" [attr.stroke]="color" stroke-width="2" vector-effect="non-scaling-stroke" /> }
-                          <svg:circle [attr.cx]="mark.cx" [attr.cy]="mark.cy" r="1" [attr.fill]="color" />
+                          @if (j > 0) { <svg:line [attr.x1]="series[j-1].cx" [attr.y1]="series[j-1].cy" [attr.x2]="mark.cx" [attr.y2]="mark.cy" [attr.stroke]="el.context_color || color" stroke-width="2" vector-effect="non-scaling-stroke" /> }
+                          <svg:line [attr.x1]="mark.cx" [attr.y1]="mark.cy" [attr.x2]="mark.cx" [attr.y2]="mark.cy"
+                            [attr.stroke]="markColor" [attr.stroke-width]="el.highlight === j ? 9 : 5"
+                            stroke-linecap="round" vector-effect="non-scaling-stroke" />
                         }
                       }
                     }
@@ -114,16 +132,25 @@
                     }
                   }
                 }
-                @if (el.chart === 'line' && el.show_values && el.series.length === 1) {
+                @if (el.show_values && el.series.length === 1 && el.chart !== 'stacked_column') {
                   @for (mark of chart(el)[0]; track $index) {
-                    <span class="chart-point-value" [style.left.%]="mark.cx" [style.top.%]="mark.cy"
-                      [style.font-family]="el.font" [style.color]="el.label_color" [style.font-size]="font(14)">
+                    @let horizontal = el.chart === 'bar';
+                    @let line = el.chart === 'line';
+                    <span class="chart-point-value" [class.chart-value-side]="horizontal" [class.chart-value-negative]="mark.negative && !line"
+                      [style.left.%]="horizontal ? mark.bx + (mark.negative ? 0 : mark.bw) : line ? mark.cx : mark.x + mark.w / 2"
+                      [style.top.%]="horizontal ? mark.by + mark.horizontal * .4 : line ? mark.cy : mark.y + (mark.negative ? mark.h : 0)"
+                      [style.font-family]="el.font" [style.color]="el.highlight === $index ? chartColor(el, 0) : el.label_color"
+                      [style.font-size]="font(line ? 14 : 12)">
                       {{ chartPointValue(el, $index) }}
                     </span>
+                    @if (horizontal) {
+                      <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * .4"
+                        [style.font-family]="el.font" [style.color]="el.label_color" [style.font-size]="font(11)">{{ el.categories[$index] }}</span>
+                    }
                   }
                 }
                 @if (el.chart !== 'bar') {
-                  <div class="chart-labels" [class.labeled-line]="el.chart === 'line' && el.show_values"
+                  <div class="chart-labels" [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values"
                     [style.font-family]="el.font" [style.color]="el.label_color"
                     [style.font-size]="font(el.chart === 'stacked_column' || el.show_values ? 13 : 10)"
                     [style.font-weight]="el.chart === 'stacked_column' ? 700 : null">

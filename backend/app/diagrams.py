@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 
 from app.design import blend, readable
-from app.domain import ConnectorAnchor, Contract, Line, Shape
+from app.domain import ConnectorAnchor, Contract, Identifier, Line, Shape
 
 
 class DiagramNode(Contract):
@@ -35,6 +35,141 @@ class DiagramLane(Contract):
 class Diagram(Contract):
     lanes: list[DiagramLane] = Field(min_length=1, max_length=2)
     recap: str = Field(default="", max_length=160)
+
+
+class SwimlaneNode(Contract):
+    id: Identifier
+    label: Annotated[str, Field(min_length=1, max_length=36)]
+    lane: int = Field(ge=0, le=2, description="Zero-based index into the lane names.")
+    column: int = Field(ge=0, le=3, description="Zero-based horizontal position within the lane.")
+    decision: bool = False
+
+
+class SwimlaneEdge(Contract):
+    source: Identifier
+    target: Identifier
+    label: str = Field(default="", max_length=32)
+    emphasis: bool = False
+
+
+class Swimlane(Contract):
+    lanes: list[Annotated[str, Field(min_length=1, max_length=18)]] = Field(min_length=2, max_length=3)
+    nodes: list[SwimlaneNode] = Field(min_length=2, max_length=12)
+    edges: list[SwimlaneEdge] = Field(min_length=1, max_length=14)
+
+    @model_validator(mode="after")
+    def routes_fit(self):
+        nodes = {node.id: node for node in self.nodes}
+        cells = {(node.lane, node.column) for node in self.nodes}
+        if len(nodes) != len(self.nodes) or len(cells) != len(nodes):
+            raise ValueError("Assign unique node IDs and use each lane/column cell at most once")
+        names = {lane.strip().casefold() for lane in self.lanes}
+        if len(names) != len(self.lanes) or "" in names:
+            raise ValueError("Give every lane a distinct name")
+        if any(lane >= len(self.lanes) for lane, _ in cells):
+            raise ValueError("Each node must use an existing lane")
+        seen = set()
+        for edge in self.edges:
+            pair = frozenset((edge.source, edge.target))
+            if len(pair) != 2 or not pair <= nodes.keys() or pair in seen:
+                raise ValueError("Each connector must join two distinct nodes and use a distinct route")
+            seen.add(pair)
+            start, end = nodes[edge.source], nodes[edge.target]
+            first_col, last_col = sorted((start.column, end.column))
+            first_lane, last_lane = sorted((start.lane, end.lane))
+            if start.lane == end.lane:
+                blocked = any((start.lane, col) in cells for col in range(first_col + 1, last_col))
+            elif start.column == end.column:
+                blocked = any((lane, start.column) in cells for lane in range(first_lane + 1, last_lane))
+            else:
+                blocked = last_col - first_col > 1
+            if blocked:
+                raise ValueError("Keep same-row/column routes clear and use adjacent columns for diagonal handoffs")
+        return self
+
+
+def draw_swimlane(elements, diagram, body_top, theme, background, label):
+    ink = readable(theme.ink, background)
+    accent = readable(theme.accent, background, ink)
+    muted = readable(theme.muted, background, ink)
+    rail = blend(background, ink, .19)
+    left, right, gutter, bottom = .07, .93, .233, .925
+    row = (bottom - body_top) / len(diagram.lanes)
+    column = (right - gutter) / (max(node.column for node in diagram.nodes) + 1)
+
+    def centered_label(value, x, center_y, w, max_h, preferred, minimum, color, **options):
+        if value.strip():
+            label(value, x, center_y - max_h/2, w, max_h, preferred, minimum, color, **options)
+            text = elements[-1]
+            text.y = center_y - text.h/2
+
+    for i, name in enumerate(diagram.lanes):
+        top = body_top + i * row
+        header = blend(background, theme.accent, .11 if i == 0 else .06)
+        elements.extend((
+            Shape(x=left, y=top, w=gutter-left, h=row, fill=header, z=-6),
+            Shape(x=gutter, y=top, w=right-gutter, h=row, fill=blend(background, ink, .018 * i), z=-6),
+            Shape(x=left, y=top, w=right-left, h=.002, fill=rail, z=-5),
+        ))
+        centered_label(name, left + .016, top + row / 2, gutter-left-.032, .078, 17, 10,
+                       readable(ink, header), bold=True, keep_words=True)
+    elements.append(Shape(x=left, y=bottom, w=right-left, h=.002, fill=rail, z=-5))
+
+    boxes = {}
+    lane_by_node = {}
+    for node in diagram.nodes:
+        w, h = min(.238, column * .59), min(row * .54, .153 if node.decision else .125)
+        cx, cy = gutter + (node.column + .5) * column, body_top + (node.lane + .5) * row
+        box = Shape(x=cx - w/2, y=cy - h/2, w=w, h=h,
+                    shape="diamond" if node.decision else "rect",
+                    fill=blend(background, theme.accent, .10) if node.decision else background,
+                    border=accent if node.decision else blend(background, ink, .43), z=-2)
+        boxes[node.id] = box
+        lane_by_node[node.id] = node.lane
+        elements.append(box)
+        inset = .22 if node.decision else .08
+        centered_label(node.label, box.x + w*inset, cy, w*(1-2*inset), min(.093, h*.65),
+                       15, 9, readable(ink, box.fill), bold=True, keep_words=True, align="center")
+
+    for edge in diagram.edges:
+        start, end = boxes[edge.source], boxes[edge.target]
+        x1, x2 = start.x + start.w/2, end.x + end.w/2
+        y1, y2 = start.y + start.h/2, end.y + end.h/2
+        shade = accent if edge.emphasis else muted
+        elbow = False
+        if abs(x1-x2) < .00001:
+            down = y1 < y2
+            y1, y2 = (start.y + start.h, end.y) if down else (start.y, end.y + end.h)
+            direction = "down" if down else "up"
+            ports = ("bottom", "top") if down else ("top", "bottom")
+            x, y, w, h = x1 - .006, min(y1, y2), .012, abs(y2-y1)
+            divider = body_top + (min(lane_by_node[edge.source], lane_by_node[edge.target]) + 1) * row
+            text_h = min(.065, divider - y - .009)
+            if right - x1 >= .15:
+                label_box = (x1 + .013, divider - text_h - .006, min(.24, right-x1-.014), text_h)
+                align = "left"
+            else:
+                label_box = (x1 - .214, divider - text_h - .006, .20, text_h)
+                align = "right"
+        else:
+            forward = x1 < x2
+            x1, x2 = (start.x + start.w, end.x) if forward else (start.x, end.x + end.w)
+            direction = "right" if forward else "left"
+            ports = ("right", "left") if forward else ("left", "right")
+            x, w = min(x1, x2), abs(x2-x1)
+            elbow = abs(y1-y2) > .00001
+            if elbow:
+                y, h = min(y1, y2), abs(y2-y1)
+                direction = "diagonal"
+            else:
+                y, h = y1 - .006, .012
+            label_box = (x + .003, y1 - .063, w - .006, .054)
+            align = "center"
+        elements.append(Line(x=x, y=y, w=w, h=h, direction=direction, route="elbow" if elbow else "straight",
+                             start_anchor=ConnectorAnchor(shape_id=start.id, side=ports[0]),
+                             end_anchor=ConnectorAnchor(shape_id=end.id, side=ports[1]),
+                             arrows="end", color=shade, weight=1.75 if edge.emphasis else 1.2, z=-3))
+        label(edge.label, *label_box, 12, 8, shade, bold=edge.emphasis, align=align)
 
 
 def draw_diagram(elements, diagram, body_top, theme, background, label, *, compact, vertical_flow=False):

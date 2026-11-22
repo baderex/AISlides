@@ -361,7 +361,7 @@ def contrast(first, second):
 
 def chart_marks(el: Chart, w: float, h: float):
     values = [v for series in el.series for v in series.values]
-    high, low = max(0, *values), min(0, *values)
+    low, high = el.value_bounds()
     span = high - low or 1
     band = w / len(el.categories)
     shades = el.colors()
@@ -390,24 +390,36 @@ def chart_marks(el: Chart, w: float, h: float):
             pos = h * (high - value) / span
             if el.chart == "bar":
                 thickness = h / len(el.categories) * .72 / len(el.series)
-                zero = w * -low / span
-                end = w * (value - low) / span
-                yield ("rect", shades[si % len(shades)], (min(zero, end), i * h / len(el.categories) + thickness * si, abs(end - zero), thickness * .8))
+                inset = w * .24 if el.show_values else 0
+                zero = inset + (w - inset) * -low / span
+                end = inset + (w - inset) * (value - low) / span
+                y = i * h / len(el.categories) + thickness * si
+                yield ("rect", el.mark_color(i, si), (min(zero, end), y, abs(end - zero), thickness * .8))
             elif el.chart == "column":
                 thickness = band * .76 / len(el.series)
-                yield ("rect", shades[si % len(shades)], (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
+                yield ("rect", el.mark_color(i, si), (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
             else:
-                if el.show_values and el.chart == "line":
+                if el.show_values and el.highlight is None:
                     pos = h * .13 + pos * .82
                 points.append((band * (i + .5), pos))
         if el.chart == "line" and points:
-            yield ("line", shades[si % len(shades)], points)
+            yield ("line", el.context_color or shades[si % len(shades)], points)
 
 
 def chart_values(element, points):
     if element.show_values and len(element.series) == 1:
-        for value, (x, y) in zip(element.series[0].values, points):
-            yield display_value(value, element.value_prefix), x, y
+        for i, (value, (x, y)) in enumerate(zip(element.series[0].values, points)):
+            focus = i == element.highlight
+            yield display_value(value, element.value_prefix), x, y, element.mark_color(i), focus
+
+
+def bar_value_position(element, index, geometry, gap):
+    x, y, w, h = geometry
+    value = element.series[0].values[index]
+    text = display_value(value, element.value_prefix)
+    if element.chart == "bar":
+        return text, x + w + gap if value >= 0 else x - gap, y + h / 2, "lm" if value >= 0 else "rm"
+    return text, x + w / 2, y - gap if value >= 0 else y + h + gap, "mb" if value >= 0 else "mt"
 
 
 def stacked_labels(element):
@@ -422,19 +434,24 @@ def segment_ink(color):
     return "#FFFFFF" if contrast(color, "#FFFFFF") >= 4.5 else "#000000"
 
 
-def arrowheads(line, start, end, size):
+def arrowheads(line, points, size):
     if line.arrows == "none":
         return
-    dx, dy = end[0] - start[0], end[1] - start[1]
-    length = hypot(dx, dy)
-    if length:
+    pairs = [(a, b) for a, b in zip(points, points[1:]) if a != b]
+    if not pairs:
+        return
+    tips = [pairs[-1]]
+    if line.arrows == "both":
+        a, b = pairs[0]
+        tips.append((b, a))
+    for start, end in tips:
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = hypot(dx, dy)
         ux, uy = dx / length, dy / length
         depth = min(size, length / (2 if line.arrows == "both" else 1))
-        tips = [(end, 1), (start, -1)] if line.arrows == "both" else [(end, 1)]
-        for tip, direction in tips:
-            base_x, base_y = tip[0] - direction * depth * ux, tip[1] - direction * depth * uy
-            yield (tip, (base_x - uy * depth * .45, base_y + ux * depth * .45),
-                   (base_x + uy * depth * .45, base_y - ux * depth * .45))
+        base_x, base_y = end[0] - depth * ux, end[1] - depth * uy
+        yield (end, (base_x - uy * depth * .45, base_y + ux * depth * .45),
+               (base_x + uy * depth * .45, base_y - ux * depth * .45))
 
 
 def connector_points(line, x, y, width, height, nodes):
@@ -446,6 +463,10 @@ def connector_points(line, x, y, width, height, nodes):
         nx, ny, nw, nh = nodes[anchor.shape_id]
         dx, dy = {"top": (.5, 0), "left": (0, .5), "bottom": (.5, 1), "right": (1, .5)}[anchor.side]
         points[index] = nx + nw * dx, ny + nh * dy
+    if line.route == "elbow":
+        a, b = points
+        middle = (a[0] + b[0]) / 2
+        return [a, (middle, a[1]), (middle, b[1]), b]
     return points
 
 
@@ -479,6 +500,8 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
         elif isinstance(el, Shape):
             if el.shape == "triangle":
                 draw.polygon([(w/2, 0), (w-1, h-1), (0, h-1)], fill=el.fill, outline=el.border)
+            elif el.shape == "diamond":
+                draw.polygon([(w/2, 0), (w-1, h/2), (w/2, h-1), (0, h/2)], fill=el.fill, outline=el.border)
             elif el.shape == "ellipse":
                 draw.ellipse((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
             elif el.shape == "round":
@@ -486,7 +509,7 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             else:
                 draw.rectangle((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
         elif isinstance(el, Line):
-            if el.start_anchor or el.end_anchor:
+            if el.start_anchor or el.end_anchor or el.route == "elbow":
                 points = connector_points(el, nx, ny, nw, nh, nodes)
                 pixels = [(round(px * bounds[0]), round(py * bounds[1])) for px, py in points]
                 margin = max(1, round(max(6, el.weight * 3.5) * scale))
@@ -496,11 +519,11 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                 h = max(py for _, py in pixels) - y + margin + 1
                 layer = PILImage.new("RGBA", (w, h))
                 draw = ImageDraw.Draw(layer)
-                start, end = [(px - x, py - y) for px, py in pixels]
+                line_points = [(px - x, py - y) for px, py in pixels]
             else:
-                start, end = el.endpoints(w - 1, h - 1)
-            draw.line((start, end), fill=el.color, width=max(1, round(el.weight * scale)))
-            for tip in arrowheads(el, start, end, max(6, el.weight * 3.5) * scale):
+                line_points = el.endpoints(w - 1, h - 1)
+            draw.line(line_points, fill=el.color, width=max(1, round(el.weight * scale)))
+            for tip in arrowheads(el, line_points, max(6, el.weight * 3.5) * scale):
                 draw.polygon(tip, fill=el.color)
         elif isinstance(el, Image):
             try:
@@ -544,9 +567,10 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                     table_draw.line((0, rule_y, width, rule_y), fill=shade, width=stroke)
             layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
-            plot_h = h * .87
+            plot_h = h * (.96 if el.chart == "bar" and el.show_values else .87)
             segment_labels = iter(stacked_labels(el))
-            for kind, color, dims in chart_marks(el, w, plot_h):
+            bar_labels = el.show_values and len(el.series) == 1 and el.chart in {"bar", "column"}
+            for index, (kind, color, dims) in enumerate(chart_marks(el, w, plot_h)):
                 if kind == "rect":
                     rx, ry, rw, rh = dims
                     draw.rectangle((rx, ry, rx+rw, ry+rh), fill=color)
@@ -554,16 +578,23 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                         face = font(max(1, round(12 * scale)), True, el.font)
                         if face.getlength(value) <= rw and rh >= 13 * scale:
                             draw.text((rx + rw / 2, ry + rh / 2), value, fill=segment_ink(color), font=face, anchor="mm")
+                    if bar_labels:
+                        value, px, py, anchor = bar_value_position(el, index, dims, 4 * scale)
+                        draw.text((px, py), value, fill=color if index == el.highlight else el.label_color,
+                                  font=font(max(1, round(12 * scale)), True, el.font), anchor=anchor)
+                        if el.chart == "bar":
+                            draw.text((w * .22, py), el.categories[index][:20], fill=el.label_color,
+                                      font=font(max(1, round(11 * scale)), False, el.font), anchor="rm")
                 elif kind == "pie":
                     cx, cy, radius, begin, sweep = dims
                     draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color)
                 else:
                     if len(dims) > 1:
                         draw.line(dims, fill=color, width=max(2, round(2 * scale)))
-                    for value, px, py in chart_values(el, dims):
-                        radius = 3 * scale
-                        draw.ellipse((px-radius, py-radius, px+radius, py+radius), fill=color)
-                        draw.text((px, py - 7 * scale), value, fill=el.label_color,
+                    for value, px, py, shade, focus in chart_values(el, dims):
+                        radius = (5 if focus else 3) * scale
+                        draw.ellipse((px-radius, py-radius, px+radius, py+radius), fill=shade)
+                        draw.text((px, py - (9 if focus else 7) * scale), value, fill=shade if focus else el.label_color,
                                   font=font(max(1, round(14 * scale)), True, el.font), anchor="mb")
             if el.chart not in {"pie", "bar"}:
                 stacked = el.chart == "stacked_column"
@@ -629,11 +660,16 @@ def to_pdf(document: Document, get_asset) -> bytes:
                     pdf.ellipse(0, 0, w, h, stroke=int(bool(el.border)), fill=1)
                 elif el.shape == "round":
                     pdf.roundRect(0, 0, w, h, min(w,h)*.12, stroke=int(bool(el.border)), fill=1)
-                elif el.shape == "triangle":
+                elif el.shape in {"triangle", "diamond"}:
                     path = pdf.beginPath()
                     path.moveTo(w/2, h)
-                    path.lineTo(w, 0)
-                    path.lineTo(0, 0)
+                    if el.shape == "diamond":
+                        path.lineTo(w, h/2)
+                        path.lineTo(w/2, 0)
+                        path.lineTo(0, h/2)
+                    else:
+                        path.lineTo(w, 0)
+                        path.lineTo(0, 0)
                     path.close()
                     pdf.drawPath(path, stroke=int(bool(el.border)), fill=1)
                 else:
@@ -643,14 +679,15 @@ def to_pdf(document: Document, get_asset) -> bytes:
             elif isinstance(el, Line):
                 pdf.setStrokeColor(HexColor(el.color))
                 pdf.setLineWidth(el.weight)
-                if el.start_anchor or el.end_anchor:
+                if el.start_anchor or el.end_anchor or el.route == "elbow":
                     points = connector_points(el, nx, ny, nw, nh, nodes)
-                    start, end = [((px - nx) * width, (py - ny) * height) for px, py in points]
+                    line_points = [((px - nx) * width, (py - ny) * height) for px, py in points]
                 else:
-                    start, end = el.endpoints(w, h)
-                pdf.line(start[0], h - start[1], end[0], h - end[1])
+                    line_points = el.endpoints(w, h)
+                for start, end in zip(line_points, line_points[1:]):
+                    pdf.line(start[0], h - start[1], end[0], h - end[1])
                 pdf.setFillColor(HexColor(el.color))
-                for tip in arrowheads(el, start, end, max(6, el.weight * 3.5)):
+                for tip in arrowheads(el, line_points, max(6, el.weight * 3.5)):
                     path = pdf.beginPath()
                     path.moveTo(tip[0][0], h - tip[0][1])
                     for px, py in tip[1:]:
@@ -698,9 +735,10 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         pdf.setLineWidth(weight)
                         pdf.line(0, rule_y, w, rule_y)
             elif isinstance(el, Chart):
-                plot_h = .87*h
+                plot_h = h * (.96 if el.chart == "bar" and el.show_values else .87)
                 segment_labels = iter(stacked_labels(el))
-                for kind, color, dims in chart_marks(el, w, plot_h):
+                bar_labels = el.show_values and len(el.series) == 1 and el.chart in {"bar", "column"}
+                for index, (kind, color, dims) in enumerate(chart_marks(el, w, plot_h)):
                     pdf.setFillColor(HexColor(color))
                     pdf.setStrokeColor(HexColor(color))
                     if kind == "rect":
@@ -712,6 +750,20 @@ def to_pdf(document: Document, get_asset) -> bytes:
                                 pdf.setFont(face, 12)
                                 pdf.setFillColor(HexColor(segment_ink(color)))
                                 pdf.drawCentredString(rx + rw / 2, h - ry - rh / 2 - 4, value)
+                        if bar_labels:
+                            value, px, py, anchor = bar_value_position(el, index, dims, 4)
+                            pdf.setFont(pdf_face(el.font, True), 12)
+                            pdf.setFillColor(HexColor(color if index == el.highlight else el.label_color))
+                            if anchor == "lm":
+                                pdf.drawString(px, h - py - 4, value)
+                            elif anchor == "rm":
+                                pdf.drawRightString(px, h - py - 4, value)
+                            else:
+                                pdf.drawCentredString(px, h - py - (10 if anchor == "mt" else 0), value)
+                            if el.chart == "bar":
+                                pdf.setFont(pdf_face(el.font, False), 11)
+                                pdf.setFillColor(HexColor(el.label_color))
+                                pdf.drawRightString(w * .22, h - py - 4, el.categories[index][:20])
                     elif kind == "pie":
                         cx, cy, radius, begin, sweep = dims
                         pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=0, fill=1)
@@ -719,12 +771,12 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         pdf.setLineWidth(2 if el.show_values else 1)
                         for (x1, y1), (x2, y2) in zip(dims, dims[1:]):
                             pdf.line(x1, h-y1, x2, h-y2)
-                        for value, px, py in chart_values(el, dims):
-                            pdf.setFillColor(HexColor(color))
-                            pdf.circle(px, h-py, 3, stroke=0, fill=1)
-                            pdf.setFillColor(HexColor(el.label_color))
+                        for value, px, py, shade, focus in chart_values(el, dims):
+                            pdf.setFillColor(HexColor(shade))
+                            pdf.circle(px, h-py, 5 if focus else 3, stroke=0, fill=1)
+                            pdf.setFillColor(HexColor(shade if focus else el.label_color))
                             pdf.setFont(pdf_face(el.font, True), 14)
-                            pdf.drawCentredString(px, h-py+8, value)
+                            pdf.drawCentredString(px, h-py+(10 if focus else 8), value)
                 if el.chart not in {"pie", "bar"}:
                     stacked = el.chart == "stacked_column"
                     if stacked:

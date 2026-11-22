@@ -7,7 +7,7 @@ from pydantic_core import PydanticCustomError
 from app.branding import choose_layout, compose_branded
 from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
 from app.design import blend, readable, style_chart, style_slide_tables
-from app.diagrams import Diagram, draw_diagram
+from app.diagrams import Diagram, Swimlane, draw_diagram, draw_swimlane
 from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Recipe, Series, Shape, ShortText,
                         Slide, Table, Text, Theme, display_value)
 from app.lucide import ICON_NAMES
@@ -36,10 +36,10 @@ class PlanningResponse(Contract):
     model_config = ConfigDict(extra="ignore", json_schema_extra={"additionalProperties": False})
 
 
-Exhibit = Literal["cover_callout", "stacked_comparison", "allocation", "rollout", "decision", "diagram", "readout"]
+Exhibit = Literal["cover_callout", "stacked_comparison", "allocation", "rollout", "decision", "diagram", "swimlane", "readout"]
 EXHIBIT_LAYOUTS: dict[Exhibit, Layout] = {
     "cover_callout": "cover", "stacked_comparison": "chart", "allocation": "metrics",
-    "rollout": "timeline", "decision": "closing", "diagram": "process", "readout": "metrics",
+    "rollout": "timeline", "decision": "closing", "diagram": "process", "swimlane": "process", "readout": "metrics",
 }
 
 
@@ -100,6 +100,11 @@ class Outline(PlanningResponse):
 def planned_exhibit(item: OutlineItem, has_evidence: bool, *, prefer_diagrams: bool = False,
                     supplied_breakdown: bool = False) -> Exhibit | None:
     description = f"{item.title} {item.purpose} {' '.join(item.required_details)}".lower()
+    if item.recipe == "diagram_swimlane" or (
+        item.layout in {"summary", "process", "comparison", "showcase", "editorial"}
+        and re.search(r"\bswim[ -]?lanes?\b", description)
+    ):
+        return "swimlane"
     if item.exhibit and item.exhibit != "diagram":
         approval = r"\b(approve|approval|authorize|authorization|endorse|endorsement|funding request|request for funding)\b"
         if item.exhibit == "cover_callout" and not re.search(approval, f"{item.title} {item.purpose}", re.I):
@@ -168,6 +173,20 @@ class ChartContent(Contract):
     values: list[float] = Field(min_length=1, max_length=10)
     label: ShortText
     chart: Literal["column", "bar", "line", "pie"] = "column"
+    highlight: int | None = Field(default=None, ge=0, description="Zero-based index of the one category that supports the slide takeaway.")
+    compare_to: int | None = Field(default=None, ge=0, description="Zero-based index of a comparable baseline for the highlighted category.")
+    value_prefix: str = Field(default="", max_length=8)
+    value_suffix: str = Field(default="", max_length=8)
+
+    def comparison_label(self, highlight: int | None) -> str:
+        baseline = self.compare_to
+        if highlight is None or baseline is None or baseline == highlight or baseline >= len(self.values):
+            return ""
+        change = round(self.values[highlight] - self.values[baseline], 2)
+        if not change or len(self.categories[baseline]) > 22:
+            return ""
+        sign = "+" if change > 0 else "−"
+        return f"{sign}{display_value(abs(change), self.value_prefix)}{self.value_suffix} vs {self.categories[baseline]}"
 
 
 class StackedComparison(Contract):
@@ -266,9 +285,12 @@ class SlideContent(Contract):
     decision: Decision | None = None
     cover_callout: CoverCallout | None = None
     diagram: Diagram | None = None
+    swimlane: Swimlane | None = None
     readout: Readout | None = None
     table_focus: list[ShortText] = Field(default_factory=list, max_length=4,
                                        description="Exact first-column labels for the selected or key data rows.")
+    table_focus_columns: list[ShortText] = Field(default_factory=list, max_length=3,
+                                                description="Exact headers of criteria that justify the selection in table_focus.")
     next_step: str = Field(default="", max_length=145)
 
     @model_validator(mode="after")
@@ -359,6 +381,8 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
 def select_layout(item, content, document, images, *, data_driven, allow_variants):
     role = item.layout
     if allow_variants:
+        if content.swimlane and role in {"summary", "process", "comparison", "showcase", "editorial"}:
+            return "process"
         if role == "section" and content.points:
             return "summary"
         if content.decision and role in {"summary", "closing"}:
@@ -559,6 +583,9 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     else:
         label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
         label(content.subtitle, .07, .352, .86, .08, 17, muted)
+    if rules and recipe == "diagram_swimlane" and content.swimlane:
+        draw_swimlane(elements, content.swimlane, body_top, t, bg, fitted_label)
+        return slide
     if rules and content.diagram and item.layout in {"process", "summary", "comparison", "showcase"} and (
             recipe != "standard" or not points):
         draw_diagram(elements, content.diagram, body_top, t, bg, fitted_label, compact=compact,
@@ -686,11 +713,15 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         rows = [[cell[:180] for cell in row] for row in content.table]
         focus = {value.strip().casefold() for value in content.table_focus[:2]} if rules else set()
         selected = [i for i, row in enumerate(rows[1:], 1) if row[0].strip().casefold() in focus]
-        if len(selected) == len(rows) - 1:
+        criteria = {value.strip().casefold() for value in content.table_focus_columns}
+        focus_columns = [i for i, header in enumerate(content.table[0][1:], 1)
+                         if header.strip().casefold() in criteria] if selected else []
+        if len(selected) == len(rows) - 1 and not focus_columns:
             selected = []
         full = recipe == "dense_table_full"
         elements.append(Table(x=.055 if full else .07, y=.446 if full else .46, w=.89 if full else .86,
-                              h=.50 if full else .44, rows=rows, color=t.ink, fill=t.surface, focus_rows=selected))
+                              h=.50 if full else .44, rows=rows, color=t.ink, fill=t.surface,
+                              focus_rows=selected, focus_columns=focus_columns))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
         if web_image_ratio or image_ratio:
@@ -707,18 +738,27 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 label(point.body, .07, y + .07, .43, .125, 16, muted)
     elif item.layout == "chart" and slide.source_ids and content.chart_ready:
         data = content.chart
-        direct_labels = bool(rules and data.chart == "line" and len(data.values) <= 6)
+        direct_labels = bool(rules and data.chart != "pie" and len(data.values) <= 6)
         has_external_source = any(source.url and source.id in slide.source_ids for source in document.sources)
         has_table = data_driven and (not direct_labels or has_external_source)
+        highlight = data.highlight if direct_labels and data.highlight is not None and data.highlight < len(data.values) else None
+        callout = data.comparison_label(highlight)
+        chart_width = .54 if has_table else .86
+        show_caption = data_driven or bool(callout)
         try:
-            elements.append(Chart(x=.07, y=.51 if data_driven else .45, w=.54 if has_table else .86,
-                                  h=.39 if data_driven else .46, categories=data.categories, show_values=direct_labels,
-                                  series=[{"name": data.label, "values": data.values}], chart=data.chart, color=t.accent))
+            elements.append(Chart(x=.07, y=.52 if callout else .51 if show_caption else .45, w=chart_width,
+                                  h=.39 if show_caption else .46, categories=data.categories, show_values=direct_labels,
+                                  highlight=highlight, series=[{"name": data.label, "values": data.values}],
+                                  chart=data.chart, color=t.accent))
         except ValueError:
             slide.warnings.append("The chart data could not be rendered.")
         else:
-            if data_driven:
-                label(data.label, .07, .45, .86 if direct_labels else .54, .05, 15, ink)
+            if show_caption:
+                caption_width = chart_width * .58 if callout else chart_width
+                fitted_label(data.label, .07, .45, caption_width, .066, 15, 10, ink)
+            if callout:
+                fitted_label(callout, .08 + caption_width, .443, chart_width - caption_width - .01,
+                             .073, 20, 11, accent, bold=True, align="right")
             if has_table:
                 rows = [["Category", "Value"], *[[category, f"{value:,.8g}"]
                         for category, value in zip(data.categories, data.values)]]

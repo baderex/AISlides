@@ -32,6 +32,8 @@ def recipe_options(part, content, document):
         if re.search(r"\b(luxur\w*|premium|dramatic|expressive)\b", theme.design.mood, re.I):
             return ["closing_centered", "closing_display"]
         return ["closing_display", "closing_centered"]
+    if content.swimlane and part.layout in {"summary", "process", "comparison", "showcase", "editorial"}:
+        return ["diagram_swimlane"]
     if content.diagram:
         lanes = content.diagram.lanes
         if len(lanes) == 1 and lanes[0].kind == "flow" and len(lanes[0].nodes) > 2:

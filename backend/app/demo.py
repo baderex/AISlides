@@ -100,6 +100,15 @@ def demo_response(schema: str, data: dict) -> dict:
             points = [("What matters", "Identify the main problem, who it affects, and what would count as a meaningful improvement."),
                       ("What to validate", "Compare assumptions with available evidence and document open questions."),
                       ("What happens next", "Choose one practical next step with a clear owner and a review date.")]
+        if data.get("required_exhibit") == "swimlane":
+            return {"title": title, "swimlane": {
+                "lanes": ["Requester", "Reviewer"],
+                "nodes": [{"id": "request", "label": "Send request", "lane": 0, "column": 0},
+                          {"id": "review", "label": "Review request", "lane": 1, "column": 0},
+                          {"id": "result", "label": "Share decision", "lane": 1, "column": 1}],
+                "edges": [{"source": "request", "target": "review", "label": "Request"},
+                          {"source": "review", "target": "result"}],
+            }}
         if data.get("required_exhibit") == "diagram":
             return {"title": title, "diagram": {"lanes": [{"nodes": [
                 {"label": name[:46], "detail": body[:90]} for name, body in points

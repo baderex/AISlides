@@ -3,16 +3,16 @@ import io
 from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader
-from pytest import raises
+from pytest import mark, raises
 
 from app.composition import OutlineItem, SlideContent
 from app.design import enforce_constraints, explicit_constraints
-from app.domain import DesignRules, Document, Shape, Source, Text, TextSpan, Theme
+from app.domain import Chart, DesignRules, Document, Shape, Source, Table, Text, TextSpan, Theme
 from app.edits import ChangeText, ChatRequest, EditProposal, Restyle, RestyleDirection, apply, propose
 from app.evidence import resolve_headline
 from app.powerpoint import to_pptx
 from app.providers import Intelligence
-from app.rendering import preview, to_pdf
+from app.rendering import contrast, preview, to_pdf
 from app.slide_design import build_slide, review_layouts
 
 
@@ -51,8 +51,24 @@ def test_quarterly_chart_and_signed_recovery_use_supplied_evidence():
     revenue = SlideContent(title=plan.title, chart={
         "label": "Revenue", "chart": "line", "categories": ["Q1", "Q2", "Q3", "Q4"], "values": [30, 34, 31, 83],
     })
-    assert resolve_headline(plan, revenue, evidence, []).title == "Revenue rebounds to $38m in Q4"
+    source = Source(id="brief", title="Brief", excerpt=evidence)
+    revenue.source_ids = [source.id]
+    plan = resolve_headline(plan, revenue, evidence, [source])
+    assert plan.title == "Revenue rebounds to $38m in Q4"
     assert revenue.chart.values == [30, 34, 31, 38]
+    deck = themed_document(sources=[source])
+    slide = build_slide(plan, revenue, deck, 0, set(), data_driven=True)
+    chart = next(element for element in slide.elements if isinstance(element, Chart))
+    assert chart.highlight == 3
+    assert chart.mark_color(3) != chart.mark_color(2)
+    deck.slides = [slide]
+    ppt = Presentation(io.BytesIO(to_pptx(deck, lambda _: None)))
+    native = next(shape.chart for shape in ppt.slides[0].shapes if shape.has_chart)
+    assert list(native.series[0].values) == [30, 34, 31, 38]
+    assert native.plots[0].data_labels.show_value
+    assert native.series[0].points[3].marker.size > native.series[0].points[2].marker.size
+    assert any(shape.has_text_frame and shape.text == "+$7m vs Q3" for shape in ppt.slides[0].shapes)
+    assert "+$7m vs Q3" in PdfReader(io.BytesIO(to_pdf(deck, lambda _: None))).pages[0].extract_text()
     plan = OutlineItem(title="Financial readout", layout="metrics")
     results = SlideContent(title=plan.title, readout={"metrics": [
         {"title": "Q3 Operating Profit", "value": "$1m"},
@@ -62,6 +78,57 @@ def test_quarterly_chart_and_signed_recovery_use_supplied_evidence():
     assert resolve_headline(plan, results, evidence, []).title == "Operating profit rebounds from −$1m to $4m"
     assert results.readout.metrics[0].value == "−$1m"
     assert results.readout.metrics[2].body == "Up from $18m in Q3."
+
+
+@mark.parametrize("kind", ["bar", "column"])
+def test_sparse_comparison_charts_export_native_labels_and_highlight(kind):
+    source = Source(id="brief", title="Brief")
+    plan = OutlineItem(title="Compare operating results", layout="chart")
+    content = SlideContent(title=plan.title, source_ids=[source.id], chart={
+        "label": "Operating results", "chart": kind, "categories": ["North", "South"], "values": [4, -2],
+        "highlight": 1, "compare_to": 0,
+    })
+    deck = themed_document(sources=[source])
+    deck.slides = [build_slide(plan, content, deck, 0, set(), data_driven=True)]
+    chart = next(element for element in deck.slides[0].elements if isinstance(element, Chart))
+    ppt = Presentation(io.BytesIO(to_pptx(deck, lambda _: None)))
+    native = next(shape.chart for shape in ppt.slides[0].shapes if shape.has_chart)
+    assert native.plots[0].data_labels.show_value
+    assert list(native.series[0].values) == [4, -2]
+    assert str(native.series[0].points[1].format.fill.fore_color.rgb) == chart.color[1:]
+    assert str(native.series[0].points[0].format.fill.fore_color.rgb) == chart.context_color[1:]
+    assert any(shape.has_text_frame and shape.text == "−6 vs North" for shape in ppt.slides[0].shapes)
+
+
+def test_site_selection_emphasizes_only_the_selected_rows_and_criteria():
+    source = Source(id="brief", title="Pilot brief", excerpt="Plan six vans each at North and Central.")
+    rows = [
+        ["Site", "Daily route miles", "Eligible vans", "Spare charging ports"],
+        ["North", "72", "8", "4"],
+        ["Central", "86", "6", "3"],
+        ["South", "118", "2", "0"],
+    ]
+    plan = OutlineItem(title="Compare depots", layout="research")
+    content = SlideContent(title=plan.title, source_ids=[source.id], table=rows,
+                           table_focus_columns=["Eligible vans", "Spare charging ports"])
+    plan = resolve_headline(plan, content, source.excerpt, [source])
+    deck = themed_document(sources=[source])
+    deck.slides = [build_slide(plan, content, deck, 0, set(), data_driven=True)]
+    table = next(element for element in deck.slides[0].elements if isinstance(element, Table))
+    assert table.rows == rows
+    assert table.focus_rows == [1, 2] and table.focus_columns == [2, 3]
+    assert table.focus_cell_fill != table.focus_fill != table.fill
+    assert contrast(table.focus_ink, table.focus_cell_fill) >= 4.5
+
+    ppt = Presentation(io.BytesIO(to_pptx(deck, lambda _: None)))
+    native = next(shape.table for shape in ppt.slides[0].shapes if shape.has_table)
+    assert [[native.cell(i, j).text for j in range(4)] for i in range(4)] == rows
+    for i in range(1, 4):
+        for j in range(1, 4):
+            cell = native.cell(i, j)
+            highlighted = i in (1, 2) and j in (2, 3)
+            assert cell.text_frame.paragraphs[0].font.bold == highlighted
+            assert (str(cell.fill.fore_color.rgb) == table.focus_cell_fill[1:]) == highlighted
 
 
 def test_unsupported_numerical_headline_falls_back_and_explicit_title_is_preserved():

@@ -1,4 +1,5 @@
 import re
+from math import ceil, floor, log10
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, JsonValue, model_validator
@@ -127,7 +128,7 @@ class Text(ElementBase):
 
 class Shape(ElementBase):
     type: Literal["shape"] = "shape"
-    shape: Literal["rect", "round", "ellipse", "triangle"] = "rect"
+    shape: Literal["rect", "round", "ellipse", "triangle", "diamond"] = "rect"
     fill: Color = "#4C52D9"
 
 
@@ -150,6 +151,7 @@ class Line(ElementBase):
     arrows: Literal["none", "end", "both"] = "none"
     start_anchor: ConnectorAnchor | None = None
     end_anchor: ConnectorAnchor | None = None
+    route: Literal["straight", "elbow"] = "straight"
 
     def endpoints(self, width, height):
         return {
@@ -175,6 +177,9 @@ class Table(ElementBase):
     numeric_columns: list[Annotated[int, Field(ge=0, le=7)]] = Field(default_factory=list, max_length=8)
     focus_rows: list[Annotated[int, Field(ge=1, le=11)]] = Field(default_factory=list, max_length=11)
     focus_fill: Color | None = None
+    focus_columns: list[Annotated[int, Field(ge=1, le=7)]] = Field(default_factory=list, max_length=7)
+    focus_cell_fill: Color | None = None
+    focus_ink: Color | None = None
     negative_ink: Color | None = None
 
     def row_style(self, index: int) -> tuple[str, str, bool]:
@@ -191,13 +196,20 @@ class Table(ElementBase):
 
     def cell_style(self, row: int, column: int) -> tuple[str, str]:
         fill, ink, _ = self.row_style(row)
+        if row in self.focus_rows:
+            if column in self.focus_columns:
+                fill, ink = self.focus_cell_fill or fill, self.focus_ink or ink
+            elif column == 0:
+                ink = self.focus_ink or ink
         return fill, self.negative_ink if self.negative_cell(row, column) else ink
 
     def cell_align(self, column: int) -> Literal["left", "right"]:
         return "right" if self.row_rule and column in self.numeric_columns else "left"
 
     def cell_bold(self, row: int, column: int) -> bool:
-        return (row == 0 and self.header_fill is not None) or self.negative_cell(row, column) or bool(
+        return (row == 0 and self.header_fill is not None) or self.negative_cell(row, column) or (
+            row in self.focus_rows and column in self.focus_columns
+        ) or bool(
             self.row_rule and column == 0 and 0 not in self.numeric_columns
         )
 
@@ -222,7 +234,8 @@ class Series(Contract):
 
 
 def display_value(value: float, prefix: str = "") -> str:
-    return f"{prefix}{value:,.2f}".rstrip("0").rstrip(".")
+    magnitude = f"{abs(value):,.2f}".rstrip("0").rstrip(".")
+    return ("−" if value < 0 and magnitude != "0" else "") + prefix + magnitude
 
 
 class Chart(ElementBase):
@@ -237,6 +250,33 @@ class Chart(ElementBase):
     font: str = Field(default="Arial", max_length=60)
     value_prefix: str = Field(default="", max_length=8)
     show_values: bool = False
+    highlight: int | None = Field(default=None, ge=0)
+    context_color: Color | None = None
+
+    def mark_color(self, category: int, series: int = 0) -> str:
+        if self.highlight is not None and category != self.highlight and self.context_color:
+            return self.context_color
+        palette = self.colors()
+        return palette[series % len(palette)]
+
+    def focused_line_axis(self) -> tuple[float, float, float]:
+        values = self.series[0].values
+        low, high = min(values), max(values)
+        span = high - low or abs(high) * .1 or 1
+        step = 10 ** floor(log10(span / 2))
+        step *= next(factor for factor in (1, 2, 5, 10) if factor * step >= span / 2)
+        return floor((low - .45 * span) / step) * step, ceil((high + .65 * span) / step) * step, step
+
+    def value_bounds(self) -> tuple[float, float]:
+        if self.chart == "line" and self.highlight is not None:
+            low, high, _ = self.focused_line_axis()
+            return low, high
+        values = [value for series in self.series for value in series.values]
+        low, high = min(0, *values), max(0, *values)
+        if self.show_values and self.chart in {"bar", "column"}:
+            padding = .22 * (high - low or 1)
+            return low - padding if low < 0 else 0, high + padding if high > 0 or low == 0 else 0
+        return low, high
 
     def totals(self) -> list[float]:
         return [sum(values) for values in zip(*(series.values for series in self.series))]
@@ -258,6 +298,9 @@ class Chart(ElementBase):
             raise ValueError("Pie charts need one non-negative series")
         if self.chart == "stacked_column" and (len(self.series) < 2 or any(v < 0 for s in self.series for v in s.values)):
             raise ValueError("Stacked columns require at least two non-negative series")
+        if self.highlight is not None and (self.highlight >= len(self.categories) or len(self.series) != 1
+                                           or self.chart not in {"line", "column", "bar"}):
+            raise ValueError("Highlight must identify a point in a single-series line, column or bar chart")
         return self
 
 
@@ -273,6 +316,7 @@ Group.model_rebuild()
 Recipe = Literal[
     "standard", "editorial_cover", "photo_cover", "decision_cover", "closing_display", "closing_centered",
     "feature_panels", "feature_rows", "diagram_flow", "diagram_paths", "diagram_vertical",
+    "diagram_swimlane",
     "dense_table", "dense_table_full", "chart", "readout", "allocation", "rollout", "decision",
 ]
 

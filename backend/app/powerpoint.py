@@ -104,7 +104,8 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                     alpha(paragraph.font._element.solidFill, el.opacity)
             elif isinstance(el, Shape):
                 style = {"rect": MSO_AUTO_SHAPE_TYPE.RECTANGLE, "round": MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
-                         "ellipse": MSO_AUTO_SHAPE_TYPE.OVAL, "triangle": MSO_AUTO_SHAPE_TYPE.ISOSCELES_TRIANGLE}[el.shape]
+                         "ellipse": MSO_AUTO_SHAPE_TYPE.OVAL, "triangle": MSO_AUTO_SHAPE_TYPE.ISOSCELES_TRIANGLE,
+                         "diamond": MSO_AUTO_SHAPE_TYPE.DIAMOND}[el.shape]
                 obj = shapes.add_shape(style, x, y, w, h)
                 obj.fill.solid()
                 obj.fill.fore_color.rgb = color(el.fill)
@@ -116,7 +117,8 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                     obj.adjustments[0] = .12
             elif isinstance(el, Line):
                 start, end = el.endpoints(w, h)
-                obj = shapes.add_connector(MSO_CONNECTOR.STRAIGHT, round(x + start[0]), round(y + start[1]),
+                kind = MSO_CONNECTOR.ELBOW if el.route == "elbow" else MSO_CONNECTOR.STRAIGHT
+                obj = shapes.add_connector(kind, round(x + start[0]), round(y + start[1]),
                                            round(x + end[0]), round(y + end[1]))
                 connectors.append((obj, el.start_anchor, el.end_anchor))
                 obj.line.width = Pt(el.weight)
@@ -182,7 +184,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
                 obj.chart.has_legend = (len(el.series) > 1 and not (el.chart == "stacked_column" and el.show_values)
                                         or el.chart == "pie")
-                if el.palette or el.chart == "stacked_column":
+                if el.palette or el.show_values or el.highlight is not None or el.chart == "stacked_column":
                     style_native_chart(obj.chart, el)
                 elif el.chart not in {"line", "pie"}:
                     obj.chart.series[0].format.fill.solid()
@@ -199,7 +201,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 else:
                     obj.line.fill.background()
             obj.name = el.id
-            if isinstance(el, Shape) and el.shape == "rect":
+            if isinstance(el, Shape) and el.shape in {"rect", "diamond"}:
                 nodes[el.id] = obj
         ports = {"top": 0, "left": 1, "bottom": 2, "right": 3}
         for connector, start, end in connectors:
@@ -247,29 +249,56 @@ def style_native_chart(chart, element):
     for index, mark in enumerate(marks):
         shade = color(palette[index % len(palette)])
         if element.chart == "line":
-            mark.format.line.color.rgb = shade
+            line_ink = color(element.context_color) if element.context_color else shade
+            mark.format.line.color.rgb = line_ink
             if element.show_values:
                 mark.format.line.width = Pt(2)
                 mark.marker.style = XL_MARKER_STYLE.CIRCLE
                 mark.marker.size = 6
                 mark.marker.format.fill.solid()
-                mark.marker.format.fill.fore_color.rgb = shade
-                mark.marker.format.line.color.rgb = shade
+                mark.marker.format.fill.fore_color.rgb = line_ink
+                mark.marker.format.line.color.rgb = line_ink
         else:
             mark.format.fill.solid()
             mark.format.fill.fore_color.rgb = shade
+    if element.highlight is not None:
+        for index, point in enumerate(chart.series[0].points):
+            shade = color(element.mark_color(index))
+            if element.chart == "line":
+                point.marker.style = XL_MARKER_STYLE.CIRCLE
+                point.marker.size = 10 if index == element.highlight else 6
+                point.marker.format.fill.solid()
+                point.marker.format.fill.fore_color.rgb = shade
+                point.marker.format.line.color.rgb = shade
+            else:
+                point.format.fill.solid()
+                point.format.fill.fore_color.rgb = shade
     if element.chart != "pie":
         chart.value_axis.has_major_gridlines = False
         for axis in (chart.category_axis, chart.value_axis):
             axis.tick_labels.font.name = element.font
             axis.tick_labels.font.color.rgb = color(element.label_color)
             axis.tick_labels.font.size = Pt(13 if element.show_values else 10)
-    if element.show_values and element.chart == "line" and len(element.series) == 1:
+    if element.show_values and element.chart in {"line", "bar", "column"} and len(element.series) == 1:
+        if element.chart == "line" and element.highlight is not None:
+            low, high, step = element.focused_line_axis()
+            chart.value_axis.minimum_scale = low
+            chart.value_axis.maximum_scale = high
+            chart.value_axis.major_unit = step
+        elif element.chart != "line":
+            low, high = element.value_bounds()
+            if low < high:
+                chart.value_axis.minimum_scale = low
+                chart.value_axis.maximum_scale = high
         plot = chart.plots[0]
         plot.has_data_labels = True
         labels = plot.data_labels
         labels.show_value = True
-        labels.position = XL_DATA_LABEL_POSITION.ABOVE
+        labels.position = XL_DATA_LABEL_POSITION.ABOVE if element.chart == "line" else XL_DATA_LABEL_POSITION.OUTSIDE_END
+        if element.value_prefix or element.highlight is not None or element.chart != "line":
+            prefix = element.value_prefix.replace('"', '""')
+            decimals = ".00" if any(value % 1 for value in element.series[0].values) else ""
+            labels.number_format = (f'"{prefix}"' if prefix else "") + f"#,##0{decimals}"
         labels.font.name = element.font
         labels.font.size = Pt(14)
         labels.font.bold = True

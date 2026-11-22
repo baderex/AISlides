@@ -156,6 +156,13 @@ def chart_headline(chart, metrics: list[Metric]) -> str:
         return ""
     label = metric.label[0].upper() + metric.label[1:]
     last, previous = numbers[-1], numbers[-2]
+    quarters = [int(category[1]) for category in categories]
+    if last != previous and chart.highlight is None and quarters == sorted(set(quarters)):
+        chart.highlight = len(categories) - 1
+        if chart.compare_to is None and quarters[-1] == quarters[-2] + 1:
+            chart.compare_to = len(categories) - 2
+    chart.value_prefix = metric.currency
+    chart.value_suffix = metric.unit
     if len(numbers) >= 3 and numbers[-3] > previous < last:
         return f"{label} rebounds to {metric.format(last)} in {categories[-1]}"
     if last != previous:

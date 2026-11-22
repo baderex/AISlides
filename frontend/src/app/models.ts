@@ -19,7 +19,7 @@ export interface TextElement extends Geometry {
   spans?: TextSpan[];
   type: 'text'; text: string; size: number; color: string; font: string; bold: boolean; align: 'left' | 'center' | 'right';
 }
-export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle'; fill: string }
+export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle' | 'diamond'; fill: string }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
 export interface ConnectorAnchor { shape_id: string; side: 'top' | 'left' | 'bottom' | 'right' }
 export interface LineElement extends Geometry {
@@ -28,15 +28,18 @@ export interface LineElement extends Geometry {
   arrows?: 'none' | 'end' | 'both';
   start_anchor?: ConnectorAnchor | null;
   end_anchor?: ConnectorAnchor | null;
+  route?: 'straight' | 'elbow';
 }
 export interface TableElement extends Geometry {
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
   header_fill?: string | null; header_color?: string | null; row_rule?: string | null;
   header_rule?: string | null; numeric_columns?: number[];
   focus_rows?: number[]; focus_fill?: string | null; negative_ink?: string | null;
+  focus_columns?: number[]; focus_cell_fill?: string | null; focus_ink?: string | null;
 }
 export interface ChartElement extends Geometry {
   type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; show_values?: boolean;
+  highlight?: number | null; context_color?: string | null;
   chart: 'bar' | 'column' | 'line' | 'pie' | 'stacked_column'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }

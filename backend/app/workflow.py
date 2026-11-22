@@ -54,6 +54,8 @@ DATA_SLIDE_GUIDANCE = (
     "Match every plotted value to its exact category in the evidence. In annual charts, use full-year data or year-end "
     "observations as specified. Never substitute quarterly observations or infer dates from column position. "
     "Use reported observations for historical series and label any provisional observations explicitly. "
+    "Set chart.highlight only when one category supports the takeaway. Set chart.compare_to only when another "
+    "category is a meaningful baseline measured in the same units. Both are zero-based category indices. "
     "Every analytical slide should show a supported chart, data table, or numeric KPIs. If the evidence supports a "
     "stronger exhibit than planned, supply it. Call out material data gaps. Do not mix currencies or reporting periods."
 )
@@ -65,6 +67,7 @@ COMPOSITION_PLAN = (
     "Use title as a clear fallback. Keep introduced shorthand out of headings. Aim for 4–9 words. "
     "Set visual_priority to the central figure, exhibit, or action. For a product slide about two or three independent "
     "features set recipe to feature_panels. Use diagram_flow for a sequence and diagram_paths for alternatives. "
+    "Use the swimlane exhibit and diagram_swimlane recipe for explicitly requested swimlanes or handoffs between named owners. "
     "Use closing_display for one clear closing action. Leave recipe null when unsure. "
     "Choose chart for a measured trend, research for exact lookup, process for ordered steps, "
     "comparison for parallel alternatives, and summary for unrelated explanatory points. Use a section divider only "
@@ -96,8 +99,10 @@ COMPOSITION_GUIDANCE = {
              "for any required qualification. The renderer calculates the difference.",
     "research": " Use rows for the compared entities and columns for the supplied criteria. Keep every required row. "
                 "State a supplied selection or allocation in the visible subtitle and set table_focus to the exact "
-                "first-column labels of at most two focal or selected rows. Leave deferred rows unhighlighted. Do not infer capacity, "
-                "readiness, or feasibility from incomplete data. Call out material constraints using only the supplied figures.",
+                "first-column labels of at most two focal or selected rows. When specific criteria explain the selection, "
+                "put their exact column headers in table_focus_columns. Leave context-only criteria and deferred rows "
+                "unhighlighted. Do not infer capacity, readiness, or feasibility from incomplete data. Call out material "
+                "constraints using only the supplied figures.",
     "metrics": " For an itemized budget, use allocation with one line for every supplied cost item, including contingency. "
                "Keep individual amounts separate and set value_prefix to the supplied currency symbol. Do not include the total "
                "as a line. The renderer sums the line items.",
@@ -605,6 +610,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                             supplied_breakdown=supplied_breakdown) if use_exhibits else None)
             if part.exhibit:
                 part.layout = EXHIBIT_LAYOUTS[part.exhibit]
+        if use_exhibits and re.search(r"\b(?:use|include|draw|show|make|as|with)\b[^.\n]{0,42}\bswim[ -]?lanes?\b", prompt, re.I):
+            if not any(part.exhibit == "swimlane" for part in outline.slides):
+                processes = [part for part in outline.slides if part.layout == "process"]
+                candidates = processes or (outline.slides if len(outline.slides) == 1 else [])
+                if len(candidates) == 1:
+                    candidates[0].exhibit, candidates[0].layout = "swimlane", "process"
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
         document = read_document({**document.model_dump(mode="json"), "sources": context["sources"]})
@@ -660,7 +671,16 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             f"The selected composition is {part.exhibit}. Populate that top-level object. "
             if part.exhibit else ""
         )
-        if part.exhibit == "diagram":
+        if part.exhibit == "swimlane":
+            exhibit_instruction += (
+                "Use the lane names for distinct owners, actors or systems. Put nodes in the lane of the actor performing "
+                "the action, and use column to order the work from left to right. Assign unique IDs and cells. "
+                "Use a decision node for a branch and label its outgoing paths. A local path stays in its lane. "
+                "Use directed cross-lane edges to show requests and responses separately. Keep same-axis routes clear of "
+                "intervening nodes and use adjacent columns for diagonal routes. Keep node and edge labels short. "
+                "Preserve exact protocol terms and mark conditional responses with their condition. "
+            )
+        elif part.exhibit == "diagram":
             exhibit_instruction += (
                 "Draw the actual relationships as one or two ordered lanes. Use a flow lane for a sequence or an interaction. "
                 "Use two named flow lanes when the slide compares two paths and keep each result in its own path. "
@@ -749,7 +769,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                 strict_copy=bool(inferred_intent.get("supplied_evidence_only")))
         context["slide_content"] = content.model_dump(mode="json")
         if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (
-            content.chart or content.table or content.stacked_comparison
+            content.chart or content.table or content.stacked_comparison or content.swimlane
         ):
             return "image", state, "GENERATING", events, None, None
         context["draft"] = build_slide(part, content, document, index, images, brand,
