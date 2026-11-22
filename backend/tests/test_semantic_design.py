@@ -7,13 +7,13 @@ from pytest import mark, raises
 
 from app.composition import OutlineItem, SlideContent
 from app.design import enforce_constraints, explicit_constraints
-from app.domain import Chart, DesignRules, Document, Shape, Source, Table, Text, TextSpan, Theme
+from app.domain import BrandKit, Chart, DesignRules, Document, Shape, Source, Table, Text, TextSpan, Theme
 from app.edits import ChangeText, ChatRequest, EditProposal, Restyle, RestyleDirection, apply, propose
-from app.evidence import resolve_headline
+from app.evidence import EvidenceObservation, resolve_headline, verified_observations
 from app.powerpoint import to_pptx
 from app.providers import Intelligence
 from app.rendering import contrast, preview, to_pdf
-from app.slide_design import build_slide, review_layouts
+from app.slide_design import LayoutReview, build_slide, review_layouts
 
 
 def themed_document(**kwargs):
@@ -153,7 +153,7 @@ def test_explicit_theme_constraints_apply_to_both_backgrounds_and_fonts():
     assert updated.constraints.background_mode == "light"
 
 
-def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
+def test_recipe_changes_preserve_text_and_deletion_with_new_geometry():
     deck = themed_document()
     part = OutlineItem(title="Three product features", topic="Features", layout="editorial")
     content = SlideContent(title=part.title, points=[
@@ -166,6 +166,8 @@ def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
     changed = next(e for e in slide.elements if isinstance(e, Text) and e.text == "USB-C.")
     removed = next(e for e in slide.elements if isinstance(e, Text) and e.text == "A fold-flat loop.")
     slide.elements.remove(removed)
+    card = next(e for e in slide.elements if e.element_key == "feature:charging:background")
+    card.fill, card.edited = "#704010", True
     changed.x -= .01
     original_pos = changed.x
     deck = apply(deck, EditProposal(summary="Edit", operations=[
@@ -180,7 +182,68 @@ def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
     assert result.id == slide.id
     assert removed.id not in {e.id for e in result.elements}
     edited = next(e for e in result.elements if e.id == changed.id)
-    assert edited.edited and edited.text == "USB-C charging." and edited.x == original_pos
+    assert edited.edited and edited.text == "USB-C charging." and edited.x != original_pos
+    rebuilt_card = next(e for e in result.elements if e.id == card.id)
+    assert rebuilt_card.fill == "#704010" and rebuilt_card.w > card.w
+    assert next(e for e in result.elements if e.element_key == "feature:handle:background").fill != card.fill
+
+
+def test_equal_fit_candidates_use_the_visual_rubric():
+    deck = themed_document()
+    part = OutlineItem(title="Product capabilities", layout="editorial", visual_priority="Charging")
+    content = SlideContent(title=part.title, points=[
+        {"title": "Charging", "body": "A USB-C port."}, {"title": "Lighting", "body": "Adjustable brightness."},
+    ])
+    initial = build_slide(part, content, deck, 0, set())
+    calls = []
+
+    def evaluate(plan, recipes, image):
+        assert plan.visual_priority == "Charging" and image.startswith(b"\x89PNG")
+        calls.append(recipes)
+        return LayoutReview(ratings=[{"candidate": i + 1, **dict.fromkeys(
+            ("hierarchy", "emphasis", "balance", "imagery", "style_match"), 5 if name == "feature_rows" else 1)}
+            for i, name in enumerate(recipes)])
+
+    selected, _ = review_layouts(deck, initial, 0, set(), None, evaluate=evaluate)
+    assert calls and selected.spec.recipe == "feature_rows"
+
+
+def test_structured_source_facts_reconcile_annual_values_and_flag_conflicts():
+    plan = OutlineItem(title="Revenue by year", topic="Revenue", layout="chart")
+    content = SlideContent(title=plan.title, chart={"label": "Revenue", "categories": ["FY2024", "FY2025"],
+                                                   "values": [15, 23], "chart": "line"})
+    source = Source(id="ledger", title="Ledger", excerpt="Revenue FY2024: 12.5. Revenue FY2025: 15.25. USD millions.")
+    reported = Source(id="report", title="Operating report", excerpt="Revenue FY2025: 17.25. USD millions.")
+    facts = [EvidenceObservation(source_id=source.id, metric="Revenue", period=period, amount=amount,
+                                 quote=quote, currency="$", unit="m") for period, amount, quote in [
+        ("FY2024", "12.5", "Revenue FY2024: 12.5."), ("FY2025", "15.25", "Revenue FY2025: 15.25."),
+    ]]
+    invalid = facts[0].model_copy(update={"period": "FY2025", "quote": source.excerpt})
+    assert list(verified_observations([invalid], [source])) == []
+    resolve_headline(plan, content, "Show reported revenue.", [source], observations=facts)
+    assert content.chart.values == [12.5, 15.25]
+    assert (content.chart.value_prefix, content.chart.value_suffix, content.source_ids) == ("$", "m", ["ledger"])
+    conflict = facts[1].model_copy(update={"source_id": reported.id, "amount": facts[1].amount + 2, "quote": reported.excerpt})
+    resolve_headline(plan, content, "Show reported revenue.", [source, reported], observations=[*facts, conflict])
+    assert content.chart.values == [12.5, 15.25]
+    assert "Conflicting source values" in content.subtitle
+    assert content.evidence_warnings
+    assert content.source_ids == ["ledger", "report"]
+
+
+def test_brand_kit_protects_selected_roles_during_restyle():
+    deck = themed_document()
+    deck.theme.brand_kit = BrandKit(protected=["accent", "heading_font"])
+    previous = deck.theme.model_copy(deep=True)
+    revised = previous.model_copy(deep=True)
+    revised.accent, revised.background = "#444444", "#222222"
+    revised.design.heading_font, revised.font = "Verdana", "Calibri"
+    proposal = EditProposal(summary="Refresh", operations=[Restyle(op="restyle", theme=revised)])
+    result = apply(deck, proposal).theme
+    assert result.accent == previous.accent and result.design.heading_font == previous.design.heading_font
+    assert result.background == "#222222" and result.font == "Calibri"
+    with raises(ValueError, match="PowerPoint master"):
+        apply(deck, proposal, locked_theme=True)
 
 
 def test_candidate_review_prefers_connected_diagram_to_plain_text_grid():
@@ -249,7 +312,7 @@ def test_deck_design_request_is_routed_to_a_theme_only_proposal(monkeypatch):
     deck = themed_document()
     part = OutlineItem(title="Product demo", layout="closing")
     deck.slides = [build_slide(part, SlideContent(title=part.title), deck, 0, set())]
-    theme = deck.theme.model_dump(exclude={"profile", "constraints"})
+    theme = deck.theme.model_dump(exclude={"profile", "constraints", "brand_kit"})
     theme["design"]["mood"] = "Luxury editorial"
 
     def redesign(self, schema, task, data, stage):

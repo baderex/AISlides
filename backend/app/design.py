@@ -124,6 +124,18 @@ def enforce_constraints(theme: Theme, constraints: DesignConstraints | None) -> 
     return theme
 
 
+def apply_brand_kit(theme: Theme, baseline: Theme) -> Theme:
+    kit = baseline.brand_kit
+    if kit is None:
+        return theme.model_copy(update={"brand_kit": None})
+    theme = theme.model_copy(deep=True, update={"brand_kit": kit})
+    for role in kit.protected:
+        if role in {"heading_font", "cover_background", "dense_surface", "chart_colors"}:
+            if baseline.design and theme.design:
+                setattr(theme.design, role, getattr(baseline.design, role))
+        else:
+            setattr(theme, role, getattr(baseline, role))
+    return theme
 def reference_sheet(assets):
     images = [asset for asset in assets if asset.media_type.startswith("image/")][:4]
     if not images:

@@ -11,6 +11,7 @@ export interface Theme { design?: DesignRules | null; background: string; ink: s
 export interface Source { id: string; title: string; url: string | null; excerpt: string; asset_id: string | null }
 export interface Geometry {
   id: string; x: number; y: number; w: number; h: number; rotation: number; z: number;
+  element_key?: string | null;
   opacity: number; border: string | null; edited: boolean;
   placeholder_idx?: number | null;
 }
@@ -40,7 +41,7 @@ export interface TableElement extends Geometry {
   cell_fills?: (string | null)[][]; cell_inks?: (string | null)[][];
 }
 export interface ChartElement extends Geometry {
-  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; show_values?: boolean;
+  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; value_suffix?: string; show_values?: boolean;
   highlight?: number | null; context_color?: string | null;
   chart: 'bar' | 'column' | 'line' | 'pie' | 'stacked_column'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
 }

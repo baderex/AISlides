@@ -34,16 +34,16 @@ class ExhibitCanvas:
     def box(self, x, y, w, h):
         return dict(x=self.x + x * self.w, y=self.y + y * self.h, w=w * self.w, h=h * self.h)
 
-    def shape(self, x, y, w, h, fill=None, *, shape="rect", border=None, opacity=1, z=-2):
+    def shape(self, x, y, w, h, fill=None, *, shape="rect", border=None, opacity=1, z=-2, element_key=None):
         if w <= 0 or h <= 0:
             return None
         element = Shape(**self.box(x, y, w, h), fill=fill or self.surface, shape=shape,
-                        border=border, opacity=opacity, z=z)
+                        border=border, opacity=opacity, z=z, element_key=element_key)
         self.slide.elements.append(element)
         return element
 
     def label(self, value, x, y, w, h, size=15, *, color=None, bold=False, align="left", font=None, emphasis=(),
-              centered=False):
+              centered=False, element_key=None):
         if not value.strip() or w <= 0 or h <= 0:
             return
         bounds = self.box(x, y, w, h)
@@ -61,10 +61,10 @@ class ExhibitCanvas:
             if not spans or start >= spans[-1].end:
                 spans.append(TextSpan(start=start, end=end, bold=True))
         self.slide.elements.append(Text(**bounds, text=value, size=size, font=font, color=color or self.ink,
-                                        bold=bold, align=align, spans=spans))
+                                        bold=bold, align=align, spans=spans, element_key=element_key))
 
     def line(self, a, b, *, color=None, arrow=False, weight=1.2, dashed=False, z=-1,
-             route="straight", anchors=(None, None)):
+             route="straight", anchors=(None, None), element_key=None):
         x0, y0 = a
         x1, y1 = b
         if a == b:
@@ -81,7 +81,7 @@ class ExhibitCanvas:
                           (False, True): "diagonal-down-left", (False, False): "diagonal-up-left"}[x1 > x0, y1 > y0]
         self.slide.elements.append(Line(**self.box(x, y, w, h), direction=direction, color=color or self.muted,
                                         arrows="end" if arrow else "none", dashed=dashed, weight=weight, z=z, route=route,
-                                        start_anchor=anchors[0], end_anchor=anchors[1]))
+                                        start_anchor=anchors[0], end_anchor=anchors[1], element_key=element_key))
 
     def mark(self, label, x, y):
         self.marks[label] = (x, y)
@@ -456,22 +456,24 @@ def graph(c, v):
                     shape = "round" if node.role in {"start", "end"} or v.type == "state-machine" else "rect"
                     inset = .06
                 fill = blend(c.slide.background, c.accent, .13 if node.role != "store" else .25)
-                box = c.shape(x, y, w, h, fill, border=c.accent, shape=shape)
+                identity = f"{v.type}:{node.id}"
+                box = c.shape(x, y, w, h, fill, border=c.accent, shape=shape, element_key=f"{identity}:node")
                 boxes[node.id], local[node.id] = box, (x, y, w, h)
                 text_x, text_w = x + w * inset, w * (1 - 2 * inset)
                 if node.icon in ICON_NAMES:
                     icon_x, icon_y = c.x + text_x * c.w, c.y + (y + h * .10) * c.h
                     icon = slide_icon(c.document, node.icon, icon_x, icon_y,
                                       min(w * c.w * c.ptw / c.pth * .19, h * c.h * .34), fill)
+                    icon.element_key = f"{identity}:icon"
                     c.slide.elements.append(icon)
                     offset = icon.w / c.w * 1.13
                     text_x, text_w = text_x + offset, text_w - offset
                 details = "\n".join(node.fields) if node.fields else node.detail
                 c.label(node.label, text_x, y + h * .11, text_w, h * (.28 if details else .78), 15,
-                        bold=True, align="center", centered=not details)
+                        bold=True, align="center", centered=not details, element_key=f"{identity}:heading")
                 if details:
                     c.label(details, x + w * inset, y + h * .40, w * (1 - 2 * inset), h * .55, 11,
-                            align="left" if node.fields else "center")
+                            align="left" if node.fields else "center", element_key=f"{identity}:detail")
                 c.mark(node.label, x + w, y + h / 2)
         cross_start += cross
     if sankey:
@@ -480,6 +482,7 @@ def graph(c, v):
     pairs = {(edge.source, edge.target) for edge in v.edges}
     order = {node.id: i for i, node in enumerate(v.nodes)}
     for edge in v.edges:
+        identity = f"{v.type}:{edge.source}:{edge.target}"
         sx, sy, sw, sh = local[edge.source]
         tx, ty, tw, th = local[edge.target]
         if edge.source == edge.target:
@@ -511,13 +514,13 @@ def graph(c, v):
                 else:
                     start, end = (start[0], start[1] + sh * .26), (end[0], end[1] + th * .26)
                 anchors = (None, None)
-            c.line(start, end, arrow=True, z=-3, anchors=anchors)
+            c.line(start, end, arrow=True, z=-3, anchors=anchors, element_key=f"{identity}:connector")
             lx = (start[0] + end[0]) / 2 - .085
             ly = (start[1] + end[1]) / 2 + (.01 if reversed_pair else -.073)
-        graph_label(c, edge.label, lx, ly)
+        graph_label(c, edge.label, lx, ly, element_key=f"{identity}:label")
 
 
-def graph_label(c, text, x, y):
+def graph_label(c, text, x, y, *, element_key=None):
     if not text:
         return
     width, height = .17, .068
@@ -531,7 +534,7 @@ def graph_label(c, text, x, y):
 
     candidates = [(min(1 - width, max(0, x + dx)), min(1 - height, max(0, y + dy)))
                   for dx, dy in ((0, 0), (0, -.075), (0, .085), (0, .16), (-.09, 0), (.09, 0))]
-    c.label(text, *min(candidates, key=overlap), width, height, 10, bold=True, align="center")
+    c.label(text, *min(candidates, key=overlap), width, height, 10, bold=True, align="center", element_key=element_key)
 
 
 def draw_weighted_links(c, visual, boxes):
@@ -552,9 +555,11 @@ def draw_weighted_links(c, visual, boxes):
                 cursor += weight
     for index, edge in enumerate(visual.edges):
         start, end = ports["out", index], ports["in", index]
-        c.line(start, end, color=c.accent, weight=max(.5, edge.weight * point_scale), z=-3)
+        identity = f"sankey:{edge.source}:{edge.target}"
+        c.line(start, end, color=c.accent, weight=max(.5, edge.weight * point_scale), z=-3,
+               element_key=f"{identity}:connector")
         graph_label(c, f"{edge.label} {fmt(edge.weight)}".strip(),
-                    (start[0] + end[0]) / 2 - .085, (start[1] + end[1]) / 2 - .085)
+                    (start[0] + end[0]) / 2 - .085, (start[1] + end[1]) / 2 - .085, element_key=f"{identity}:label")
 
 
 def schedule(c, v):
@@ -672,6 +677,7 @@ def legacy_diagram(c, v):
         if isinstance(element, Text):
             c.label(element.text, x, y, w, h, round(element.size), color=element.color, bold=element.bold,
                     align=element.align)
+            c.slide.elements[-1].element_key = element.element_key
             c.mark(element.text, x + w, y + h / 2)
         else:
             c.slide.elements.append(element.model_copy(update=c.box(x, y, w, h)))

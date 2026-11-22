@@ -50,6 +50,14 @@ def set_table_rules(cell, bottom_rule):
         properties.insert(position, line)
 
 
+def chart_number_format(element, decimals):
+    def literal(value):
+        escaped = value.replace('"', '""')
+        return f'"{escaped}"' if escaped else ""
+
+    return f"{literal(element.value_prefix)}#,##0{decimals}{literal(element.value_suffix)}"
+
+
 def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -> bytes:
     presentation = Presentation(io.BytesIO(get_asset(brand.asset_id))) if brand else Presentation()
     if brand:
@@ -298,10 +306,9 @@ def style_native_chart(chart, element):
         labels = plot.data_labels
         labels.show_value = True
         labels.position = XL_DATA_LABEL_POSITION.ABOVE if element.chart == "line" else XL_DATA_LABEL_POSITION.OUTSIDE_END
-        if element.value_prefix or element.highlight is not None or element.chart != "line":
-            prefix = element.value_prefix.replace('"', '""')
+        if element.value_prefix or element.value_suffix or element.highlight is not None or element.chart != "line":
             decimals = ".00" if any(value % 1 for value in element.series[0].values) else ""
-            labels.number_format = (f'"{prefix}"' if prefix else "") + f"#,##0{decimals}"
+            labels.number_format = chart_number_format(element, decimals)
         labels.font.name = element.font
         labels.font.size = Pt(14)
         labels.font.bold = True
@@ -317,8 +324,7 @@ def style_native_chart(chart, element):
             labels.show_value = True
             labels.position = XL_DATA_LABEL_POSITION.CENTER
             decimals = ".00" if any(val % 1 for series in element.series for val in series.values) else ""
-            prefix = element.value_prefix.replace('"', '""')
-            labels.number_format = f'"{prefix}"#,##0{decimals}' if prefix else f"#,##0{decimals}"
+            labels.number_format = chart_number_format(element, decimals)
             labels.font.name = element.font
             labels.font.size = Pt(12)
             labels.font.bold = True

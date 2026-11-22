@@ -227,7 +227,7 @@ export class SlideCanvas {
   chartPointValue(el: ChartElement, index: number, series = 0) {
     const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
     const value = el.series[series].values[index];
-    return (value < 0 ? '−' : '') + (el.value_prefix ?? '') + number.format(Math.abs(value));
+    return (value < 0 ? '−' : '') + (el.value_prefix ?? '') + number.format(Math.abs(value)) + (el.value_suffix ?? '');
   }
 
   segmentInk(color: string) {
@@ -253,7 +253,7 @@ export class SlideCanvas {
   chartLabels(el: ChartElement) {
     if (el.chart !== 'stacked_column') return el.categories;
     const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
-    return this.chartTotals(el).map((total, i) => `${el.categories[i]}  ${el.value_prefix ?? ''}${number.format(total)}`);
+    return this.chartTotals(el).map((total, i) => `${el.categories[i]}  ${el.value_prefix ?? ''}${number.format(total)}${el.value_suffix ?? ''}`);
   }
 
   private chartTotals(el: ChartElement) {

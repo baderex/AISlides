@@ -14,7 +14,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from reportlab.pdfgen import canvas
 
-from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text, display_value
+from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
 from app.lucide import bundled_icon, icon_asset_id
 
 
@@ -410,13 +410,13 @@ def chart_values(element, points):
     if element.show_values and len(element.series) == 1:
         for i, (value, (x, y)) in enumerate(zip(element.series[0].values, points)):
             focus = i == element.highlight
-            yield display_value(value, element.value_prefix), x, y, element.mark_color(i), focus
+            yield element.format_value(value), x, y, element.mark_color(i), focus
 
 
 def bar_value_position(element, index, geometry, gap):
     x, y, w, h = geometry
     value = element.series[0].values[index]
-    text = display_value(value, element.value_prefix)
+    text = element.format_value(value)
     if element.chart == "bar":
         return text, x + w + gap if value >= 0 else x - gap, y + h / 2, "lm" if value >= 0 else "rm"
     return text, x + w / 2, y - gap if value >= 0 else y + h + gap, "mb" if value >= 0 else "mt"
@@ -427,7 +427,7 @@ def stacked_labels(element):
         for values in zip(*(series.values for series in element.series)):
             for value in values:
                 if value:
-                    yield display_value(value, element.value_prefix)
+                    yield element.format_value(value)
 
 
 def segment_ink(color):

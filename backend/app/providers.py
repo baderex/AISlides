@@ -161,7 +161,7 @@ class Intelligence:
         if required_exhibit:
             contract = exhibit_response_schema(schema, required_exhibit, visual_choice)
         elif stage == "slide" and "visual" in schema.model_fields:
-            keys = schema.model_fields.keys() - {"visual", "annotations", "decorations"}
+            keys = schema.model_fields.keys() - {"visual", "annotations", "decorations", "evidence_warnings"}
             fields = response_fields(schema, (key for key in schema.model_fields if key in keys))
             contract = create_model(schema.__name__, __config__=schema.model_config, **fields).model_json_schema()
         else:

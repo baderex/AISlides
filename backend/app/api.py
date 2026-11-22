@@ -81,6 +81,8 @@ def item_for(db, item_id, owner_id, lock=False):
 
 def validate_document_assets(db, owner_id, document):
     ids = {key for key in referenced_images(document.slides) if not bundled_icon(key)}
+    if (kit := document.theme.brand_kit) and kit.logo_asset_id:
+        ids.add(kit.logo_asset_id)
     if image_ids(db, owner_id, ids) != ids:
         raise HTTPException(422, "The deck references a missing or inaccessible image.")
     source_ids = {source.asset_id for source in document.sources if source.asset_id}
@@ -202,6 +204,14 @@ def delete_skill(skill_id: str, owner_id: str = owner):
 def create_skill(manifest: Skill, owner_id: str = owner):
     if manifest.brand:
         raise HTTPException(422, "Import the original PowerPoint file to create a branded template.")
+    if kit := manifest.theme.brand_kit:
+        if not manifest.theme.design and set(kit.protected) & {"heading_font", "cover_background", "dense_surface", "chart_colors"}:
+            raise HTTPException(422, "Include design rules for the protected brand roles.")
+        if kit.logo_asset_id:
+            with Session() as db:
+                logos = assets_for(db, owner_id, [kit.logo_asset_id])
+                if not logos or not logos[0].media_type.startswith("image/"):
+                    raise HTTPException(422, "Select an image from your uploads for the brand logo.")
     return store_skill(manifest, owner_id)
 
 
@@ -585,10 +595,11 @@ def chat(item_id: str, data: ChatRequest, owner_id: str = owner):
         item = item_for(db, item_id, owner_id)
         assert_editable(item, item.revision)
         document = read_document(item.document)
+        locked_theme = presentation_brand(db, item, owner_id) is not None
         revision = item.revision
         db.expunge(item)
     proposal = propose(item, document, data)
-    revised = apply(document, proposal)
+    revised = apply(document, proposal, locked_theme=locked_theme)
     with Session.begin() as db:
         begin_write(db)
         current = item_for(db, item_id, owner_id, True)
@@ -605,7 +616,8 @@ def apply_chat(item_id: str, data: ApplyEdit, owner_id: str = owner):
         begin_write(db)
         item = item_for(db, item_id, owner_id, True)
         assert_editable(item, data.revision)
-        updated = apply(read_document(item.document), data.proposal)
+        updated = apply(read_document(item.document), data.proposal,
+                        locked_theme=presentation_brand(db, item, owner_id) is not None)
         validate_document_assets(db, owner_id, updated)
         persist(db, item, updated, "AI-assisted edit")
         emit(db, item, "conversation.assistant", "Applied the proposed slide edits.")

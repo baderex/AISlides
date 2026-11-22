@@ -44,6 +44,13 @@ class DesignConstraints(Contract):
     body_font: str | None = Field(default=None, max_length=60)
 
 
+class BrandKit(Contract):
+    protected: list[Literal["background", "ink", "accent", "muted", "surface", "font",
+                            "heading_font", "cover_background", "dense_surface", "chart_colors"]] = Field(
+        default_factory=list, max_length=10)
+    logo_asset_id: Identifier | None = None
+
+
 class Theme(Contract):
     background: Color = "#F7F8FF"
     ink: Color = "#181D3B"
@@ -54,6 +61,7 @@ class Theme(Contract):
     profile: Literal["standard", "consulting"] = "standard"
     design: DesignRules | None = None
     constraints: DesignConstraints | None = None
+    brand_kit: BrandKit | None = None
 
 
 class Source(Contract):
@@ -66,6 +74,7 @@ class Source(Contract):
 
 class ElementBase(Contract):
     id: Identifier = Field(default_factory=uid)
+    element_key: str | None = Field(default=None, max_length=300)
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
     w: float = Field(gt=0, le=1)
@@ -263,6 +272,7 @@ class Chart(ElementBase):
     label_color: Color = "#292C49"
     font: str = Field(default="Arial", max_length=60)
     value_prefix: str = Field(default="", max_length=8)
+    value_suffix: str = Field(default="", max_length=8)
     show_values: bool = False
     highlight: int | None = Field(default=None, ge=0)
     context_color: Color | None = None
@@ -298,8 +308,11 @@ class Chart(ElementBase):
     def category_labels(self) -> list[str]:
         if self.chart != "stacked_column":
             return self.categories
-        return [f"{category}  {display_value(total, self.value_prefix)}"
+        return [f"{category}  {self.format_value(total)}"
                 for category, total in zip(self.categories, self.totals())]
+
+    def format_value(self, value: float) -> str:
+        return display_value(value, self.value_prefix) + self.value_suffix
 
     def colors(self):
         return self.palette or [self.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
@@ -345,6 +358,8 @@ class SlideSpec(Contract):
     data_driven: bool = False
     id_namespace: Identifier | None = None
     generated_ids: list[Identifier] = Field(default_factory=list, max_length=100)
+    identity_version: Literal[1, 2] = 1
+    generated_elements: dict[Identifier, dict[str, JsonValue]] = Field(default_factory=dict, max_length=100)
     deleted_ids: list[Identifier] = Field(default_factory=list, max_length=1000)
     generated_background: Color | None = None
     generated_notes: str = Field(default="", max_length=7000)

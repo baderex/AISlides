@@ -5,12 +5,13 @@ from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_v
 from pydantic_core import PydanticCustomError
 
 from app.branding import choose_layout, compose_branded
-from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
+from app.consulting import CONSULTING_ICON_LAYOUTS, consulting_rules, consulting_theme, requested_consulting
 from app.design import blend, readable, style_chart, style_slide_tables
 from app.diagrams import Diagram, Swimlane, draw_diagram, draw_swimlane
 from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Recipe, Series, Shape, ShortText,
                         Slide, Table, Text, Theme, display_value)
 from app.exhibit_layout import ExhibitCanvas, compose_exhibit
+from app.evidence import EvidenceObservation
 from app.lucide import ICON_NAMES
 from app.questions import Question
 from app.rendering import contrast, fit_image, longest_word_width, physical, slide_icon, text_height
@@ -296,6 +297,7 @@ class SlideContent(Contract):
     subtitle: str = Field(default="", max_length=220)
     points: list[Point] = Field(default_factory=list, max_length=5)
     notes: str = Field(default="", max_length=5000)
+    evidence_warnings: list[ShortText] = Field(default_factory=list, max_length=6)
     source_ids: list[str] = Field(default_factory=list, max_length=12)
     image_asset_id: str | None = None
     image_prompt: str = Field(default="", max_length=400)
@@ -355,12 +357,14 @@ class ResearchQueries(Contract):
 class EvidenceSummary(PlanningResponse):
     summary: str = Field(max_length=2200)
     uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
+    observations: list[EvidenceObservation] = Field(default_factory=list, max_length=64)
 
 
 class ResearchBrief(Contract):
     summary: str = Field(max_length=1800)
     uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
     follow_up: Question | None = None
+    observations: list[EvidenceObservation] = Field(default_factory=list, max_length=64)
 
 
 class Review(Contract):
@@ -391,12 +395,12 @@ def is_data_driven(direction: str) -> bool:
 
 
 def design(direction: str, mode: str, selected: Theme | None) -> Theme:
-    if selected:
-        return selected
     direction = direction.lower()
     if requested_consulting(direction) or any(term in direction for term in
         ("strategy consulting", "consulting-style", "consulting style", "consulting deck", "management consulting")):
-        return consulting_theme()
+        return selected.model_copy(update={"profile": "consulting"}) if selected else consulting_theme()
+    if selected:
+        return selected
     if "editorial" in direction:
         return Theme(background="#F7F2E9", ink="#27213D", accent="#9D3C30", muted="#625968", surface="#EEE2D2", font="Georgia")
     if "academic" in direction:
@@ -445,26 +449,34 @@ def select_layout(item, content, document, images, *, data_driven, allow_variant
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
             brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None,
             image_ratio: float | None = None, data_driven: bool = False, recipe: Recipe = "standard") -> Slide:
+    if not brand and document.theme.profile == "consulting" and not document.theme.design:
+        theme = document.theme.model_copy(update={"design": consulting_rules(document.theme)})
+        document = document.model_copy(update={"theme": theme})
     source_ids = {source.id for source in document.sources}
     rules = document.theme.design
     if content.visual:
         return compose_visual_slide(item, content, document, brand, image_ids, source_ids)
+    consulting = document.theme.profile == "consulting"
+    if consulting and not brand and not content.table and not content.chart and not content.diagram and not content.swimlane and not (
+        content.stacked_comparison or content.image_asset_id or recipe in {"feature_panels", "feature_rows"}
+    ) and item.layout in {"comparison", "research"} and content.points:
+        content = content.model_copy(update={"table": [["Observation", "Implication"],
+            *[[point.title, point.body] for point in content.points]]})
     layout = select_layout(item, content, document, image_ids, data_driven=data_driven,
-                           allow_variants=bool(rules and not brand and document.theme.profile == "standard"))
+                           allow_variants=bool(rules and not brand))
+    if consulting and not brand and content.table_ready and layout == "comparison":
+        layout = "research"
     item = item.model_copy(update={"layout": layout})
     if brand:
         slide = compose_branded(item, content, document, image_ids, brand)
         return style_slide_tables(slide, document.theme, preserve_palette=True)
     t = document.theme
-    if t.profile == "consulting":
-        slide = compose_consulting(item, content, document, index, image_ids, web_image_ratio=web_image_ratio)
-        return style_slide_tables(slide, t, preserve_palette=True)
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     font_scale = max(.87, factor) if rules else factor
     ptw, pth = physical(document)
     editorial = t.font == "Georgia"
-    dark = item.layout in DISPLAY_LAYOUTS and not editorial
+    dark = item.layout in DISPLAY_LAYOUTS and not editorial and not consulting
     bg = t.ink if dark else t.background
     ink, muted, accent = ("#FFFFFF", "#DDE1F5", "#E0DBFF") if dark else (t.ink, t.muted, t.accent)
     if rules:
@@ -476,17 +488,17 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                   source_ids=list(dict.fromkeys(s for s in content.source_ids if s in source_ids)))
     elements = slide.elements
 
-    def rect(x, y, w, h, fill, shape="rect"):
-        elements.append(Shape(x=x, y=y, w=w, h=h, fill=fill, shape=shape, z=-1))
+    def rect(x, y, w, h, fill, shape="rect", *, element_key=None):
+        elements.append(Shape(x=x, y=y, w=w, h=h, fill=fill, shape=shape, z=-1, element_key=element_key))
 
-    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False, align="left"):
+    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False, align="left", element_key=None):
         if value.strip():
             face = rules.heading_font if rules and heading else t.font
             elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * font_scale),
-                                 color=color, bold=bold, font=face, align=align))
+                                 color=color, bold=bold, font=face, align=align, element_key=element_key))
 
     def fitted_label(value, x, y, w, max_h, preferred, minimum, color, *, bold=False, heading=False,
-                     prefer_one_line=False, keep_words=False, align="left"):
+                     prefer_one_line=False, keep_words=False, align="left", element_key=None):
         if not value.strip():
             return y
         face = rules.heading_font if rules and heading else t.font
@@ -498,7 +510,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             if height <= max_h and (not keep_words or longest_word_width(value, size, bold, face) <= .98 * w * ptw):
                 break
         height = min(height, max_h)
-        label(value, x, y, w, height, size / font_scale, color, bold, heading=heading, align=align)
+        label(value, x, y, w, height, size / font_scale, color, bold, heading=heading, align=align, element_key=element_key)
         return y + height
 
     points = content.points
@@ -629,29 +641,36 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         body_ink = readable(muted, panel, panel_ink)
         panel_accent = readable(accent, panel, panel_ink, minimum=3)
         for index, point in enumerate(points[:3]):
+            name = point.title.strip().casefold()
+            if sum(other.title.strip().casefold() == name for other in points) > 1:
+                name = f"{name}:{point.body.strip().casefold()}"
+            identity = f"feature:{name}"
             horizontal = recipe == "feature_panels"
             gap = .018
             step = (.86 + gap) / min(len(points), 3)
             row_step = (.914 - body_top) / min(len(points), 3)
             x, y = (.07 + index * step, body_top + .015) if horizontal else (.07, body_top + index * row_step)
             w, h = (step - gap, .89 - y) if horizontal else (.86, row_step - .012)
-            rect(x, y, w, h, panel)
-            rect(x, y, w if horizontal else .005, .006 if horizontal else h, panel_accent)
+            rect(x, y, w, h, panel, element_key=f"{identity}:background")
+            rect(x, y, w if horizontal else .005, .006 if horizontal else h, panel_accent, element_key=f"{identity}:accent")
             prefix = rf"^(?:Step\s+0?{index + 1}|0?{index + 1})\s*[:.–-]\s*"
             title = re.sub(prefix, "", point.title, flags=re.I)
             if horizontal:
                 icon_y = y + .044
                 if point.icon:
-                    elements.append(slide_icon(document, point.icon, x + .02, icon_y, min(.062, h * .14), panel))
+                    icon = slide_icon(document, point.icon, x + .02, icon_y, min(.062, h * .14), panel)
+                    icon.element_key = f"{identity}:icon"
+                    elements.append(icon)
                 end = fitted_label(title, x + .02, y + h * .28, w - .04, h * .31,
-                                   28, 17, panel_ink, bold=True, heading=True)
-                fitted_label(point.body, x + .02, end + .027, w - .04, y + h - end - .042, 16, 13, body_ink)
+                                   28, 17, panel_ink, bold=True, heading=True, element_key=f"{identity}:heading")
+                fitted_label(point.body, x + .02, end + .027, w - .04, y + h - end - .042, 16, 13, body_ink,
+                             element_key=f"{identity}:body")
             else:
                 split = .31
                 fitted_label(title, x + .024, y + .024, split, max(.05, h - .037),
-                             23, 14, panel_ink, bold=True, heading=True)
+                             23, 14, panel_ink, bold=True, heading=True, element_key=f"{identity}:heading")
                 fitted_label(point.body, x + split + .06, y + .024, w - split - .084, max(.05, h - .037),
-                             18, 13, body_ink)
+                             18, 13, body_ink, element_key=f"{identity}:body")
         return slide
     first_body_element = len(elements)
     use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table or content.stacked_comparison)
@@ -753,7 +772,9 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         full = recipe == "dense_table_full"
         elements.append(Table(x=.055 if full else .07, y=.446 if full else .46, w=.89 if full else .86,
                               h=.50 if full else .44, rows=rows, color=t.ink, fill=t.surface,
-                              focus_rows=selected, focus_columns=focus_columns))
+                              focus_rows=selected, focus_columns=focus_columns, element_key="exhibit:table",
+                              header_fill=accent if consulting else None,
+                              header_color=readable("#FFFFFF", accent) if consulting else None))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
         if web_image_ratio or image_ratio:
@@ -781,7 +802,8 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             elements.append(Chart(x=.07, y=.52 if callout else .51 if show_caption else .45, w=chart_width,
                                   h=.39 if show_caption else .46, categories=data.categories, show_values=direct_labels,
                                   highlight=highlight, series=[{"name": data.label, "values": data.values}],
-                                  chart=data.chart, color=t.accent))
+                                  chart=data.chart, color=t.accent, value_prefix=data.value_prefix, value_suffix=data.value_suffix,
+                                  element_key="exhibit:chart"))
         except ValueError:
             slide.warnings.append("The chart data could not be rendered.")
         else:
@@ -792,7 +814,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 fitted_label(callout, .08 + caption_width, .443, chart_width - caption_width - .01,
                              .073, 20, 11, accent, bold=True, align="right")
             if has_table:
-                rows = [["Category", "Value"], *[[category, f"{value:,.8g}"]
+                rows = [["Category", "Value"], *[[category, f"{display_value(value, data.value_prefix)}{data.value_suffix}"]
                         for category, value in zip(data.categories, data.values)]]
                 elements.append(Table(x=.635, y=.45, w=.295, h=min(.44, .060 * len(rows)), rows=rows,
                                       size=max(9, min(14 * factor, 132 / len(rows))), color=ink, fill=t.surface,
@@ -819,7 +841,11 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         row_height = .48 / len(visible)
         for i, point in enumerate(visible):
             y = .45 + i * row_height
-            label(f"{i + 1:02}", .07, y + .008, .09, row_height - .012, 27, accent, True, heading=True)
+            with_icon = bool(use_icons and point.icon)
+            label(f"{i + 1:02}", .07, y + .008, .050 if with_icon else .09,
+                  row_height - .012, 23 if with_icon else 27, accent, True, heading=True)
+            if with_icon:
+                elements.append(slide_icon(document, point.icon, .124, y + .011, .040, bg))
             if i:
                 rect(.07, y, .86, .002, t.surface)
             title = re.sub(rf"^Step\s+0?{i + 1}\s*[:.–-]\s*", "", point.title, flags=re.IGNORECASE)
@@ -882,7 +908,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     if len(points) > 3:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]
-    return style_slide_tables(slide, t)
+    return style_slide_tables(slide, t, preserve_palette=consulting)
 
 
 def compose_visual_slide(item, content, document, brand, image_ids, source_ids):

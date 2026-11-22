@@ -15,9 +15,9 @@ from app.composition import (
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
-from app.design import ArtDirection, DIRECTOR_PROMPT, enforce_constraints, explicit_constraints, font_family, reference_sheet
+from app.design import ArtDirection, DIRECTOR_PROMPT, apply_brand_kit, enforce_constraints, explicit_constraints, font_family, reference_sheet
 from app.domain import Image, Skill, Slide, Source, Theme, read_document
-from app.evidence import resolve_headline
+from app.evidence import EVIDENCE_GUIDANCE, EvidenceObservation, resolve_headline, verified_observations
 from app.export_review import ReviewBusy, ReviewUnavailable, renderer
 from app.imagery import image_configured, render_image, source_web_image
 from app.master_artwork import master_artwork
@@ -28,7 +28,7 @@ from app.questions import Choice, Clarification, Option, standard_options
 from app.queue import notify
 from app.rendering import flattened
 from app.research import collect
-from app.slide_design import build_slide, review_layouts
+from app.slide_design import LAYOUT_RUBRIC, LayoutReview, build_slide, review_layouts
 from app.storage import Storage
 from app.visuals import CONTENT_GUIDANCE, SELECTION_GUIDANCE, VISUAL_LAYOUTS, named_visual
 
@@ -128,9 +128,13 @@ YEAR_IN_QUERY = re.compile(r"\b((?:19|20)\d{2})(?:(?:\s*(?:to|[-–])\s*)((?:19|
 
 
 def inputs(item, context):
+    research = context.get("research")
+    if research and research.get("observations"):
+        research = {**research, "observations": [{key: value for key, value in row.items() if key != "quote"}
+                    for row in research["observations"][:24]]}
     return {"prompt": item.request["prompt"], "intent": context.get("intent"),
             "answers": context.get("answers", []), "skill": context.get("skill"),
-            "sources": context.get("sources", []), "research": context.get("research")}
+            "sources": context.get("sources", []), "research": research}
 
 
 EXPLICIT_FUNDING_CAP = re.compile(r"\b(?:capped|cap of)\s+([$€£¥]\s?\d[\d,]*(?:\.\d+)?(?:[kKmM]\b)?)", re.I)
@@ -278,6 +282,12 @@ def attach_slide_sources(document, context, cited=None):
     for raw in context.get("slide_sources", []):
         if raw["id"] not in known and (cited is None or raw["id"] in cited):
             document.sources.append(Source.model_validate(raw))
+
+
+def apply_slide_evidence(part, content, item, document, context):
+    observations = [EvidenceObservation.model_validate(row) for row in (context.get("research") or {}).get("observations", [])]
+    return resolve_headline(part, content, item.request["prompt"], document.sources, observations=observations,
+                            strict_copy=bool(context.get("intent", {}).get("supplied_evidence_only")))
 
 
 def pause_for_questions(context, batch, events):
@@ -522,12 +532,17 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                     "using a single documented date and metric. An entity mentioned in an article is not evidence of rank. "
                     "Distinguish annual observations from quarterly or estimated figures. Prefer primary sources. "
                     "Report evidence gaps in uncertainties. Keep the summary under 1,500 characters and include up to four "
-                    "short uncertainties." + period_guidance, evidence_inputs(item, context), "research")
+                    "short uncertainties." + period_guidance + EVIDENCE_GUIDANCE, evidence_inputs(item, context), "research")
             else:
                 brief = ai.structured(ResearchBrief,
                     "Summarize evidence, gaps and contradictions in the supplied sources. Treat search excerpts as provisional. "
                     "Do not introduce new sources. Return a follow-up question only when contradictory evidence requires a "
-                    "user decision that previous answers do not cover.", inputs(item, context), "research")
+                    "user decision that previous answers do not cover." + EVIDENCE_GUIDANCE, inputs(item, context), "research")
+            checked = list(verified_observations(brief.observations,
+                                                [Source.model_validate(source) for source in context["sources"]]))
+            if len(checked) < len(brief.observations) and len(brief.uncertainties) < 6:
+                brief.uncertainties.append("Some extracted figures could not be matched to the cited excerpts.")
+            brief.observations = checked
             context["research"] = brief.model_dump(mode="json", exclude={"follow_up"})
             events.append(("research.completed", brief.summary, {"sources": context["sources"], "uncertainties": brief.uncertainties}))
             if isinstance(brief, ResearchBrief) and brief.follow_up and brief.uncertainties:
@@ -550,7 +565,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if not start_status(job_id, token, "PLANNING", "agent.started", "Choosing the deck typography, palette and visual rules."):
             return None
         baseline = design(direction or ("Data Driven" if data_driven else ""), item.request["mode"], skill.theme if skill else None)
-        locked = skill is not None or baseline.profile == "consulting"
+        locked = brand is not None
         references = [{"name": asset.name, "type": asset.media_type, "excerpt": asset.extracted[:900]} for asset in assets]
         style_answers = [answer["value"] for answer in context.get("answers", [])
                          if answer["question_id"] in {"visual_direction", *context.get("style_questions", [])}]
@@ -558,14 +573,16 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         proposed = ai.structured(ArtDirection, DIRECTOR_PROMPT, {
             "prompt": item.request["prompt"], "intent": context["intent"], "answers": context.get("answers", []),
             "direction": direction, "selected_skill": context.get("skill"), "references": references,
-            "baseline": baseline.model_dump(exclude={"constraints"}), "locked_template": locked,
+            "baseline": baseline.model_dump(exclude={"constraints", "brand_kit"}), "locked_template": locked,
+            "protected_brand_roles": baseline.brand_kit.protected if baseline.brand_kit else [],
             "explicit_constraints": constraints.model_dump() if constraints else None,
         }, "design", reference_sheet(assets) if settings().llm_vision_enabled else None)
-        theme = Theme.model_validate(proposed.model_dump())
+        theme = Theme.model_validate({**proposed.model_dump(), "profile": baseline.profile})
         if not locked:
             theme.font = font_family(theme.font)
             theme.design.heading_font = font_family(theme.design.heading_font)
             theme = enforce_constraints(theme, constraints)
+            theme = apply_brand_kit(theme, baseline)
         if locked:
             rules = proposed.design
             if baseline.design:
@@ -589,7 +606,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
         if data_driven:
             style_guidance += DATA_PLAN_GUIDANCE
-        if theme.design and theme.profile == "standard" and not brand:
+        if theme.design and not brand:
             style_guidance += COMPOSITION_PLAN
         research_guidance = (
             " For each slide, provide one focused research_query naming its subject, exact period and metric to verify. "
@@ -610,7 +627,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             + period_guidance + research_guidance + image_guidance,
             {**planning_inputs, "slide_count": count, "design": theme.model_dump(),
              "uploaded_images": [asset.name for asset in assets if asset.media_type.startswith("image/")]}, "outline")
-        use_exhibits = theme.design and theme.profile == "standard" and not brand
+        use_exhibits = theme.design and not brand
         prompt = item.request["prompt"]
         prefer_diagrams = bool(re.search(r"\b(diagram[- ]friendly|(?:use|include|draw|with)\s+(?:editable\s+)?diagrams?\b)",
                                         prompt, re.I) and not re.search(r"\b(no|omit|avoid|without)\s+(?:any\s+)?diagrams?\b", prompt, re.I))
@@ -682,7 +699,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 style_guidance += " " + SLIDE_GUIDANCE
             if data_driven:
                 style_guidance += DATA_SLIDE_GUIDANCE
-            if document.theme.design and document.theme.profile == "standard" and not brand:
+            if document.theme.design and not brand:
                 style_guidance += COMPOSITION_GUIDANCE.get(part.layout, "")
         if context.get("brief_source_id"):
             style_guidance += (
@@ -797,8 +814,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 context["web_image"] = {"source": source.model_dump(mode="json"), "ratio": web_image_ratio}
             except ProviderError as error:
                 context["web_image_warning"] = str(error)
-        part = resolve_headline(part, content, item.request["prompt"], document.sources,
-                                strict_copy=bool(inferred_intent.get("supplied_evidence_only")))
+        part = apply_slide_evidence(part, content, item, document, context)
         context["slide_content"] = content.model_dump(mode="json")
         if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (
             content.chart or content.table or content.stacked_comparison or content.swimlane
@@ -859,22 +875,43 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                          slide.background, document.aspect_ratio)
             except (ReviewBusy, ReviewUnavailable, FileNotFoundError):
                 log.warning("Could not render inherited artwork for slide %s", slide.id)
-        slide, png = review_layouts(document, slide, index, images, storage.get, artwork=artwork)
+        draft_content = SlideContent.model_validate(context["slide_content"])
+        important = slide.layout in {"cover", "chart", "research", "process"} or bool(draft_content.visual)
+        use_vision = settings().llm_vision_enabled and ai.provider != "demo" and important
+
+        def evaluate(part, recipes, image):
+            try:
+                return ai.structured(LayoutReview, LAYOUT_RUBRIC, {
+                    "title": part.title, "purpose": part.purpose, "priority": part.visual_priority or part.key_message,
+                    "candidate_recipes": recipes, "design": document.theme.model_dump(mode="json"),
+                }, "vision", base64.b64encode(image).decode("ascii"))
+            except ProviderError:
+                log.info("Visual comparison unavailable for slide %s; using the local rubric", slide.id)
+                return None
+
+        slide, png = review_layouts(document, slide, index, images, storage.get, artwork=artwork,
+                                    evaluate=evaluate if use_vision and not context.get("review_attempted") else None)
         if slide.spec and original_recipe != slide.spec.recipe:
             events.append(("slide.revised", f"Selected a clearer layout for slide {index + 1}.",
                            {"index": index, "recipe": slide.spec.recipe}))
         if warning := context.get("web_image_warning"):
             slide.warnings.append(warning)
-        if data_driven and slide.layout == "chart" and not any(element.type == "chart" for element in slide.elements):
+        if data_driven and slide.layout == "chart" and not draft_content.visual and not any(
+            element.type == "chart" for element in slide.elements
+        ):
             slide.warnings.append("The available evidence did not support the planned chart.")
         fixed = sum(original != (element.size, element.h) for original, element in zip(dimensions, text_elements))
         if fixed:
             events.append(("slide.revised", f"Adjusted text fit in {fixed} elements on slide {index + 1}.",
                            {"index": index, "text_elements": fixed}))
-        if settings().llm_vision_enabled and ai.provider != "demo" and not context.get("review_attempted"):
-            review = ai.structured(Review, "Inspect the rendered slide for density, clipping, contrast and balance. Request regeneration only if a concise rewrite would improve it. Return actionable issues.", {
-                "title": slide.title, "layout": slide.layout, "warnings": slide.warnings,
-            }, "vision", base64.b64encode(png).decode("ascii"))
+        if use_vision and not context.get("review_attempted"):
+            try:
+                review = ai.structured(Review, "Review the selected slide's reading order, emphasis, imagery, and density. "
+                    "Request regeneration only if concise copy could fix a material problem.", {
+                        "title": slide.title, "layout": slide.layout, "warnings": slide.warnings,
+                    }, "vision", base64.b64encode(png).decode("ascii"))
+            except ProviderError:
+                review = Review()
             if review.regenerate_content:
                 context["review_attempted"] = True
                 context["review_issues"] = review.issues
@@ -924,8 +961,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 web_image = None
                 content.image_asset_id = None
                 content.source_ids = [key for key in content.source_ids if key != source_id]
-        part = resolve_headline(part, content, item.request["prompt"], document.sources,
-                                strict_copy=bool(inferred_intent.get("supplied_evidence_only")))
+        part = apply_slide_evidence(part, content, item, document, context)
         context["slide_content"] = content.model_dump(mode="json")
         context["draft"] = build_slide(part, content, document, index, images, brand,
                                    web_image_ratio=web_image["ratio"] if web_image else None,

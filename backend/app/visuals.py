@@ -52,6 +52,7 @@ CONTENT_GUIDANCE = (
     " Populate visual with its requested type and variant and actual exhibit data. "
     "Use semantic values, relationships and time buckets; never give slide coordinates. "
     "Include units, axes, scale meaning, legend labels, and conditions where applicable. "
+    "For ranked bars, funnels and Pareto charts, include the exact source metric name in metric. "
     "For a qualitative two-by-two, place each label in a named quadrant without assigning scores. "
     "Use decorations only when meaningful: kicker with an optional icon, key_metric, delta, status (0–4), "
     "a highlight_band matching a row or period, callout or footnote. "
@@ -103,6 +104,7 @@ class MetricRow(Contract):
 
 class QuantitativeVisual(VisualBase):
     type: QuantitativeType
+    metric: str = Field(default="", max_length=80, description="Source metric name for a single-value series.")
     rows: list[MetricRow] = Field(min_length=2, max_length=8)
     series: list[Label] = Field(default_factory=list, max_length=4)
     highlight: Label | None = None

@@ -21,6 +21,14 @@ An outline slide can declare `slideIntent`, `mainMessage`, a `visual` type and o
 
 Series and marks use editable PowerPoint shapes and labels. Matrix exhibits use native tables with cell colors, weights and recommendation markers where applicable. The composer also supports annotation arrows, callout panels, kickers, key metrics, deltas, status markers, rich-text emphasis, highlight bands, source notes, footnotes, and legends. Quantitative exhibits require a cited source. For a qualitative heatmap, ordered categories define color meaning directly.
 
+Consulting uses the shared composer and slide specifications. Its profile supplies defaults for density, typography, headlines, and exhibits. Style presets supply defaults that prompts can override. A skill manifest may also define a `theme.brand_kit` with protected theme roles and the ID of an uploaded logo. A corporate PowerPoint template retains its master, placeholders, and aspect ratio.
+
+Semantic keys identify editable objects across recipes. Restyling applies field-level content and style edits to matching objects. It also carries through geometry edits to those objects when the recipe and slide layout stay the same. Older slides with manual edits use the existing style-only update when their element identities cannot be matched reliably.
+
+Layout review first checks technical fit and exhibit completeness. It then evaluates hierarchy, emphasis, balance, imagery, and fit to the requested style. When vision is enabled, important slides can compare eligible renders using that rubric. The local rubric remains available without vision.
+
+Evidence extraction records source IDs, quoted observations, periods, scales, and scope. Reconciliation checks observations against their cited excerpts before using them and retains the original text parser for supported text-only patterns. Conflicting values or scopes produce visible review notes.
+
 See the [agent workflow](agent-workflow.md), [data model](data-model.md) and [production deployment guide](production-deployment.md).
 
 ## Reference review

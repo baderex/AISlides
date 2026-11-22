@@ -123,13 +123,16 @@ def draw_swimlane(elements, diagram, body_top, theme, background, label):
         box = Shape(x=cx - w/2, y=cy - h/2, w=w, h=h,
                     shape="diamond" if node.decision else "rect",
                     fill=blend(background, theme.accent, .10) if node.decision else background,
-                    border=accent if node.decision else blend(background, ink, .43), z=-2)
+                    border=accent if node.decision else blend(background, ink, .43), z=-2,
+                    element_key=f"swimlane:{node.id}:node")
         boxes[node.id] = box
         lane_by_node[node.id] = node.lane
         elements.append(box)
         inset = .22 if node.decision else .08
         centered_label(node.label, box.x + w*inset, cy, w*(1-2*inset), min(.093, h*.65),
                        15, 9, readable(ink, box.fill), bold=True, keep_words=True, align="center")
+        if node.label.strip():
+            elements[-1].element_key = f"swimlane:{node.id}:heading"
 
     for edge in diagram.edges:
         start, end = boxes[edge.source], boxes[edge.target]
@@ -165,11 +168,15 @@ def draw_swimlane(elements, diagram, body_top, theme, background, label):
                 y, h = y1 - .006, .012
             label_box = (x + .003, y1 - .063, w - .006, .054)
             align = "center"
+        edge_key = f"swimlane:{edge.source}:{edge.target}"
         elements.append(Line(x=x, y=y, w=w, h=h, direction=direction, route="elbow" if elbow else "straight",
+                             element_key=f"{edge_key}:connector",
                              start_anchor=ConnectorAnchor(shape_id=start.id, side=ports[0]),
                              end_anchor=ConnectorAnchor(shape_id=end.id, side=ports[1]),
                              arrows="end", color=shade, weight=1.75 if edge.emphasis else 1.2, z=-3))
-        label(edge.label, *label_box, 12, 8, shade, bold=edge.emphasis, align=align)
+        if edge.label.strip():
+            label(edge.label, *label_box, 12, 8, shade, bold=edge.emphasis, align=align)
+            elements[-1].element_key = f"{edge_key}:label"
 
 
 def draw_diagram(elements, diagram, body_top, theme, background, label, *, compact, vertical_flow=False):
@@ -182,23 +189,34 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
     connector = blend(background, ink, .72)
 
     def draw_node(node, x, y, w, h, condition="", *, wide=False):
+        identity = node_keys[id(node)]
+
+        def node_label(role, *args, **kwargs):
+            count = len(elements)
+            result = label(*args, **kwargs)
+            if len(elements) > count:
+                elements[-1].element_key = f"{identity}:{role}"
+            return result
+
         color = role_colors[node.role]
         panel = blend(background, color, .10)
-        box = Shape(x=x, y=y, w=w, h=h, fill=panel, border=blend(panel, color, .52), z=-2)
+        box = Shape(x=x, y=y, w=w, h=h, fill=panel, border=blend(panel, color, .52), z=-2,
+                    element_key=f"{identity}:node")
         elements.append(box)
-        elements.append(Shape(x=x, y=y, w=.006, h=h, fill=color, z=-1))
+        elements.append(Shape(x=x, y=y, w=.006, h=h, fill=color, z=-1, element_key=f"{identity}:accent"))
         text_x, text_w = x + .016, w - .032
         top = y + .014
         node_ink = readable(theme.ink, panel)
         if wide:
-            label(node.label, text_x, top, .315, h - .024, 17, 10, node_ink, bold=True, keep_words=True)
+            node_label("heading", node.label, text_x, top, .315, h - .024, 17, 10, node_ink, bold=True, keep_words=True)
             detail = "\n".join(part for part in (node.detail, node.contains) if part)
-            label(detail, x + .355, top, w - .373, h - .024, 14, 10, readable(theme.muted, panel, node_ink))
+            node_label("detail" if not node.contains else "combined-detail",
+                       detail, x + .355, top, w - .373, h - .024, 14, 10, readable(theme.muted, panel, node_ink))
             return box
         if condition:
-            top = label(condition, text_x, top, text_w, h * .26, 11, 9,
+            top = node_label("condition", condition, text_x, top, text_w, h * .26, 11, 9,
                         readable(color, panel, node_ink), bold=True) + .004
-        end = label(node.label, text_x, top, text_w, h * (.36 if node.detail or node.contains else .67),
+        end = node_label("heading", node.label, text_x, top, text_w, h * (.36 if node.detail or node.contains else .67),
                     23 if h >= .24 else 18, 10, node_ink, bold=True, keep_words=True)
         if node.contains:
             inner_y = y + h * (.69 if node.detail else .52)
@@ -210,23 +228,36 @@ def draw_diagram(elements, diagram, body_top, theme, background, label, *, compa
         if node.detail:
             detail_end = inner_y - .004 if node.contains else y + h - .012
             if detail_end > end + .008:
-                label(node.detail, text_x, end + .005, text_w, detail_end - end - .005, 15, 11,
+                node_label("detail", node.detail, text_x, end + .005, text_w, detail_end - end - .005, 15, 11,
                       readable(theme.muted, panel, node_ink))
         return box
 
+    def connector_key(start, end):
+        if start or end:
+            path = f"{start.element_key if start else 'branch'}>{end.element_key if end else 'branch'}"
+            return f"{path}:connector"
+        return None
+
     def horizontal(x, y, width, arrows="none", start=None, end=None):
         elements.append(Line(x=x, y=y - .012, w=width, h=.024, direction="right",
-                             arrows=arrows, color=connector, weight=1.6, z=-3,
+                             arrows=arrows, color=connector, weight=1.6, z=-3, element_key=connector_key(start, end),
                              start_anchor=ConnectorAnchor(shape_id=start.id, side="right") if start else None,
                              end_anchor=ConnectorAnchor(shape_id=end.id, side="left") if end else None))
 
     def vertical(x, y, height, arrows="none", start=None, end=None):
         elements.append(Line(x=x - .012, y=y, w=.024, h=height, direction="down",
-                             arrows=arrows, color=connector, weight=1.6, z=-3,
+                             arrows=arrows, color=connector, weight=1.6, z=-3, element_key=connector_key(start, end),
                              start_anchor=ConnectorAnchor(shape_id=start.id, side="bottom") if start else None,
                              end_anchor=ConnectorAnchor(shape_id=end.id, side="top") if end else None))
 
     lanes = diagram.lanes
+    node_keys = {}
+    for lane_index, lane in enumerate(lanes):
+        for node_index, node in enumerate(lane.nodes):
+            name = node.label.strip().casefold()
+            if sum(other.label.strip().casefold() == name for other in lane.nodes) > 1:
+                name = f"{name}:{node_index}"
+            node_keys[id(node)] = f"diagram:{lane_index}:{lane.title.strip().casefold()}:{name}"
     body_end = .82 if diagram.recap else .91
     weights = [1.24 if lane.kind == "branch" else 1 for lane in lanes]
     gap = .034
