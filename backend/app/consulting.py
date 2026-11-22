@@ -4,13 +4,14 @@ import re
 from typing import TYPE_CHECKING
 
 from app.domain import Chart, Document, Image, Shape, Slide, Table, Text, Theme
-from app.rendering import fit_image
+from app.rendering import fit_image, slide_icon
 
 if TYPE_CHECKING:
     from app.composition import OutlineItem, SlideContent
 
 
 CONSULTING_DIRECTION = "Strategy consulting"
+CONSULTING_ICON_LAYOUTS = frozenset({"summary", "metrics", "showcase", "editorial", "timeline", "process", "closing"})
 FIRM = r"(?:bcg|boston consulting group)"
 STYLE = r"(?:style|inspired|format|look|aesthetic|visuals?|layout|template|design|like)"
 
@@ -71,15 +72,16 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
     block(.06, .255, .88, .005)
     label(content.subtitle, .06, .279, .88, .088, 17, theme.muted)
     points = content.points[:4]
+    use_icons = item.layout in CONSULTING_ICON_LAYOUTS and not (content.chart or content.table)
     rows = content.table or []
     valid_table = 2 <= len(rows) <= 7 and 2 <= len(rows[0]) <= 5 and all(len(row) == len(rows[0]) for row in rows)
-    if not valid_table and item.layout in {"comparison", "research"} and points:
+    if not valid_table and item.layout in {"comparison", "research"} and points and not web_image_ratio:
         rows = [["Observation", "Implication"], *[[point.title, point.body] for point in points]]
         valid_table = True
 
     chart = content.chart
     exhibit = None
-    if chart and source_ids and not web_image_ratio:
+    if chart and source_ids:
         try:
             exhibit = Chart(x=.06, y=.39, w=.88, h=.50, chart=chart.chart, categories=chart.categories,
                             series=[{"name": chart.label, "values": chart.values}], color=theme.accent)
@@ -88,7 +90,7 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
 
     if exhibit:
         slide.elements.append(exhibit)
-    elif valid_table and not web_image_ratio:
+    elif valid_table:
         rows = [[cell[:180] for cell in row] for row in rows]
         slide.elements.append(Table(x=.06, y=.39, w=.88, h=.5, rows=rows, fill=theme.surface, color=theme.ink,
                                     size=max(8, min(17 * factor, 100 / len(rows))),
@@ -113,17 +115,26 @@ def compose_consulting(item: OutlineItem, content: SlideContent, deck: Document,
         for i, point in enumerate(points):
             x = .06 + i * width
             block(x, .453, .024, .019)
-            label(f"{i + 1:02d}", x, .40, width - .018, .044, 13, theme.accent, True)
+            offset = 0
+            if use_icons and point.icon:
+                icon = slide_icon(deck, point.icon, x, .399, .044, slide.background)
+                slide.elements.append(icon)
+                offset = icon.w + .008
+            label(f"{i + 1:02d}", x + offset, .40, width - .018 - offset, .044, 13, theme.accent, True)
             label(point.title, x, .512, width - .018, .137, 21, bold=True)
             label(point.body, x, .668, width - .023, .19, 17, theme.muted)
     else:
         row_height = .49 / max(1, len(points))
+        icon_column = use_icons and any(point.icon for point in points)
+        title_x = .144 if icon_column else .079
         for i, point in enumerate(points):
             y = .385 + i * row_height
             block(.06, y + .008, .005, row_height - .027, theme.accent)
             if i:
                 block(.077, y, .863, .002, theme.surface)
-            label(point.title, .079, y + .013, .26, row_height - .025, 18, bold=True)
+            if icon_column and point.icon:
+                slide.elements.append(slide_icon(deck, point.icon, .079, y + .013, .052, slide.background))
+            label(point.title, title_x, y + .013, .339 - title_x, row_height - .025, 18, bold=True)
             label(point.body, .366, y + .013, .574, row_height - .025, 17, theme.muted)
 
     if source_ids:

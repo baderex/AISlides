@@ -21,5 +21,8 @@ dev = ["pytest>=8,<10"]
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+app = ["lucide_icons/*.png", "lucide_icons/LICENSE"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 
 test('clarify, reload, generate, edit, save and export an editable PowerPoint', async ({ page }, info) => {
+  await page.route('**/api/v1/capabilities', route => route.fulfill({ json: { research: false, images: false } }));
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Bring your ideas into focus.' })).toBeVisible();
   await expect(page.getByLabel('AI model provider')).toHaveCount(0);
@@ -45,6 +46,14 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
   await expect(page.locator('.canvas-frame')).toBeInViewport({ ratio: .9 });
   await page.screenshot({ path: info.outputPath('workspace.png') });
 
+  await page.getByRole('button', { name: /Slide 2: What makes it different/ }).click();
+  const icons = page.locator('.canvas-frame img[src*="/assets/lucide-"]');
+  await expect(icons).toHaveCount(2);
+  await expect.poll(() => icons.evaluateAll(images => images.every(image => (image as HTMLImageElement).naturalWidth > 0)))
+    .toBe(true);
+  await page.screenshot({ path: info.outputPath('workspace-icons.png') });
+  await page.getByRole('button', { name: /Slide 1: Quantum Computing/ }).click();
+
   const text = page.locator('.canvas-frame .slide-text').filter({ hasText: /^Quantum Computing$/ });
   await text.click();
   await page.getByRole('button', { name: 'Edit text', exact: true }).click();
@@ -73,6 +82,58 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
   ].join('\n'), output]);
 });
 
+test('Web research defaults to checked when available and can be turned off', async ({ page }) => {
+  let researchAvailable = true;
+  await page.route('**/api/v1/capabilities', route => route.fulfill({ json: { research: researchAvailable, images: false } }));
+  await page.route('**/api/v1/presentations', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 400, json: { detail: 'Test submission' } })
+    : route.continue());
+  await page.goto('/');
+  const research = page.getByRole('checkbox', { name: 'Web research' });
+  const generate = page.getByRole('button', { name: 'Generate slides' });
+  const submit = async () => {
+    const [request] = await Promise.all([
+      page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/presentations')),
+      generate.click(),
+    ]);
+    return request.postDataJSON().research;
+  };
+
+  await expect(research).toBeChecked();
+  await page.getByLabel('Describe your presentation').fill('Search for sources');
+  expect(await submit()).toBe(true);
+  await research.uncheck();
+  expect(await submit()).toBe(false);
+
+  researchAvailable = false;
+  const capabilitiesPromise = page.waitForResponse('**/api/v1/capabilities');
+  await page.reload();
+  await capabilitiesPromise;
+  await expect(research).toHaveCount(0);
+  await page.getByLabel('Describe your presentation').fill('Create a presentation');
+  expect(await submit()).toBe(false);
+});
+
+test('submitting while capabilities load preserves automatic research', async ({ page }) => {
+  let releaseCapabilities!: () => void;
+  const capabilities = new Promise<void>(resolve => { releaseCapabilities = resolve; });
+  await page.route('**/api/v1/capabilities', async route => {
+    await capabilities;
+    await route.fulfill({ json: { research: true, images: false } });
+  });
+  await page.route('**/api/v1/presentations', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 400, json: { detail: 'Test submission' } })
+    : route.continue());
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.getByLabel('Describe your presentation').fill('Chart annual electricity generation');
+  const [request] = await Promise.all([
+    page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/presentations')),
+    page.getByRole('button', { name: 'Generate slides' }).click(),
+  ]);
+  releaseCapabilities();
+  expect(request.postDataJSON().research).toBeNull();
+});
+
 test('the Skills page opens a reusable skill without losing the draft', async ({ page }) => {
   await page.goto('/');
   const prompt = page.getByLabel('Describe your presentation');
@@ -96,6 +157,41 @@ test('the Skills page opens a reusable skill without losing the draft', async ({
   await expect(prompt).toBeFocused();
   await page.goto('/skills');
   await expect(page.getByRole('heading', { level: 1, name: 'Skill library' })).toBeVisible();
+});
+
+test('the canvas fits saved text and table cells at different viewport widths', async ({ page, request }) => {
+  const headline = 'Water Scarcity and Agricultural Importance Define Investment Opportunity Across Middle Eastern Countries';
+  const created = await request.post('/api/v1/presentations', { data: { prompt: 'Text fit check', generate: false } });
+  expect(created.status()).toBe(201);
+  const { id, revision, document } = await created.json();
+  const saved = await request.patch('/api/v1/presentations/' + id, { data: {
+    revision,
+    document: { ...document, slides: [{ title: headline, layout: 'comparison', elements: [
+      { type: 'text', x: .06, y: .08, w: .70, h: .15, text: headline, size: 36, bold: true },
+      { type: 'table', x: .06, y: .3, w: .60, h: .22, size: 24, rows: [
+        ['Topic', 'Explain the expected outcome in plain language.'],
+        ['Timing', 'Review the result after answering the practice question.'],
+      ] },
+    ] }] },
+  } });
+  expect(saved.status()).toBe(200);
+  await page.goto('/presentation/' + id);
+  const box = page.locator('.canvas-frame .slide-text').filter({ hasText: headline });
+  const table = page.locator('.canvas-frame .slide-content > table');
+  await expect(box).toBeVisible();
+  await expect(table).toBeVisible();
+
+  for (const width of [1440, 900]) {
+    await page.setViewportSize({ width, height: 960 });
+    for (const [element, requested] of [[box, 36], [table, 24]] as const) {
+      await expect.poll(() => element.evaluate((node, size) => {
+        const frame = node.parentElement!;
+        const nominal = node.closest('.slide-canvas')!.clientWidth * size / 960;
+        return node.scrollHeight <= frame.clientHeight && node.scrollWidth <= frame.clientWidth
+          && parseFloat(getComputedStyle(node).fontSize) < nominal - .1;
+      }, requested)).toBe(true);
+    }
+  }
 });
 
 test('Recent Presentations supports confirmed deletion and links to the full list', async ({ page, request }) => {

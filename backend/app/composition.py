@@ -1,12 +1,17 @@
+import re
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
-from app.branding import compose_branded
-from app.consulting import compose_consulting, consulting_theme, requested_consulting
-from app.domain import BrandTemplate, Chart, Contract, Document, Image, Layout, Shape, ShortText, Slide, Table, Text, Theme
+from app.branding import choose_layout, compose_branded
+from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
+from app.design import readable, style_chart, style_slide_tables
+from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Series, Shape, ShortText,
+                        Slide, Table, Text, Theme, display_value)
+from app.lucide import ICON_NAMES
 from app.questions import Question
-from app.rendering import fit_image
+from app.rendering import fit_image, physical, slide_icon, text_height
 
 
 class Intent(Contract):
@@ -15,27 +20,118 @@ class Intent(Contract):
     audience: str = Field(default="", max_length=250)
     tone: str = Field(default="", max_length=250)
     visual_direction: str = Field(default="", max_length=250)
+    requires_quantitative_evidence: bool = False
     slide_count: int | None = Field(default=None, ge=1, le=30)
+    web_images_requested: bool = False
+    reuse_uploaded_images: bool = False
+    supplied_figures: bool = False
+    supplied_evidence_only: bool = False
+    supplied_phase_quantities: bool = False
     missing: list[str] = Field(default_factory=list, max_length=8)
 
 
-class OutlineItem(Contract):
+class PlanningResponse(Contract):
+    # Some providers add slide copy to the outline, even in JSON mode.
+    model_config = ConfigDict(extra="ignore", json_schema_extra={"additionalProperties": False})
+
+
+Exhibit = Literal["cover_callout", "stacked_comparison", "allocation", "rollout", "decision"]
+EXHIBIT_LAYOUTS: dict[Exhibit, Layout] = {
+    "cover_callout": "cover", "stacked_comparison": "chart", "allocation": "metrics",
+    "rollout": "timeline", "decision": "closing",
+}
+
+
+class OutlineItem(PlanningResponse):
     title: ShortText
-    layout: Layout
+    layout: Layout = Field(description="Use one exact layout ID from the enum. Use chart for a sourced chart and research for a data table.")
     purpose: str = Field(default="", max_length=500)
+    required_details: list[ShortText] = Field(default_factory=list, max_length=8)
+    point_count: int | None = Field(default=None, ge=1, le=3,
+                                    description="An explicit brief requirement for one to three visible text points.")
     image_query: str = Field(default="", max_length=380)
+    research_query: str = Field(default="", max_length=260)
+    use_uploaded_image: bool = Field(default=False, description="This slide calls for an uploaded image.")
+    exhibit: Exhibit | None = Field(default=None, description=(
+        "Choose cover_callout for a cover with a specific decision amount, stacked_comparison for comparable "
+        "non-negative totals with supplied components, allocation for an itemized budget, rollout for deployment "
+        "phases, decision for approval with success gates and a stop rule. Leave null for other slides."
+    ))
+
+    @field_validator("layout", mode="before")
+    @classmethod
+    def normalize_layout(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        label = " ".join(value.lower().replace("_", " ").replace("-", " ").split())
+        return {
+            "line chart": "chart",
+            "bar chart": "chart",
+            "column chart": "chart",
+            "pie chart": "chart",
+            "table": "research",
+            "data table": "research",
+        }.get(label, label)
 
 
-class Outline(Contract):
+class Outline(PlanningResponse):
     title: ShortText
     narrative: str = Field(default="", max_length=1000)
     slides: list[OutlineItem] = Field(min_length=1, max_length=30)
+
+    @field_validator("slides")
+    @classmethod
+    def exact_slide_count(cls, slides: list[OutlineItem], info: ValidationInfo) -> list[OutlineItem]:
+        count = (info.context or {}).get("slide_count")
+        if count is not None and len(slides) != count:
+            raise PydanticCustomError("slide_count", "return exactly {expected} slides (received {actual})",
+                                      {"expected": count, "actual": len(slides)})
+        return slides
+
+
+def planned_exhibit(item: OutlineItem, has_evidence: bool) -> Exhibit | None:
+    description = f"{item.title} {item.purpose} {' '.join(item.required_details)}".lower()
+    if item.exhibit:
+        approval = r"\b(approve|approval|authorize|authorization|endorse|endorsement|funding request|request for funding)\b"
+        if item.exhibit == "cover_callout" and not re.search(approval, f"{item.title} {item.purpose}", re.I):
+            return None
+        return item.exhibit
+    # The outline may describe the right exhibit without selecting its field.
+    if item.layout == "chart" and has_evidence and re.search(r"\b(costs?|expenses?)\b", description) and (
+        re.search(r"\bcompar\w*", description) and re.search(r"\b(components?|breakdown|broken down)\b", description)
+    ):
+        return "stacked_comparison"
+    if item.layout in {"summary", "metrics", "research", "chart", "comparison"} and has_evidence and (
+        re.search(r"\b(budget|spend|funding)\b", description)
+        and re.search(r"\b(allocat\w*|line items?|breakdown|itemiz\w*|divided)\b", description)
+    ):
+        return "allocation"
+    if item.layout in {"timeline", "process"} and re.search(r"\b(timeline|rollout|deployment)\b", description) and (
+        re.search(r"\b(risks?|mitigat\w*)\b", description)
+    ):
+        return "rollout"
+    if item.layout in {"closing", "summary", "comparison", "metrics"} and (
+        re.search(r"\b(gates?|go/no-go|success criteria|acceptance criteria)\b", description)
+        and re.search(r"\b(approval|approve|decision|pause|stop rule)\b", description)
+    ):
+        return "decision"
+    return None
 
 
 class Point(Contract):
     title: Annotated[str, Field(min_length=1, max_length=65)]
     body: str = Field(default="", max_length=250)
     value: str = Field(default="", max_length=25)
+    icon: str | None = Field(default=None, description=f"Optional Lucide icon. Use one of: {', '.join(ICON_NAMES)}.")
+
+    @field_validator("icon", mode="before")
+    @classmethod
+    def known_icon(cls, value: object) -> str | None:
+        if isinstance(value, str):
+            name = value.strip().lower()
+            if name in ICON_NAMES:
+                return name
+        return None
 
 
 class ChartContent(Contract):
@@ -43,6 +139,79 @@ class ChartContent(Contract):
     values: list[float] = Field(min_length=1, max_length=10)
     label: ShortText
     chart: Literal["column", "bar", "line", "pie"] = "column"
+
+
+class StackedComparison(Contract):
+    label: ShortText
+    categories: list[ShortText] = Field(min_length=2, max_length=4)
+    series: list[Series] = Field(min_length=2, max_length=4)
+    value_prefix: str = Field(default="", max_length=8)
+    caption: str = Field(default="", max_length=120)
+
+    @model_validator(mode="after")
+    def aligned_components(self):
+        if any(len(s.values) != len(self.categories) or any(v < 0 for v in s.values) for s in self.series):
+            raise ValueError("Provide a non-negative component value for each category in each series")
+        return self
+
+
+class AllocationLine(Contract):
+    label: Annotated[str, Field(min_length=1, max_length=58)]
+    amount: float = Field(ge=0)
+
+
+class Allocation(Contract):
+    value_prefix: str = Field(max_length=8, description="Currency symbol such as $ for supplied currency, otherwise empty.")
+    lines: list[AllocationLine] = Field(min_length=2, max_length=8)
+
+
+class Phase(Contract):
+    period: Annotated[str, Field(min_length=1, max_length=30)]
+    milestone: Annotated[str, Field(min_length=1, max_length=125, description="A short, complete milestone phrase.")]
+
+
+class RiskMitigation(Contract):
+    risk: Annotated[str, Field(min_length=1, max_length=50)]
+    mitigation: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class Rollout(Contract):
+    phases: list[Phase] = Field(min_length=2, max_length=4)
+    risks: list[RiskMitigation] = Field(default_factory=list, max_length=3)
+
+
+class DecisionGate(Contract):
+    label: Annotated[str, Field(min_length=1, max_length=48)]
+    threshold: Annotated[str, Field(min_length=1, max_length=24)]
+    detail: str = Field(default="", max_length=100)
+
+
+class Decision(Contract):
+    action: Literal["Approve", "Authorize", "Endorse"]
+    request: Annotated[str, Field(min_length=1, max_length=110, description="Noun phrase for the commitment being approved, with any explicit cap.")]
+    scope: str = Field(default="", max_length=135, description="Scope and limits of the current request, separate from future gates.")
+    if_missed: Annotated[str, Field(min_length=1, max_length=130)]
+    gates: list[DecisionGate] = Field(min_length=1, max_length=4)
+
+    @field_validator("request", "scope")
+    @classmethod
+    def separate_future_gates(cls, value: str) -> str:
+        if re.search(r"\b(conditional on|contingent on|subject to|provided that)\b.*\bgates?\b", value, re.IGNORECASE):
+            raise PydanticCustomError("decision_scope", "keep the future gate condition in if_missed")
+        return value.strip().rstrip(".")
+
+
+class CoverCallout(Contract):
+    headline: Annotated[str, Field(min_length=1, max_length=66)]
+    label: Annotated[str, Field(min_length=1, max_length=38)]
+    value: Annotated[str, Field(min_length=1, max_length=25)]
+    detail: str = Field(default="", max_length=95)
+
+
+PHASE_PERIOD = re.compile(r"\b(?:day|week|month|quarter)s?\s*[-‑–—]?\s*\d+(?:\s*[-‑–—]\s*\d+)?", re.I)
+PHASE_NUMBER = re.compile(r"\d|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+                          r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|"
+                          r"fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\b", re.I)
 
 
 class SlideContent(Contract):
@@ -55,6 +224,44 @@ class SlideContent(Contract):
     image_prompt: str = Field(default="", max_length=400)
     chart: ChartContent | None = None
     table: list[list[str]] | None = Field(default=None, max_length=8)
+    stacked_comparison: StackedComparison | None = None
+    allocation: Allocation | None = None
+    rollout: Rollout | None = None
+    decision: Decision | None = None
+    cover_callout: CoverCallout | None = None
+
+    @model_validator(mode="after")
+    def planned_exhibit(self, info: ValidationInfo):
+        context = info.context or {}
+        point_count = context.get("point_count")
+        if point_count and len(self.points) != point_count:
+            raise PydanticCustomError("point_count", "include exactly {expected} visible text points", {"expected": point_count})
+        exhibit = context.get("required_exhibit")
+        if exhibit and getattr(self, exhibit) is None:
+            raise PydanticCustomError("required_exhibit", "populate the {exhibit} object for this slide", {"exhibit": exhibit})
+        if self.rollout and context.get("omit_phase_quantities") and any(
+            PHASE_NUMBER.search(PHASE_PERIOD.sub("", phase.milestone)) for phase in self.rollout.phases
+        ):
+            raise PydanticCustomError("phase_quantities", "describe tasks without allocating unprovided quantities to phases")
+        return self
+
+    @property
+    def chart_ready(self) -> bool:
+        return self.chart is not None and len(self.chart.values) == len(self.chart.categories)
+
+    @property
+    def table_ready(self) -> bool:
+        rows = self.table
+        return bool(rows and 1 <= len(rows[0]) <= 8 and all(len(row) == len(rows[0]) for row in rows))
+
+
+class ResearchQueries(Contract):
+    queries: list[ShortText] = Field(min_length=1, max_length=4)
+
+
+class EvidenceSummary(PlanningResponse):
+    summary: str = Field(max_length=2200)
+    uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
 
 
 class ResearchBrief(Contract):
@@ -68,6 +275,28 @@ class Review(Contract):
     regenerate_content: bool = False
 
 
+DISPLAY_LAYOUTS = frozenset({"cover", "section", "quote", "closing"})
+IMAGE_LAYOUTS = frozenset({"showcase", "editorial", "research"})
+STANDARD_ICON_LAYOUTS = frozenset({"summary", "comparison", "timeline", "process", "metrics", "showcase", "editorial"})
+
+
+def supports_point_icons(layout: Layout, theme: Theme, brand: BrandTemplate | None) -> bool:
+    layouts = CONSULTING_ICON_LAYOUTS if theme.profile == "consulting" else STANDARD_ICON_LAYOUTS
+    return brand is None and layout in layouts
+
+
+def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemplate | None) -> bool:
+    if item.layout not in IMAGE_LAYOUTS or content.chart or content.table or content.stacked_comparison:
+        return False
+    if brand:
+        return any(slot.kind == "picture" for slot in choose_layout(brand.layouts, item.layout).slots)
+    return True
+
+
+def is_data_driven(direction: str) -> bool:
+    return bool(re.search(r"\bdata[\s_-]+(?:driven|visuali[sz]ations?)\b", direction, re.IGNORECASE))
+
+
 def design(direction: str, mode: str, selected: Theme | None) -> Theme:
     if selected:
         return selected
@@ -79,64 +308,248 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
         return Theme(background="#F7F2E9", ink="#27213D", accent="#9D3C30", muted="#625968", surface="#EEE2D2", font="Georgia")
     if "academic" in direction:
         return Theme(background="#F0F8F5", ink="#16352F", accent="#08745D", muted="#395E54", surface="#DAEDE6")
+    if is_data_driven(direction):
+        return Theme(background="#F3F6FA", ink="#122239", accent="#0F6B62", muted="#41566B", surface="#E3EDF0")
     if mode == "creative" or "bold" in direction:
         return Theme(background="#F1ECFF", ink="#281852", accent="#8737AC", muted="#57416B", surface="#E6D4F9")
     return Theme()
 
 
+def select_layout(item, content, document, images, *, data_driven, allow_variants):
+    role = item.layout
+    if allow_variants:
+        if role == "section" and content.points:
+            return "summary"
+        if content.decision and role in {"summary", "closing"}:
+            return "closing"
+        if content.rollout and role in {"process", "timeline"}:
+            return "timeline"
+        if content.allocation and role in {"chart", "metrics", "research"}:
+            return "metrics"
+        if content.stacked_comparison and role == "chart":
+            return "chart"
+    if role in DISPLAY_LAYOUTS:
+        return role
+    sourced = bool(set(content.source_ids).intersection(source.id for source in document.sources))
+    chart_ready = sourced and content.chart_ready and len(content.chart.values) >= 2
+    if (data_driven and sourced) or allow_variants:
+        if chart_ready and not (role == "research" and content.table_ready):
+            return "chart"
+        if content.table_ready and (sourced or not any(re.search(r"\d", cell) for row in content.table for cell in row)):
+            return "research"
+    if allow_variants and role == "summary":
+        if content.image_asset_id in images:
+            return "editorial"
+        if sourced and len(content.points) >= 2 and all(point.value for point in content.points):
+            return "metrics"
+        if document.slides and document.slides[-1].layout == role and len(content.points) == 2:
+            return "comparison"
+    return role
+
+
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
-            brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None) -> Slide:
+            brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None,
+            image_ratio: float | None = None, data_driven: bool = False) -> Slide:
+    source_ids = {source.id for source in document.sources}
+    rules = document.theme.design
+    layout = select_layout(item, content, document, image_ids, data_driven=data_driven,
+                           allow_variants=bool(rules and not brand and document.theme.profile == "standard"))
+    item = item.model_copy(update={"layout": layout})
     if brand:
-        return compose_branded(item, content, document, image_ids, brand)
+        slide = compose_branded(item, content, document, image_ids, brand)
+        return style_slide_tables(slide, document.theme, preserve_palette=True)
     t = document.theme
     if t.profile == "consulting":
-        return compose_consulting(item, content, document, index, image_ids, web_image_ratio=web_image_ratio)
+        slide = compose_consulting(item, content, document, index, image_ids, web_image_ratio=web_image_ratio)
+        return style_slide_tables(slide, t, preserve_palette=True)
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
+    font_scale = max(.87, factor) if rules else factor
+    ptw, pth = physical(document)
     editorial = t.font == "Georgia"
-    dark = item.layout in {"cover", "section", "quote", "closing"} and not editorial
+    dark = item.layout in DISPLAY_LAYOUTS and not editorial
     bg = t.ink if dark else t.background
     ink, muted, accent = ("#FFFFFF", "#DDE1F5", "#E0DBFF") if dark else (t.ink, t.muted, t.accent)
+    if rules:
+        bg = rules.cover_background if item.layout in DISPLAY_LAYOUTS else t.background
+        ink = readable(t.ink, bg, t.background)
+        muted = readable(t.muted, bg, ink)
+        accent = readable(t.accent, bg, ink)
     slide = Slide(title=item.title, background=bg, layout=item.layout, notes=content.notes,
-                  source_ids=list(dict.fromkeys(s for s in content.source_ids if s in {v.id for v in document.sources})))
+                  source_ids=list(dict.fromkeys(s for s in content.source_ids if s in source_ids)))
     elements = slide.elements
 
     def rect(x, y, w, h, fill, shape="rect"):
         elements.append(Shape(x=x, y=y, w=w, h=h, fill=fill, shape=shape, z=-1))
 
-    def label(value, x, y, w, h, size, color=ink, bold=False):
+    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False, align="left"):
         if value.strip():
-            elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * factor), color=color, bold=bold, font=t.font))
+            face = rules.heading_font if rules and heading else t.font
+            elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * font_scale),
+                                 color=color, bold=bold, font=face, align=align))
 
-    label(f"{index + 1:02d}  /  {item.layout.upper()}", .068, .065, .65, .045, 12, accent, True)
-    rect(.068, .137, .048, .008, accent)
-    if item.layout in {"cover", "section", "quote", "closing"}:
-        if editorial:
+    def fitted_label(value, x, y, w, max_h, preferred, minimum, color, *, bold=False, heading=False, prefer_one_line=False):
+        if not value.strip():
+            return y
+        face = rules.heading_font if rules and heading else t.font
+        if prefer_one_line:
+            preferred = next((size for size in range(preferred, max(minimum, round(.88 * preferred)) - 1, -1)
+                              if text_height(value, w * ptw, size, bold, face) <= 1.35 * size), preferred)
+        for size in range(preferred, minimum - 1, -1):
+            height = (text_height(value, w * ptw, size, bold, face) + 4) / pth
+            if height <= max_h:
+                break
+        height = min(height, max_h)
+        label(value, x, y, w, height, size / font_scale, color, bold, heading=heading)
+        return y + height
+
+    points = content.points
+    if rules and item.layout == "cover" and content.image_asset_id in image_ids and (ratio := image_ratio or web_image_ratio):
+        if compact:
+            image = Image(x=.07, y=.34, w=.86, h=.59, asset_id=content.image_asset_id, alt=item.title)
+            end = fitted_label(item.title, .07, .07, .86, .15, 48, 31, ink, heading=True)
+            fitted_label(content.subtitle, .07, end + .014, .86, max(.06, .32 - end), 17, 13, muted)
+        else:
+            image = Image(x=.43, y=.07, w=.51, h=.86, asset_id=content.image_asset_id, alt=item.title)
+            end = fitted_label(item.title, .07, .29, .32, .33, 62, 32, ink, heading=True)
+            fitted_label(content.subtitle, .072, end + .025, .32, .24, 19, 14, muted)
+        elements.append(fit_image(image, document, ratio))
+        return slide
+
+    if rules and item.layout == "cover" and content.cover_callout:
+        callout = content.cover_callout
+        panel_ink = readable("#FFFFFF", t.accent, t.ink)
+        rect(.655, .22, .275, .53, t.accent)
+        end = fitted_label(item.title, .07, .225, .55, .39, 54 if compact else 59, 32, ink, heading=True)
+        fitted_label(content.subtitle, .07, end + .024, .55, .21, 19, 14, muted)
+        fitted_label(callout.label, .677, .27, .232, .078, 15, 12, panel_ink, bold=True)
+        end = fitted_label(callout.value, .677, .36, .232, .15, 43, 27, panel_ink, heading=True)
+        fitted_label(callout.detail, .677, end + .027, .232, .21, 16, 12, panel_ink)
+        return slide
+
+    if rules and item.layout == "closing" and content.decision:
+        decision = content.decision
+        panel_ink = readable("#FFFFFF", t.accent, t.ink)
+        end = fitted_label(item.title, .07, .095, .86, .18, 36, 28, ink, heading=True)
+        fitted_label(decision.if_missed, .07, end + .015, .86, max(.055, .347 - end), 17, 13, muted)
+        step = .86 / len(decision.gates)
+        for i, gate in enumerate(decision.gates):
+            x = .07 + i * step
+            rect(x, .375, step - .022, .004, accent)
+            threshold, measure = gate.threshold, ""
+            if mixed_threshold := re.match(r"^([<>≤≥=]*\s*\d+(?:\.\d+)?\s*%)\s+(.+)$", threshold):
+                threshold, measure = mixed_threshold.groups()
+            fitted_label(threshold, x, .391, step - .024, .09, 33, 24, accent, heading=True)
+            label(gate.label, x, .485, step - .024, .104, 16, ink, True)
+            detail = "\n".join(part for part in (measure[:1].upper() + measure[1:], gate.detail) if part)
+            fitted_label(detail, x, .589, step - .024, .10, 14, 11, muted)
+        rect(.07, .71, .86, .22, t.accent)
+        end = fitted_label(f"{decision.action} {decision.request}.", .09, .727, .82, .105, 26, 18, panel_ink, heading=True)
+        fitted_label(decision.scope, .09, end + .009, .82, .069, 15, 12, panel_ink)
+        return slide
+
+    if rules and item.layout in {"cover", "closing"}:
+        if item.layout == "cover":
+            rect(.07, .202, .075, .004, accent)
+        end = fitted_label(item.title, .07, .24, .86, .39, 54 if compact else 62, 32, ink, heading=True)
+        fitted_label(content.subtitle, .07, end + .023, .75, .15, 20, 14, muted)
+        if item.layout == "closing":
+            for i, point in enumerate(points[:3]):
+                width = .86 / len(points[:3])
+                label(point.title, .07 + i * width, .813, width - .015, .102, 18, ink, True)
+        return slide
+
+    if not rules:
+        label(f"{index + 1:02d}  /  {item.layout.upper()}", .068, .065, .65, .045, 12, accent, True)
+        rect(.068, .137, .048, .008, accent)
+    if item.layout in DISPLAY_LAYOUTS:
+        if rules and rules.cover_style == "rules":
+            rect(.07, .196, .86, .003, t.accent)
+            rect(.07, .90, .86, .003, t.accent)
+        elif (rules and rules.cover_style == "panel") or (not rules and editorial):
             rect(.76, .125, .172, .59, t.accent)
-            rect(.788, .20, .113, .008, "#E5B4A8")
-            rect(.788, .53, .113, .008, "#E5B4A8")
-            label(f"{index + 1:02d}", .788, .33, .12, .14, 38, "#FFFFFF", True)
+            rect(.788, .20, .113, .008, readable(t.muted, t.accent) if rules else "#E5B4A8")
+            rect(.788, .53, .113, .008, readable(t.muted, t.accent) if rules else "#E5B4A8")
+            if not rules:
+                label(f"{index + 1:02d}", .788, .33, .12, .14, 38, "#FFFFFF", True)
         else:
             rect(.77, .09, .19, .32, t.accent, "ellipse")
             rect(.82, .28, .135, .24, t.muted, "ellipse")
-        label(item.title, .068, .24, .66, .28, 47, ink, True)
-        if content.subtitle:
+        if rules:
+            end = fitted_label(item.title, .068, .25, .86 if rules.cover_style == "rules" else .66,
+                               .31, 52, 30, ink, heading=True)
+            fitted_label(content.subtitle, .07, end + .032, .68, .19, 21, 15, muted)
+        else:
+            label(item.title, .068, .24, .66, .28, 47, ink, True, heading=True)
             label(content.subtitle, .07, .58, .64 if editorial else .70, .13, 23, muted)
-        points = content.points[:3]
         if points and item.layout == "closing":
-            for i, point in enumerate(points):
+            for i, point in enumerate(points[:3]):
                 label(point.title, .07 + .295 * i, .77, .274, .13, 18, ink, True)
         elif points and item.layout == "quote":
             label(points[0].title, .07, .77, .65, .08, 18, muted)
         return slide
 
-    label(item.title, .068, .17, .87, .17, 35, ink, True)
-    label(content.subtitle, .07, .352, .86, .08, 17, muted)
-    points = content.points
-    if content.image_asset_id in image_ids and item.layout in {"showcase", "editorial", "research"}:
+    body_top = .445
+    if rules:
+        end = fitted_label(item.title, .07, .095, .86, .20, 34 if compact else 38, 27, ink,
+                           bold=rules.heading_font.casefold() == t.font.casefold(), heading=True, prefer_one_line=True)
+        if content.subtitle:
+            end = fitted_label(content.subtitle, .07, end + .018, .86, .112, 18, 14, muted)
+        body_top = max(.252, min(.455, end + .035))
+    else:
+        label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
+        label(content.subtitle, .07, .352, .86, .08, 17, muted)
+    first_body_element = len(elements)
+    use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table or content.stacked_comparison)
+    if rules and item.layout == "chart" and content.stacked_comparison and slide.source_ids:
+        data = content.stacked_comparison
+        chart = Chart(x=.07, y=.517, w=.55, h=.373, chart="stacked_column", categories=data.categories,
+                      series=data.series, value_prefix=data.value_prefix)
+        elements.append(chart)
+        label(data.label, .07, .449, .55, .057, 16, ink, True)
+        rows = [["Component", *data.categories]]
+        for component in data.series:
+            rows.append([component.name, *[display_value(value, data.value_prefix) for value in component.values]])
+        elements.append(Table(x=.646, y=.54, w=.284, h=.089 * len(rows), rows=rows, size=max(9, 13 * factor)))
+        label(data.caption, .07, .913, .86, .048, 13, muted)
+    elif rules and item.layout == "metrics" and content.allocation:
+        allocation = content.allocation
+        total = display_value(sum(line.amount for line in allocation.lines), allocation.value_prefix)
+        label(total, .07, .52, .32, .15, 39, accent, True, heading=True)
+        label("Total allocation", .07, .684, .32, .07, 16, muted)
+        step = .45 / len(allocation.lines)
+        for i, line in enumerate(allocation.lines):
+            y = .452 + i * step
+            rect(.414, y, .516, .003, t.surface)
+            size = min(18, max(11, step * 207))
+            label(line.label, .414, y + .009, .326, step - .011, size, ink, True)
+            label(display_value(line.amount, allocation.value_prefix), .747, y + .009,
+                  .183, step - .011, size, ink, True, align="right")
+    elif rules and item.layout == "timeline" and content.rollout:
+        rollout = content.rollout
+        phase_ink = readable(ink, t.surface, t.ink, bg)
+        step = .86 / len(rollout.phases)
+        for i, phase in enumerate(rollout.phases):
+            x = .07 + i * step
+            rect(x, .473, step - .009, .168, t.surface)
+            rect(x, .473, step - .009, .005, t.accent)
+            label(phase.period, x + .012, .491, step - .033, .053, 15, phase_ink, True)
+            label(phase.milestone, x + .012, .548, step - .033, .071, 16, phase_ink)
+        if rollout.risks:
+            label("Risk", .07, .676, .248, .04, 13, muted, True)
+            label("Mitigation", .338, .676, .59, .04, 13, muted, True)
+            for i, pair in enumerate(rollout.risks):
+                y = .725 + i * .075
+                rect(.07, y, .86, .002, t.surface)
+                label(pair.risk, .07, y + .008, .25, .065, 15, ink, True)
+                label(pair.mitigation, .338, y + .008, .592, .065, 15, ink)
+    elif item.layout == "research" and content.table_ready:
+        rows = [[cell[:180] for cell in row] for row in content.table]
+        elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
+    elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
-        if web_image_ratio:
-            elements.append(fit_image(image, document, web_image_ratio))
+        if web_image_ratio or image_ratio:
+            elements.append(image)
             for i, point in enumerate(points[:3]):
                 y = .46 + i * .146
                 label(point.title, .07, y, .43, .056, 18, ink, True)
@@ -147,16 +560,26 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 y = .46 + i * .21
                 label(point.title, .07, y, .43, .06, 20, ink, True)
                 label(point.body, .07, y + .07, .43, .125, 16, muted)
-    elif item.layout == "chart" and slide.source_ids and content.chart and len(content.chart.values) == len(content.chart.categories):
+    elif item.layout == "chart" and slide.source_ids and content.chart_ready:
         data = content.chart
+        direct_labels = bool(rules and data.chart == "line" and len(data.values) <= 6)
+        has_external_source = any(source.url and source.id in slide.source_ids for source in document.sources)
+        has_table = data_driven and (not direct_labels or has_external_source)
         try:
-            elements.append(Chart(x=.07, y=.45, w=.86, h=.46, categories=data.categories,
+            elements.append(Chart(x=.07, y=.51 if data_driven else .45, w=.54 if has_table else .86,
+                                  h=.39 if data_driven else .46, categories=data.categories, show_values=direct_labels,
                                   series=[{"name": data.label, "values": data.values}], chart=data.chart, color=t.accent))
         except ValueError:
             slide.warnings.append("The chart data could not be rendered.")
-    elif item.layout == "research" and content.table and len({len(row) for row in content.table}) == 1 and 1 <= len(content.table[0]) <= 8:
-        rows = [[cell[:180] for cell in row] for row in content.table]
-        elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
+        else:
+            if data_driven:
+                label(data.label, .07, .45, .86 if direct_labels else .54, .05, 15, ink)
+            if has_table:
+                rows = [["Category", "Value"], *[[category, f"{value:,.8g}"]
+                        for category, value in zip(data.categories, data.values)]]
+                elements.append(Table(x=.635, y=.45, w=.295, h=min(.44, .060 * len(rows)), rows=rows,
+                                      size=max(9, min(14 * factor, 132 / len(rows))), color=ink, fill=t.surface,
+                                      header_fill=accent, header_color="#FFFFFF"))
     elif item.layout == "timeline" and points:
         points = points[:3]
         width = .86 / len(points)
@@ -164,27 +587,82 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         for i, point in enumerate(points):
             x = .07 + width * i
             rect(x, .521, .026, .047, t.accent, "ellipse")
-            label(point.value or f"0{i + 1}", x, .465, width - .024, .047, 14, accent, True)
+            offset = 0
+            if use_icons and point.icon:
+                icon = slide_icon(document, point.icon, x, .464, .047, bg)
+                elements.append(icon)
+                offset = icon.w + .008
+            label(point.value or f"0{i + 1}", x + offset, .465, width - .024 - offset, .047, 14, accent, True)
             label(point.title, x, .605, width - .024, .095, 20, ink, True)
             label(point.body, x, .72, width - .024, .18, 16, muted)
+    elif rules and item.layout == "process" and points and (
+        compact or len(points) > 3 or any(len(point.title) > 38 or len(point.body) > 85 for point in points)
+    ):
+        visible = points[:4]
+        row_height = .48 / len(visible)
+        for i, point in enumerate(visible):
+            y = .45 + i * row_height
+            label(f"{i + 1:02}", .07, y + .008, .09, row_height - .012, 27, accent, True, heading=True)
+            if i:
+                rect(.07, y, .86, .002, t.surface)
+            title = re.sub(rf"^Step\s+0?{i + 1}\s*[:.–-]\s*", "", point.title, flags=re.IGNORECASE)
+            end = fitted_label(title or point.title, .18, y + .008, .75, row_height * .40, 21, 15, ink, bold=True)
+            fitted_label(point.body, .18, end + .002, .75, max(.025, y + row_height - end - .008), 16, 13, muted)
     elif item.layout in {"comparison", "metrics", "process", "showcase"} and points:
-        points = points[:2 if item.layout == "comparison" else 3]
-        width = (.864 - .022 * (len(points) - 1)) / len(points)
+        points = points[:2 if item.layout == "comparison" and not rules else 3]
+        gap = {"compact": .012, "regular": .022, "spacious": .032}[rules.spacing] if rules else .022
+        width = (.864 - gap * (len(points) - 1)) / len(points)
+        card_ink = readable(t.ink, t.surface) if rules else ink
+        card_muted = readable(t.muted, t.surface, card_ink) if rules else muted
+        card_accent = readable(t.accent, t.surface, card_ink) if rules else accent
         for i, point in enumerate(points):
-            x = .068 + i * (width + .022)
-            rect(x, .463, width, .426, t.surface, "round")
+            x = .068 + i * (width + gap)
+            if rules and item.layout == "comparison":
+                rect(x, .463, width, .004, accent)
+            else:
+                rect(x, .463, width, .426, t.surface, rules.card_shape if rules else "round")
             value = point.value if slide.source_ids or not any(character.isdigit() for character in point.value) else ""
-            label(value or (f"0{i + 1}" if item.layout == "process" else "—"), x + .018, .495,
-                  width - .036, .083, 25, accent, True)
-            label(point.title, x + .018, .596, width - .036, .09, 18, ink, True)
-            label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, muted)
+            offset = 0
+            if use_icons and point.icon:
+                icon = slide_icon(document, point.icon, x + .018, .503, .062,
+                                  bg if rules and item.layout == "comparison" else t.surface)
+                elements.append(icon)
+                offset = icon.w + .012
+            if not value:
+                value = f"0{i + 1}" if item.layout == "process" else ""
+            label(value, x + .018 + offset, .495, width - .036 - offset, .083, 25, card_accent, True)
+            if rules and item.layout == "comparison":
+                end = fitted_label(point.title, x + .018, .575 if offset or value else .493,
+                                   width - .036, .139, 20, 15, ink, bold=True)
+                fitted_label(point.body, x + .018, end + .012, width - .036, .94 - end - .012, 16, 13, muted)
+            else:
+                label(point.title, x + .018, .596, width - .036, .09, 18, card_ink, True)
+                label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, card_muted)
     else:
+        icon_column = use_icons and any(point.icon for point in points[:3])
+        text_x = .125 if icon_column else .103
+        text_width = .913 - text_x
         for i, point in enumerate(points[:3]):
             y = .46 + .146 * i
-            rect(.07, y + .021, .014, .025, t.accent, "ellipse")
-            label(point.title, .103, y, .81, .062, 20, ink, True)
-            label(point.body, .103, y + .063, .81, .075, 16, muted)
+            if icon_column and point.icon:
+                elements.append(slide_icon(document, point.icon, .068, y + .008, .047, bg))
+            else:
+                rect(.07, y + .021, .014, .025, t.accent, "ellipse")
+            label(point.title, text_x, y, text_width, .062, 20, ink, True)
+            label(point.body, text_x, y + .063, text_width, .075, 16, muted)
+    if rules:
+        scale = (.955 - body_top) / (.955 - .445)
+        for element in elements[first_body_element:]:
+            element.y = body_top + (element.y - .445) * scale
+            element.h *= scale
+            if isinstance(element, Chart):
+                style_chart(element, t, bg)
+            if isinstance(element, Image):
+                ratio = (image_ratio or web_image_ratio) if element.asset_id == content.image_asset_id else 1
+                if ratio:
+                    fitted = fit_image(element, document, ratio)
+                    element.x, element.y, element.w, element.h = fitted.x, fitted.y, fitted.w, fitted.h
     if len(points) > 3:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]
-    return slide
+    return style_slide_tables(slide, t)

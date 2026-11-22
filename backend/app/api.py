@@ -19,6 +19,7 @@ from app.domain import Contract, CreatePresentation, Document, Skill, Slide, rea
 from app.edits import ApplyEdit, ChatRequest, apply, propose
 from app.export_review import ReviewBusy, ReviewUnavailable, review_powerpoint
 from app.imagery import image_configured
+from app.lucide import bundled_icon, icon_png
 from app.powerpoint import to_pptx
 from app.presentations import (
     Conflict, assert_editable, assets_for, begin_write, details, emit, image_ids, latest_job, persist,
@@ -27,7 +28,7 @@ from app.presentations import (
 from app.previews import get_preview
 from app.questions import Answers, Clarification, Choice, SlideCount, validate_answers
 from app.queue import notify
-from app.rendering import to_pdf
+from app.rendering import fit_slide_text, to_pdf
 from app.skills import list_skills
 from app.storage import Storage, parse_upload
 
@@ -78,7 +79,7 @@ def item_for(db, item_id, owner_id, lock=False):
 
 
 def validate_document_assets(db, owner_id, document):
-    ids = referenced_images(document.slides)
+    ids = {key for key in referenced_images(document.slides) if not bundled_icon(key)}
     if image_ids(db, owner_id, ids) != ids:
         raise HTTPException(422, "The deck references a missing or inaccessible image.")
     source_ids = {source.asset_id for source in document.sources if source.asset_id}
@@ -260,6 +261,8 @@ def upload(file: UploadFile = File(...), owner_id: str = owner):
 
 @api.get("/assets/{asset_id}")
 def get_asset(asset_id: str, owner_id: str = owner):
+    if icon := bundled_icon(asset_id):
+        return Response(icon_png(*icon), media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
     with Session() as db:
         asset = db.get(Asset, asset_id)
         if not asset or asset.owner_id != owner_id:
@@ -629,6 +632,8 @@ def export_snapshot(item_id, owner_id, expected=None):
             asset = db.get(Asset, brand.asset_id)
             if not asset or asset.owner_id != owner_id or asset.media_type != PPTX:
                 raise HTTPException(409, "The original PowerPoint template is unavailable.")
+        for slide in document.slides:
+            fit_slide_text(document, slide)
     return document, revision, brand
 
 

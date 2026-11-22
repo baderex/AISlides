@@ -1,3 +1,5 @@
+import re
+from html import unescape
 from io import BytesIO
 
 import httpx
@@ -9,14 +11,49 @@ from app.providers import ProviderError
 from app.storage import inspect_upload
 
 
-def collect(query: str) -> list[Source]:
+def search_excerpt(fragments, limit):
+    return "\n".join(dict.fromkeys(unescape(text).strip() for text in fragments if isinstance(text, str) and text.strip()))[:limit]
+
+
+def collect_context(url, query, count, headers):
+    response = httpx.get(url, params={"q": query, "maximum_number_of_urls": count,
+                         "maximum_number_of_tokens": 4096}, headers=headers, timeout=15, follow_redirects=False)
+    response.raise_for_status()
+    terms = set(re.findall(r"[a-z0-9]{3,}", query.lower()))
+    sources = []
+    for result in response.json().get("grounding", {}).get("generic", [])[:count]:
+        try:
+            snippets = [text for text in result["snippets"] if isinstance(text, str) and text.strip()]
+            # Keep passages that mention the requested metrics and periods together, including structured tables.
+            snippets.sort(key=lambda text: len(terms.intersection(re.findall(r"[a-z0-9]{3,}", text.lower()))), reverse=True)
+            if snippets:
+                sources.append(Source(title=unescape(result["title"])[:220], url=result["url"],
+                                      excerpt=search_excerpt(snippets, 3000)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sources
+
+
+def collect(query: str, *, count: int = 6, detailed: bool = False) -> list[Source]:
     configuration = settings()
     if not configuration.research_api_key:
         raise ProviderError("Web research requires a configured Brave Search API key.")
+    query = query[:380]
+    headers = {"X-Subscription-Token": configuration.research_api_key, "Accept": "application/json"}
+    if detailed and configuration.research_context_api_url:
+        try:
+            sources = collect_context(configuration.research_context_api_url, query, count, headers)
+            if sources:
+                return sources
+        except (httpx.HTTPError, ValueError):
+            pass
+    params = {"q": query, "count": count, "text_decorations": False}
+    if detailed:
+        params["extra_snippets"] = True
     try:
         response = httpx.get(configuration.research_api_url,
-                             params={"q": query[:380], "count": 6, "text_decorations": False},
-                             headers={"X-Subscription-Token": configuration.research_api_key, "Accept": "application/json"},
+                             params=params,
+                             headers=headers,
                              timeout=15, follow_redirects=False)
         response.raise_for_status()
     except httpx.HTTPError as error:
@@ -24,9 +61,10 @@ def collect(query: str) -> list[Source]:
     results = []
     for result in response.json().get("web", {}).get("results", []):
         try:
-            results.append(Source(title=result["title"][:220], url=result["url"],
-                                  excerpt=result.get("description", "")[:1600]))
-        except (KeyError, ValueError):
+            excerpts = [result.get("description", ""), *(result.get("extra_snippets") or [])]
+            results.append(Source(title=unescape(result["title"])[:220], url=result["url"],
+                                  excerpt=search_excerpt(excerpts, 3000 if detailed else 1600)))
+        except (KeyError, TypeError, ValueError):
             continue
     return results
 

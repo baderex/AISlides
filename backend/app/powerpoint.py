@@ -3,9 +3,9 @@ import io
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
-from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.chart import XL_CHART_TYPE, XL_DATA_LABEL_POSITION, XL_LEGEND_POSITION, XL_MARKER_STYLE
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
-from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+from pptx.enum.text import MSO_AUTO_SIZE, MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
@@ -13,6 +13,7 @@ from pptx.util import Inches, Pt
 
 from app.branding import SLOT_TYPES, choose_layout, native_layouts
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
+from app.rendering import TEXT_LEADING, table_columns, table_insets
 
 
 def color(value):
@@ -25,6 +26,26 @@ def alpha(solid, opacity):
         entry = OxmlElement("a:alpha")
         entry.set("val", str(round(opacity * 100000)))
         channel.append(entry)
+
+
+def set_table_rules(cell, bottom_rule):
+    properties = cell._tc.get_or_add_tcPr()
+    for position, side in enumerate(("lnL", "lnR", "lnT", "lnB", "lnTlToBr", "lnBlToTr")):
+        name = f"a:{side}"
+        if (existing := properties.find(qn(name))) is not None:
+            properties.remove(existing)
+        line = OxmlElement(name)
+        if side == "lnB":
+            shade, weight = bottom_rule
+            line.set("w", str(Pt(weight)))
+            solid = OxmlElement("a:solidFill")
+            rgb = OxmlElement("a:srgbClr")
+            rgb.set("val", shade[1:].upper())
+            solid.append(rgb)
+            line.append(solid)
+        else:
+            line.append(OxmlElement("a:noFill"))
+        properties.insert(position, line)
 
 
 def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -> bytes:
@@ -60,7 +81,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                     frame.margin_top = frame.margin_bottom = frame.margin_left = frame.margin_right = 0
                 for paragraph in frame.paragraphs:
                     paragraph.alignment = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[el.align]
-                    paragraph.line_spacing = 1.13
+                    paragraph.line_spacing = TEXT_LEADING
                     paragraph.space_before = paragraph.space_after = Pt(0)
                     paragraph.font.name = el.font
                     paragraph.font.size = Pt(el.size)
@@ -98,33 +119,49 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 if filled:
                     for row in obj.table.rows:
                         row.height = h // row_count
+                column_widths = [Pt(cw) for _, cw in table_columns(el, w.pt)]
+                if el.row_rule:
+                    for j, column in enumerate(obj.table.columns):
+                        column.width = column_widths[j] if j < columns - 1 else w - sum(column_widths[:-1])
+                insets = [table_insets(el, cw.pt, h.pt / row_count) for cw in column_widths]
                 for i, row in enumerate(el.rows):
-                    fill, ink, header = el.row_style(i)
+                    fill, ink, _ = el.row_style(i)
+                    rule = el.rule_after(i)
                     for j, value in enumerate(row):
                         cell = obj.table.cell(i, j)
+                        inset_x, inset_y = insets[j]
                         cell.text = value
-                        if el.header_fill:
-                            cell.margin_left = cell.margin_right = Pt(6)
-                            cell.margin_top = cell.margin_bottom = Pt(3)
-                            cell.text_frame.word_wrap = True
+                        cell.margin_left = cell.margin_right = Pt(inset_x)
+                        cell.margin_top = cell.margin_bottom = Pt(inset_y)
+                        cell.text_frame.word_wrap = True
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = color(fill)
+                        if rule:
+                            set_table_rules(cell, rule)
+                            cell.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
                         for paragraph in cell.text_frame.paragraphs:
+                            if rule:
+                                paragraph.alignment = PP_ALIGN.RIGHT if el.cell_align(j) == "right" else PP_ALIGN.LEFT
+                            paragraph.font.name = el.font
                             paragraph.font.size = Pt(el.size)
                             paragraph.font.color.rgb = color(ink)
-                            if header:
-                                paragraph.font.bold = True
+                            paragraph.font.bold = el.cell_bold(i, j)
+                            paragraph.line_spacing = TEXT_LEADING
+                            paragraph.space_before = paragraph.space_after = Pt(0)
             elif isinstance(el, Chart):
                 chart_data = CategoryChartData()
-                chart_data.categories = el.categories
+                chart_data.categories = el.category_labels()
                 for series in el.series:
                     chart_data.add_series(series.name, series.values)
-                kind = {"column": XL_CHART_TYPE.COLUMN_CLUSTERED, "bar": XL_CHART_TYPE.BAR_CLUSTERED,
+                kind = {"column": XL_CHART_TYPE.COLUMN_CLUSTERED, "stacked_column": XL_CHART_TYPE.COLUMN_STACKED,
+                        "bar": XL_CHART_TYPE.BAR_CLUSTERED,
                         "line": XL_CHART_TYPE.LINE, "pie": XL_CHART_TYPE.PIE}[el.chart]
                 filled = slot_kind == "chart"
                 obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
                 obj.chart.has_legend = len(el.series) > 1 or el.chart == "pie"
-                if el.chart not in {"line", "pie"}:
+                if el.palette or el.chart == "stacked_column":
+                    style_native_chart(obj.chart, el)
+                elif el.chart not in {"line", "pie"}:
                     obj.chart.series[0].format.fill.solid()
                     obj.chart.series[0].format.fill.fore_color.rgb = color(el.color)
             if filled:
@@ -157,11 +194,58 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
             for placeholder in placeholders.values():
                 placeholder._element.getparent().remove(placeholder._element)
         if item.notes or item.source_ids:
-            references = [f"{sources[key].title} — {sources[key].url or 'Uploaded reference'}" for key in item.source_ids]
+            references = [f"{source.title} — {source.url}" if source.url else source.title
+                          for source in (sources[key] for key in item.source_ids)]
             slide.notes_slide.notes_text_frame.text = "\n\n".join(filter(None, [item.notes, "\n".join(references)]))
     output = io.BytesIO()
     presentation.save(output)
     return output.getvalue()
+
+
+def style_native_chart(chart, element):
+    palette = element.colors()
+    chart.element.chart.get_or_add_autoTitleDeleted().val = True
+    chart.font.name = element.font
+    chart.font.color.rgb = color(element.label_color)
+    chart.font.size = Pt(10)
+    # A transparent chart area keeps axis labels on the same surface as the editor.
+    properties = OxmlElement("c:spPr")
+    properties.append(OxmlElement("a:noFill"))
+    chart.element.insert_element_before(properties, "c:txPr", "c:externalData", "c:printSettings")
+    marks = chart.series[0].points if element.chart == "pie" else chart.series
+    for index, mark in enumerate(marks):
+        shade = color(palette[index % len(palette)])
+        if element.chart == "line":
+            mark.format.line.color.rgb = shade
+            if element.show_values:
+                mark.format.line.width = Pt(2)
+                mark.marker.style = XL_MARKER_STYLE.CIRCLE
+                mark.marker.size = 6
+                mark.marker.format.fill.solid()
+                mark.marker.format.fill.fore_color.rgb = shade
+                mark.marker.format.line.color.rgb = shade
+        else:
+            mark.format.fill.solid()
+            mark.format.fill.fore_color.rgb = shade
+    if element.chart != "pie":
+        chart.value_axis.has_major_gridlines = False
+        for axis in (chart.category_axis, chart.value_axis):
+            axis.tick_labels.font.name = element.font
+            axis.tick_labels.font.color.rgb = color(element.label_color)
+            axis.tick_labels.font.size = Pt(13 if element.show_values else 10)
+    if element.show_values and element.chart == "line" and len(element.series) == 1:
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        labels = plot.data_labels
+        labels.show_value = True
+        labels.position = XL_DATA_LABEL_POSITION.ABOVE
+        labels.font.name = element.font
+        labels.font.size = Pt(14)
+        labels.font.bold = True
+        labels.font.color.rgb = color(element.label_color)
+    if element.chart == "stacked_column":
+        chart.value_axis.minimum_scale = 0
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
 
 
 def remove_sample_slides(presentation):

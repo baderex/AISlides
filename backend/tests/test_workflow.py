@@ -53,7 +53,7 @@ def test_guided_workflow_and_native_export():
     answers = {"answers": [{"question_id": "audience", "option_ids": ["executive"]},
                            {"question_id": "visual_direction", "option_ids": ["editorial"]}]}
     assert client.post(f"{path}/answers", json=answers).status_code == 202
-    work(4)
+    work(5)
     partial = client.get(path).json()
     assert partial["slide_count"] == 1
     assert partial["status"] == "GENERATING"
@@ -69,6 +69,15 @@ def test_guided_workflow_and_native_export():
 
     document = final["document"]
     slide = document["slides"][0]
+    comparison = document["slides"][1]
+    icons = [element for element in comparison["elements"] if element["type"] == "image"]
+    assert [icon["asset_id"].split("_")[0] for icon in icons] == ["lucide-cpu", "lucide-atom"]
+    assert not any("Missing image" in warning for warning in comparison["warnings"])
+    for icon in icons:
+        response = client.get(f"/api/v1/assets/{icon['asset_id']}")
+        assert response.status_code == 200 and response.headers["content-type"] == "image/png"
+        assert Image.open(io.BytesIO(response.content)).getchannel("A").getextrema() == (0, 255)
+    assert client.get("/api/v1/assets/lucide-unknown_000000").status_code == 404
     next(element for element in slide["elements"] if element["type"] == "text")["text"] = "Verified user edit"
     assert client.patch(path, json={"document": document, "revision": final["revision"]}).status_code == 200
     assert client.patch(path, json={"document": document, "revision": final["revision"]}).status_code == 409
@@ -79,9 +88,11 @@ def test_guided_workflow_and_native_export():
     assert abs(deck.slide_width / deck.slide_height - 16/9) < .0001
     assert any(shape.has_text_frame and shape.text == "Verified user edit" for shape in deck.slides[0].shapes)
     assert any(shape.auto_shape_type for shape in deck.slides[0].shapes if hasattr(shape, "auto_shape_type") and shape.shape_type == 1)
+    assert sum(hasattr(shape, "image") for shape in deck.slides[1].shapes) == len(icons)
     response = client.post(f"{path}/export?format=pdf")
     pdf = PdfReader(io.BytesIO(response.content))
     assert len(pdf.pages) == 3 and "Verified user edit" in pdf.pages[0].extract_text()
+    assert len(pdf.pages[1].images) == len(icons)
     response = client.get(f"{path}/slides/{slide['id']}/preview")
     assert Image.open(io.BytesIO(response.content)).format == "PNG"
     versions = client.get(f"{path}/versions").json()

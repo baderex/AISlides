@@ -1,21 +1,45 @@
 import io
+from dataclasses import dataclass
 from functools import lru_cache
+from itertools import accumulate
 from pathlib import Path
 
 from PIL import Image as PILImage
 from PIL import ImageDraw, ImageFont
 from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from reportlab.pdfgen import canvas
 
-from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
+from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text, display_value
+from app.lucide import bundled_icon, icon_asset_id
+
+
+TEXT_SCALE = 2
+TEXT_LEADING = 1.13
+CELL_INSET_X = 6
+CELL_INSET_Y = 4
+MIN_TEXT_SIZE = 8
+FONT_FILES = {
+    "arial": ("arial.ttf", "arialbd.ttf"),
+    "arial black": ("ariblk.ttf", "ariblk.ttf"),
+    "calibri": ("calibri.ttf", "calibrib.ttf"),
+    "cambria": ("cambria.ttc", "cambriab.ttf"),
+    "georgia": ("georgia.ttf", "georgiab.ttf"),
+    "times new roman": ("times.ttf", "timesbd.ttf"),
+    "trebuchet ms": ("trebuc.ttf", "trebucbd.ttf"),
+    "verdana": ("verdana.ttf", "verdanab.ttf"),
+}
+SERIF_FAMILIES = {"cambria", "georgia", "source serif 4", "times new roman", "serif"}
 
 
 @lru_cache(maxsize=100)
 def font(size: int, bold: bool, family: str = "Arial"):
-    serif = family.lower() in {"georgia", "times new roman", "serif"}
+    family = family.strip().lower()
+    serif = family in SERIF_FAMILIES
     alternate = ("DejaVuSerif" if serif else "DejaVuSans") + ("-Bold" if bold else "") + ".ttf"
-    windows = ("georgiab.ttf" if bold else "georgia.ttf") if serif else ("arialbd.ttf" if bold else "arial.ttf")
+    windows = FONT_FILES.get(family, FONT_FILES["georgia" if serif else "arial"])[int(bold)]
     for candidate in (str(Path("C:/Windows/Fonts") / windows), alternate):
         try:
             return ImageFont.truetype(candidate, size)
@@ -26,7 +50,7 @@ def font(size: int, bold: bool, family: str = "Arial"):
 
 def wrapped(value, width, measure):
     result = []
-    for paragraph in value.splitlines() or [""]:
+    for paragraph in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = ""
         for word in paragraph.split():
             candidate = f"{line} {word}" if line else word
@@ -40,9 +64,86 @@ def wrapped(value, width, measure):
                 count = max(1, stop - 1)
                 result.append(line[:count])
                 line = line[count:]
-        if line or not paragraph:
+        if line or not paragraph.strip():
             result.append(line)
     return result
+
+
+@dataclass(frozen=True)
+class RasterText:
+    face: ImageFont.FreeTypeFont
+    lines: tuple[tuple[int, int, str], ...]
+    fits: bool
+
+
+@lru_cache(maxsize=1024)
+def raster_text(value, width, height, size, bold, family="Arial", align="left") -> RasterText:
+    face = font(round(size * TEXT_SCALE), bold, family)
+
+    def occupied(line):
+        left, _, right, _ = face.getbbox(line, anchor="lt")
+        return max(right, face.getlength(line)) - min(0, left)
+
+    lines = wrapped(value, width, occupied)
+    step = size * TEXT_SCALE * TEXT_LEADING
+    runs = []
+    fits = len(lines) * step <= height
+    for i, line in enumerate(lines):
+        left, top, right, bottom = face.getbbox(line, anchor="lt")
+        remaining = width - occupied(line)
+        offset = {"left": 0, "center": remaining / 2, "right": remaining}[align]
+        x, y = round(offset - min(0, left)), round(i * step)
+        fits &= x + left >= 0 and x + right <= width and y + top >= 0 and y + bottom <= height
+        runs.append((x, y, line))
+    return RasterText(face, tuple(runs), fits)
+
+
+@lru_cache(maxsize=100)
+def pdf_face(family, bold):
+    # Embed the same physical face used by preview when a TrueType file is available.
+    path = getattr(font(12, bold, family), "path", None)
+    if isinstance(path, (str, Path)) and Path(path).is_file():
+        name = "Studio-" + Path(path).stem
+        try:
+            if name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(name, path))
+            return name
+        except (OSError, TTFError):
+            pass
+    serif = family.strip().lower() in SERIF_FAMILIES
+    return ("Times-Bold" if bold else "Times-Roman") if serif else ("Helvetica-Bold" if bold else "Helvetica")
+
+
+@lru_cache(maxsize=1024)
+def pdf_lines(value, width, face, size):
+    return tuple(wrapped(value, width, lambda line: pdfmetrics.stringWidth(line, face, size)))
+
+
+def text_fits(value, width, height, size, bold, family="Arial", align="left"):
+    if not value.strip():
+        return True
+    if width <= 0 or height <= 0:
+        return False
+    if not raster_text(value, round(width * TEXT_SCALE), round(height * TEXT_SCALE), size, bold, family, align).fits:
+        return False
+    face = pdf_face(family, bold)
+    lines = pdf_lines(value, width, face, size)
+    extent = size + (len(lines) - 1) * size * TEXT_LEADING - pdfmetrics.getDescent(face, size)
+    return extent <= height and all(pdfmetrics.stringWidth(line, face, size) <= width for line in lines)
+
+
+def text_height(value, width, size, bold, family):
+    """Return the larger required height in the preview and PDF text engines."""
+    pdf_font = pdf_face(family, bold)
+    pdf_rows = len(pdf_lines(value, width, pdf_font, size))
+    raster_rows = len(raster_text(value, round(width * TEXT_SCALE), 10000, size, bold, family).lines)
+    return max(raster_rows * size * TEXT_LEADING,
+               size + (pdf_rows - 1) * size * TEXT_LEADING - pdfmetrics.getDescent(pdf_font, size))
+
+
+def draw_raster_text(draw, layout, color, x=0, y=0):
+    for left, top, line in layout.lines:
+        draw.text((x + left, y + top), line, fill=color, font=layout.face, anchor="lt")
 
 
 def physical(document: Document):
@@ -57,6 +158,13 @@ def fit_image(image: Image, document: Document, ratio: float) -> Image:
     return image.model_copy(update={"x": image.x + (image.w - w) / 2, "y": image.y + (image.h - h) / 2, "w": w, "h": h})
 
 
+def slide_icon(document: Document, name: str, x: float, y: float, h: float, background: str) -> Image:
+    width, height = document.dimensions
+    theme = document.theme
+    color = theme.accent if contrast(theme.accent, background) >= 3 else theme.ink
+    return Image(x=x, y=y, w=h * height / width, h=h, asset_id=icon_asset_id(name, color))
+
+
 def flattened(elements, ox=0., oy=0., sx=1., sy=1.):
     for el in sorted(elements, key=lambda element: element.z):
         x, y, w, h = ox + el.x * sx, oy + el.y * sy, el.w * sx, el.h * sy
@@ -66,49 +174,102 @@ def flattened(elements, ox=0., oy=0., sx=1., sy=1.):
             yield el, x, y, w, h
 
 
-def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[str]:
+def fit_slide_text(document: Document, slide: Slide) -> list[str]:
     width, height = physical(document)
     warnings = []
+    elements = list(flattened(slide.elements))
+    for index, (el, x, y, w, h) in enumerate(elements):
+        if isinstance(el, Text):
+            def fits(frame_height):
+                return text_fits(el.text, w * width, frame_height * height, el.size, el.bold, el.font, el.align)
+
+            warning = f"Text may overflow: {el.text[:75]}"
+        elif isinstance(el, Table):
+            def fits(frame_height):
+                return table_text_fits(el, w * width, frame_height * height)
+
+            warning = "Some exhibit cells need shorter text."
+        else:
+            continue
+        while el.size > MIN_TEXT_SIZE and not fits(h):
+            el.size = max(MIN_TEXT_SIZE, el.size - 1)
+        if fits(h):
+            continue
+
+        # Use the room below the frame only if it stays within the same parent and clear of neighboring elements.
+        scale = h / el.h
+        limit = min(1.0, y + (1 - el.y) * scale)
+        for _, other_x, other_y, other_w, _ in elements:
+            if other_y >= y + h - 1e-8 and other_x < x + w and x < other_x + other_w:
+                limit = min(limit, other_y)
+        available = limit - y
+        if el.rotation % 360 or available <= h or not fits(available):
+            warnings.append(warning)
+            continue
+        low, high = h, available
+        while (high - low) * height > .5:
+            middle = (low + high) / 2
+            if fits(middle):
+                high = middle
+            else:
+                low = middle
+        el.h = min(1 - el.y, high / scale)
+        elements[index] = (el, x, y, w, high)
+    return warnings
+
+
+def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[str]:
+    warnings = fit_slide_text(document, slide)
     boxes = []
-    for el, x, y, w, h in flattened(slide.elements):
-        if isinstance(el, Image) and el.asset_id not in assets:
+    elements = list(flattened(slide.elements))
+    for el, x, y, w, h in elements:
+        if isinstance(el, Image) and el.asset_id not in assets and not bundled_icon(el.asset_id):
             warnings.append(f"Missing image: {el.alt or el.asset_id}")
-        if isinstance(el, Table) and el.header_fill:
-            cell_width = w * width / len(el.rows[0]) - 14
-            cell_height = h * height / len(el.rows) - 8
-            while not table_text_fits(el, cell_width, cell_height):
-                if el.size <= 8:
-                    warnings.append("Some exhibit cells need shorter text.")
-                    break
-                el.size = max(8, el.size - 1)
+        if isinstance(el, Table):
+            for row in range(min(2, len(el.rows))):
+                fill, ink, header = el.row_style(row)
+                if contrast(ink, fill) < 4.5:
+                    warnings.append("Low table header contrast." if header else "Low table cell contrast.")
+        if isinstance(el, Chart) and el.palette and contrast(el.label_color, slide.background) < 4.5:
+            warnings.append("Low chart label contrast.")
         if isinstance(el, Text):
             overlap = any(min(x+w, px+pw)-max(x,px) > .008 and min(y+h, py+ph)-max(y,py) > .008
                           for px, py, pw, ph in boxes)
             if overlap:
                 warnings.append(f"Overlapping text box: {el.text[:52]}")
             boxes.append((x, y, w, h))
-            while el.size > 8:
-                face = font(round(el.size * 2), el.bold, el.font)
-                lines = wrapped(el.text, w * width * 2, face.getlength)
-                if len(lines) * el.size * 1.13 <= h * height:
-                    break
-                el.size = max(8, el.size - 1)
-            face = font(round(el.size * 2), el.bold, el.font)
-            if len(wrapped(el.text, w * width * 2, face.getlength)) * el.size * 1.13 > h * height:
-                warnings.append(f"Text may overflow: {el.text[:75]}")
-            backs = [shape.fill for shape, bx, by, bw, bh in flattened(slide.elements)
+            backs = [shape.fill for shape, bx, by, bw, bh in elements
                      if isinstance(shape, Shape) and shape.z < el.z and bx <= x and by <= y and bx + bw >= x+w and by+bh >= y+h]
             if contrast(el.color, backs[-1] if backs else slide.background) < 3:
                 warnings.append(f"Low text contrast: {el.text[:55]}")
     return warnings
 
 
+def table_columns(table: Table, width: float) -> list[tuple[float, float]]:
+    count = len(table.rows[0])
+    compact = table.row_rule and width < 360
+    mixed = table.row_rule and count >= 4 and 0 < len(table.numeric_columns) < count
+    weights = [1.5 if (compact or mixed) and column not in table.numeric_columns else 1 for column in range(count)]
+    total = sum(weights)
+    widths = [width * weight / total for weight in weights]
+    return list(zip(accumulate(widths, initial=0), widths))
+
+
+def table_insets(table: Table, cell_width: float, row_height: float) -> tuple[float, float]:
+    if table.row_rule:
+        return min(12, cell_width * .1), min(6, row_height * .15)
+    return CELL_INSET_X, CELL_INSET_Y
+
+
 def table_text_fits(table: Table, width: float, height: float) -> bool:
+    columns = table_columns(table, width)
+    row_height = height / len(table.rows)
     for index, row in enumerate(table.rows):
-        _, _, header = table.row_style(index)
-        face = font(round(table.size * 2), header)
-        for cell in row:
-            if len(wrapped(cell, width * 2, face.getlength)) * table.size * 1.13 > height:
+        for column, (cell, (_, cell_width)) in enumerate(zip(row, columns)):
+            inset_x, inset_y = table_insets(table, cell_width, row_height)
+            if not text_fits(cell, cell_width - 2 * inset_x, row_height - 2 * inset_y,
+                             table.size, table.cell_bold(index, column),
+                             table.font, table.cell_align(column)):
                 return False
     return True
 
@@ -127,7 +288,17 @@ def chart_marks(el: Chart, w: float, h: float):
     high, low = max(0, *values), min(0, *values)
     span = high - low or 1
     band = w / len(el.categories)
-    shades = [el.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
+    shades = el.colors()
+    if el.chart == "stacked_column":
+        scale = h * .95 / (max(el.totals()) or 1)
+        for i in range(len(el.categories)):
+            bottom = h
+            for si, series in enumerate(el.series):
+                height = series.values[i] * scale
+                if height:
+                    yield ("rect", shades[si % len(shades)], (band * (i + .26), bottom - height, band * .48, height))
+                bottom -= height
+        return
     if el.chart == "pie":
         total = sum(values) or 1
         angle = 0
@@ -145,14 +316,22 @@ def chart_marks(el: Chart, w: float, h: float):
                 thickness = h / len(el.categories) * .72 / len(el.series)
                 zero = w * -low / span
                 end = w * (value - low) / span
-                yield ("rect", shades[si], (min(zero, end), i * h / len(el.categories) + thickness * si, abs(end - zero), thickness * .8))
+                yield ("rect", shades[si % len(shades)], (min(zero, end), i * h / len(el.categories) + thickness * si, abs(end - zero), thickness * .8))
             elif el.chart == "column":
                 thickness = band * .76 / len(el.series)
-                yield ("rect", shades[si], (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
+                yield ("rect", shades[si % len(shades)], (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
             else:
+                if el.show_values and el.chart == "line":
+                    pos = h * .13 + pos * .82
                 points.append((band * (i + .5), pos))
         if el.chart == "line" and points:
-            yield ("line", shades[si], points)
+            yield ("line", shades[si % len(shades)], points)
+
+
+def chart_values(element, points):
+    if element.show_values and len(element.series) == 1:
+        for value, (x, y) in zip(element.series[0].values, points):
+            yield display_value(value, element.value_prefix), x, y
 
 
 def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> bytes:
@@ -165,11 +344,11 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
         layer = PILImage.new("RGBA", (w, h))
         draw = ImageDraw.Draw(layer)
         if isinstance(el, Text):
-            face = font(max(1, round(el.size * scale)), el.bold, el.font)
-            step = el.size * scale * 1.13
-            for i, line in enumerate(wrapped(el.text, w, face.getlength)):
-                offset = {"left": 0, "center": (w-face.getlength(line))/2, "right": w-face.getlength(line)}[el.align]
-                draw.text((offset, i * step), line, fill=el.color, font=face, anchor="lt")
+            width, height = round(nw * ptw * TEXT_SCALE), round(nh * pth * TEXT_SCALE)
+            text_layer = PILImage.new("RGBA", (max(1, width), max(1, height)))
+            layout = raster_text(el.text, width, height, el.size, el.bold, el.font, el.align)
+            draw_raster_text(ImageDraw.Draw(text_layer), layout, el.color)
+            layer = text_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Shape):
             if el.shape == "triangle":
                 draw.polygon([(w/2, 0), (w-1, h-1), (0, h-1)], fill=el.fill, outline=el.border)
@@ -188,19 +367,40 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
             except (OSError, ValueError):
                 draw.rectangle((0, 0, w-1, h-1), outline="#BB3457", width=3)
         elif isinstance(el, Table):
-            rh, cw = h/len(el.rows), w/len(el.rows[0])
-            size = el.size * scale
+            width, height = round(nw * ptw * TEXT_SCALE), round(nh * pth * TEXT_SCALE)
+            table_layer = PILImage.new("RGBA", (max(1, width), max(1, height)))
+            table_draw = ImageDraw.Draw(table_layer)
+            columns = table_columns(el, nw * ptw)
+            rh = nh * pth / len(el.rows)
             for row, cells in enumerate(el.rows):
-                fill, ink, header = el.row_style(row)
-                face = font(max(1, round(size)), header)
-                for col, cell in enumerate(cells):
-                    left, top = col*cw, row*rh
-                    draw.rectangle((left, top, left+cw, top+rh), fill=fill, outline="#FFFFFF")
-                    for j, line in enumerate(wrapped(cell, cw-10, face.getlength)):
-                        offset = 5 + j*size*1.12
-                        if offset + size > rh:
-                            break
-                        draw.text((left+5, top+offset), line, fill=ink, font=face, anchor="lt")
+                fill, ink, _ = el.row_style(row)
+                for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
+                    top = row * rh
+                    inset_x, inset_y = table_insets(el, cw, rh)
+                    text_width = round((cw - 2 * inset_x) * TEXT_SCALE)
+                    text_height = round((rh - 2 * inset_y) * TEXT_SCALE)
+                    table_draw.rectangle(tuple(round(edge * TEXT_SCALE) for edge in (left, top, left + cw, top + rh)),
+                                         fill=fill, outline=None if el.row_rule else "#FFFFFF")
+                    if text_width > 0 and text_height > 0 and cell.strip():
+                        layout = raster_text(cell, text_width, text_height, el.size, el.cell_bold(row, col), el.font,
+                                             el.cell_align(col))
+                        tx, ty = round((left + inset_x) * TEXT_SCALE), round((top + inset_y) * TEXT_SCALE)
+                        if el.row_rule:
+                            extent = len(layout.lines) * el.size * TEXT_SCALE * TEXT_LEADING
+                            ty += max(0, round((text_height - extent) / 2))
+                        if layout.fits:
+                            draw_raster_text(table_draw, layout, ink, tx, ty)
+                        else:
+                            cell_layer = PILImage.new("RGBA", (text_width, text_height))
+                            draw_raster_text(ImageDraw.Draw(cell_layer), layout, ink)
+                            table_layer.alpha_composite(cell_layer, (tx, ty))
+            for row in range(len(el.rows)):
+                if rule := el.rule_after(row):
+                    shade, weight = rule
+                    stroke = max(1, round(weight * TEXT_SCALE))
+                    rule_y = min(round((row + 1) * rh * TEXT_SCALE), height - (stroke + 1) // 2)
+                    table_draw.line((0, rule_y, width, rule_y), fill=shade, width=stroke)
+            layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
             plot_h = h * .87
             for kind, color, dims in chart_marks(el, w, plot_h):
@@ -210,12 +410,22 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                 elif kind == "pie":
                     cx, cy, radius, begin, sweep = dims
                     draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color)
-                elif len(dims) > 1:
-                    draw.line(dims, fill=color, width=3)
+                else:
+                    if len(dims) > 1:
+                        draw.line(dims, fill=color, width=max(2, round(2 * scale)))
+                    for value, px, py in chart_values(el, dims):
+                        radius = 3 * scale
+                        draw.ellipse((px-radius, py-radius, px+radius, py+radius), fill=color)
+                        draw.text((px, py - 7 * scale), value, fill=el.label_color,
+                                  font=font(max(1, round(14 * scale)), True, el.font), anchor="mb")
             if el.chart not in {"pie", "bar"}:
-                face = font(max(1, round(10 * scale)), False)
-                for index, category in enumerate(el.categories):
-                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category[:20], fill="#292C49", font=face, anchor="mt")
+                stacked = el.chart == "stacked_column"
+                if stacked:
+                    draw.line((0, plot_h, w, plot_h), fill=el.label_color)
+                face = font(max(1, round((13 if stacked or el.show_values else 10) * scale)), stacked, el.font)
+                for index, category in enumerate(el.category_labels()):
+                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category if stacked else category[:20],
+                              fill=el.label_color, font=face, anchor="mt")
         if el.rotation:
             layer = layer.rotate(-el.rotation, expand=True, resample=PILImage.Resampling.BICUBIC)
         if el.opacity < 1:
@@ -243,15 +453,15 @@ def to_pdf(document: Document, get_asset) -> bytes:
             pdf.rotate(-el.rotation)
             pdf.translate(-w/2, -h/2)
             if isinstance(el, Text):
-                name = ("Times-Bold" if el.bold else "Times-Roman") if el.font.lower() == "georgia" else ("Helvetica-Bold" if el.bold else "Helvetica")
+                name = pdf_face(el.font, el.bold)
                 pdf.setFillColor(HexColor(el.color))
                 pdf.setFont(name, el.size)
                 path = pdf.beginPath()
                 path.rect(0, 0, w, h)
                 pdf.clipPath(path, stroke=0)
-                for i, line in enumerate(wrapped(el.text, w, lambda line: pdf.stringWidth(line, name, el.size))):
+                for i, line in enumerate(pdf_lines(el.text, w, name, el.size)):
                     fn, px = {"left": (pdf.drawString, 0), "center": (pdf.drawCentredString, w/2), "right": (pdf.drawRightString, w)}[el.align]
-                    fn(px, h-el.size-i*el.size*1.13, line)
+                    fn(px, h-el.size-i*el.size*TEXT_LEADING, line)
             elif isinstance(el, Shape):
                 pdf.setFillColor(HexColor(el.fill))
                 if el.border:
@@ -276,22 +486,45 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 pdf.setLineWidth(el.weight)
                 pdf.line(0, h, w, 0)
             elif isinstance(el, Table):
-                rh, cw = h/len(el.rows), w/len(el.rows[0])
+                rh = h/len(el.rows)
+                columns = table_columns(el, w)
                 for row, cells in enumerate(el.rows):
-                    fill, ink, header = el.row_style(row)
-                    face = "Helvetica-Bold" if header else "Helvetica"
-                    pdf.setFont(face, el.size)
-                    for col, cell in enumerate(cells):
-                        top, left = h-(row+1)*rh, col*cw
+                    fill, ink, _ = el.row_style(row)
+                    for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
+                        top = h-(row+1)*rh
+                        inset_x, inset_y = table_insets(el, cw, rh)
+                        tw, th = cw - 2 * inset_x, rh - 2 * inset_y
                         pdf.setFillColor(HexColor(fill))
                         pdf.setStrokeColor(HexColor("#FFFFFF"))
-                        pdf.rect(left, top, cw, rh, stroke=1, fill=1)
+                        pdf.rect(left, top, cw, rh, stroke=int(not el.row_rule), fill=1)
+                        if tw <= 0 or th <= 0 or not cell.strip():
+                            continue
+                        face = pdf_face(el.font, el.cell_bold(row, col))
+                        lines = pdf_lines(cell, tw, face, el.size)
+                        pad = inset_y
+                        if el.row_rule:
+                            extent = el.size + (len(lines) - 1) * el.size * TEXT_LEADING - pdfmetrics.getDescent(face, el.size)
+                            pad = max(inset_y, (rh - extent) / 2)
+                        pdf.saveState()
+                        path = pdf.beginPath()
+                        path.rect(left + inset_x, top + inset_y, tw, th)
+                        pdf.clipPath(path, stroke=0)
+                        pdf.setFont(face, el.size)
                         pdf.setFillColor(HexColor(ink))
-                        for j, line in enumerate(wrapped(cell, cw-8, lambda line: pdf.stringWidth(line, face, el.size))):
-                            yy = top+rh-el.size-3-j*el.size*1.12
-                            if yy < top + 2:
-                                break
-                            pdf.drawString(left+4, yy, line)
+                        for j, line in enumerate(lines):
+                            yy = top + rh - pad - el.size - j * el.size * TEXT_LEADING
+                            if el.cell_align(col) == "right":
+                                pdf.drawRightString(left + cw - inset_x, yy, line)
+                            else:
+                                pdf.drawString(left + inset_x, yy, line)
+                        pdf.restoreState()
+                for row in range(len(el.rows)):
+                    if rule := el.rule_after(row):
+                        shade, weight = rule
+                        rule_y = max(weight / 2, h - (row + 1) * rh)
+                        pdf.setStrokeColor(HexColor(shade))
+                        pdf.setLineWidth(weight)
+                        pdf.line(0, rule_y, w, rule_y)
             elif isinstance(el, Chart):
                 plot_h = .87*h
                 for kind, color, dims in chart_marks(el, w, plot_h):
@@ -304,13 +537,24 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         cx, cy, radius, begin, sweep = dims
                         pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=0, fill=1)
                     else:
+                        pdf.setLineWidth(2 if el.show_values else 1)
                         for (x1, y1), (x2, y2) in zip(dims, dims[1:]):
                             pdf.line(x1, h-y1, x2, h-y2)
+                        for value, px, py in chart_values(el, dims):
+                            pdf.setFillColor(HexColor(color))
+                            pdf.circle(px, h-py, 3, stroke=0, fill=1)
+                            pdf.setFillColor(HexColor(el.label_color))
+                            pdf.setFont(pdf_face(el.font, True), 14)
+                            pdf.drawCentredString(px, h-py+8, value)
                 if el.chart not in {"pie", "bar"}:
-                    pdf.setFont("Helvetica", 10)
-                    pdf.setFillColor(HexColor("#292C49"))
-                    for i, category in enumerate(el.categories):
-                        pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category[:20])
+                    stacked = el.chart == "stacked_column"
+                    if stacked:
+                        pdf.setStrokeColor(HexColor(el.label_color))
+                        pdf.line(0, h - plot_h, w, h - plot_h)
+                    pdf.setFont(pdf_face(el.font, stacked), 13 if stacked or el.show_values else 10)
+                    pdf.setFillColor(HexColor(el.label_color))
+                    for i, category in enumerate(el.category_labels()):
+                        pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])
             pdf.restoreState()
         pdf.showPage()
     pdf.save()

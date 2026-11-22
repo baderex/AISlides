@@ -14,10 +14,28 @@ def demo_response(schema: str, data: dict) -> dict:
             count = max(1, min(30, int(value) if value.isdecimal() else words.index(value)))
         subject = re.split(r"\babout\b", prompt, 1, flags=re.I)[-1].strip(" .")[:130]
         audience = re.search(r"\b(?:for|audience:)\s+([^.,;]+)", prompt, re.I)
-        style = re.search(r"(editorial|academic|minimal corporate|bold creative|modern technology)", prompt, re.I)
+        style = re.search(r"(dark[ -]luxury|editorial|academic|minimal corporate|bold creative|modern technology)", prompt, re.I)
         return {"subject": subject or "Untitled presentation", "slide_count": count,
                 "audience": audience[1][:250] if audience else "", "visual_direction": style[0] if style else "",
                 "missing": [key for key, value in {"audience": audience, "visual_direction": style}.items() if not value]}
+    if schema == "ArtDirection":
+        theme = dict(data["baseline"])
+        direction = data["direction"].lower()
+        if "dark" in direction and "luxury" in direction and not data["locked_template"]:
+            theme.update(background="#191817", ink="#F7F2E8", muted="#D1C8B6", surface="#302E2A", accent="#D3B478")
+        theme.pop("profile")
+        theme["design"] = theme.get("design") or {
+            "audience": data["intent"].get("audience") or "General audience",
+            "purpose": data["intent"].get("objective") or "Brief the audience",
+            "industry": "Finance" if "financ" in data["prompt"].lower() else "General",
+            "mood": direction or "Professional", "brand_constraints": "", "visual_references": "",
+            "imagery": "Restrained editorial imagery coordinated with the deck palette.",
+            "heading_font": "Georgia" if "luxury" in direction else theme["font"], "spacing": "spacious",
+            "card_shape": "rect", "cover_style": "rules" if "luxury" in direction else "panel",
+            "cover_background": theme["background"], "dense_surface": "#F7F2E8", "dense_ink": "#242321",
+            "chart_colors": [theme["accent"], theme["muted"], "#779891"],
+        }
+        return theme
     if schema == "Clarification":
         intent = data["intent"]
         agents = [
@@ -56,6 +74,7 @@ def demo_response(schema: str, data: dict) -> dict:
     if schema == "SlideContent":
         item = data["item"]
         title = item["title"]
+        icons = {}
         if "quantum computing" in data.get("topic", "").lower():
             variants = {
                 "cover": ("A practical briefing on the science, its potential, and what remains experimental.", []),
@@ -74,14 +93,19 @@ def demo_response(schema: str, data: dict) -> dict:
                 ("Software", "Algorithms must be benchmarked on appropriately scoped tasks."),
                 ("Error correction", "Logical qubits use multiple physical qubits to reduce faults."),
             ]))
+            icons = {"Classical bits": "cpu", "Quantum bits": "atom", "Hardware": "cpu",
+                     "Software": "code", "Error correction": "shield"}
         else:
             subtitle = item.get("purpose", "")[:210]
             points = [("What matters", "Identify the main problem, who it affects, and what would count as a meaningful improvement."),
                       ("What to validate", "Compare assumptions with available evidence and document open questions."),
                       ("What happens next", "Choose one practical next step with a clear owner and a review date.")]
-        return {"title": title, "subtitle": subtitle, "points": [{"title": name, "body": body} for name, body in points],
+        return {"title": title, "subtitle": subtitle,
+                "points": [{"title": name, "body": body, "icon": icons.get(name)} for name, body in points],
                 "notes": "Offline Studio Demo content. Configure a model provider to generate source-grounded material."}
-    if schema == "ResearchBrief":
+    if schema == "ResearchQueries":
+        return {"queries": [data["intent"]["subject"]]}
+    if schema in {"ResearchBrief", "EvidenceSummary"}:
         return {"summary": "Reference material is available for review.", "uncertainties": []}
     if schema == "Review":
         return {"issues": [], "regenerate_content": False}

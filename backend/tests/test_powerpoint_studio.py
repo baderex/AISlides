@@ -9,9 +9,10 @@ from pptx.util import Inches
 from reportlab.pdfgen.canvas import Canvas
 
 from app.branding import PPTX
-from app.domain import Document, Slide, Text
+from app.domain import Document, Slide, Table, Text
 from app.export_review import inspect_pdf, renderer
 from app.main import app
+from app.rendering import to_pdf
 from test_workflow import create, work
 
 
@@ -98,6 +99,19 @@ def test_rendered_pdf_review_reports_text_fit_overlap_and_font_substitution():
     slide, = inspect_pdf(output.getvalue(), document)
     assert base64.b64decode(slide["image"]).startswith(b"\xff\xd8")
     assert {issue["code"] for issue in slide["issues"]} >= {"text-fit", "text-overlap", "font-substitution"}
+
+
+def test_rendered_pdf_review_flags_changed_table_sign():
+    table = Table(x=.1, y=.2, w=.8, h=.3, rows=[["Operating profit", "-1"], ["Cash", "20"]])
+    document = Document(title="Results", slides=[Slide(title="Results", elements=[table])])
+    raw = to_pdf(document, None)
+    slide, = inspect_pdf(raw, document)
+    assert slide["issues"] == []
+
+    table.rows[0][1] = "1"
+    slide, = inspect_pdf(raw, document)
+    issue, = slide["issues"]
+    assert issue["code"] == "table-content" and "cell 1, 2" in issue["message"]
 
 
 def test_review_download_matches_the_rendered_powerpoint(monkeypatch):

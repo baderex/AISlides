@@ -1,9 +1,10 @@
 import json
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 
-from app.composition import SlideContent
+from app.composition import Outline, SlideContent
 from app.config import Settings, settings
 from app.providers import Intelligence, ProviderError
 
@@ -111,3 +112,98 @@ def test_openrouter_reports_fields_when_corrections_fail(monkeypatch):
         client.structured(SlideContent, "Write a slide.", {}, "slide")
     assert "table: use an array" in str(failure.value)
     assert "private model text" not in str(failure.value)
+
+
+def test_planned_exhibit_is_required_and_repaired(monkeypatch):
+    client = openrouter(monkeypatch)
+    prompts = []
+    decision = {"action": "Approve", "request": "the trial", "scope": "", "if_missed": "Pause expansion.",
+                "gates": [{"label": "Readiness", "threshold": "≥95%", "detail": ""}]}
+
+    def request(model, system, content, image, contract, **kwargs):
+        assert "decision" in contract["required"]
+        assert contract["properties"]["decision"]["$ref"] == "#/$defs/Decision"
+        assert "cover_callout" not in contract["properties"]
+        assert "response_schema" in kwargs
+        prompts.append(system)
+        return json.dumps({"title": "Decision", "decision": decision if len(prompts) > 1 else None}), 90, 30
+
+    monkeypatch.setattr(client, "_request", request)
+    slide = client.structured(SlideContent, "Write the decision slide.", {"required_exhibit": "decision"}, "slide")
+    assert slide.decision.model_dump() == decision
+    assert "populate the decision object for this slide" in prompts[1]
+
+
+def test_explicit_visible_point_count_is_repaired(monkeypatch):
+    client = openrouter(monkeypatch)
+    prompts = []
+    points = [{"title": "Camp table"}, {"title": "Reading corner"}, {"title": "Extra use case"}]
+
+    def request(model, system, content, image, contract):
+        prompts.append(system)
+        return json.dumps({"title": "Use cases", "points": points if len(prompts) == 1 else points[:2]}), 90, 30
+
+    monkeypatch.setattr(client, "_request", request)
+    slide = client.structured(SlideContent, "Show the two use cases.", {"point_count": 2}, "slide")
+    assert [point.title for point in slide.points] == ["Camp table", "Reading corner"]
+    assert "return exactly 2 items in points and no extra items" in prompts[1]
+
+
+def test_outline_falls_back_and_repairs_the_count_without_rejecting_extra_fields(monkeypatch):
+    client = openrouter(monkeypatch)
+    calls = []
+    first = {"title": "Introduction", "layout": "cover", "content": {"unused": "Slide copy"}}
+    second = {"title": "Learn by doing", "layout": "process", "content": ["Extra slide copy"]}
+
+    def post(url, body, headers):
+        calls.append(body)
+        if len(calls) == 1:
+            request = httpx.Request("POST", url)
+            response = httpx.Response(404, request=request)
+            response.raise_for_status()
+        slides = [first] if len(calls) == 2 else [first, second]
+        return {"choices": [{"message": {"content": json.dumps({"title": "Workshop", "slides": slides})}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    outline = client.structured(Outline, "Plan two workshop slides.", {"slide_count": 2}, "outline")
+
+    assert [slide.layout for slide in outline.slides] == ["cover", "process"]
+    assert "content" not in outline.slides[0].model_dump()
+    constrained, fallback, repair = calls
+    assert constrained["provider"] == {"require_parameters": True}
+    assert constrained["response_format"]["type"] == "json_schema"
+    envelope = constrained["response_format"]["json_schema"]
+    assert envelope["strict"]
+    contract = envelope["schema"]
+    slides_schema = contract["properties"]["slides"]
+    assert slides_schema["minItems"] == slides_schema["maxItems"] == 2
+    for obj in (contract, contract["$defs"]["OutlineItem"]):
+        assert set(obj["required"]) == set(obj["properties"])
+        assert obj["additionalProperties"] is False
+        assert all("default" not in field for field in obj["properties"].values())
+    assert fallback["response_format"] == repair["response_format"] == {"type": "json_object"}
+    assert "slides: return exactly 2 slides (received 1)" in repair["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(("layout", "expected"), [(" Line_Chart ", "chart"), ("data-table", "research"), (" Metrics ", "metrics")])
+def test_outline_retries_invalid_layout_and_normalizes_known_layout_names(monkeypatch, layout, expected):
+    client = openrouter(monkeypatch)
+    prompts = []
+    layouts = iter(["private model label", layout])
+
+    def post(url, body, headers):
+        prompts.append(body["messages"][0]["content"])
+        outline = {"title": "TASI", "slides": [{"title": "TASI performance", "layout": next(layouts)}]}
+        return {"choices": [{"message": {"content": json.dumps(outline)}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    outline = client.structured(Outline, "Plan one slide.", {
+        "prompt": "generate impressive slide about TASI preformance in the last 5 years and top 5 companies",
+        "slide_count": 1,
+    }, "outline")
+
+    assert [slide.layout for slide in outline.slides] == [expected]
+    correction = prompts[1].split("Correct these issues: ", 1)[1]
+    assert correction.startswith("slides.0.layout: use one of")
+    assert "'chart'" in correction and "'research'" in correction
+    assert "private model label" not in correction
