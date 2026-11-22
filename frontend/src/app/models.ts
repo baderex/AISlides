@@ -2,7 +2,12 @@ export type Aspect = '16:9' | '4:3' | '1:1';
 export type Status = 'CREATED' | 'ANALYZING' | 'WAITING_FOR_USER' | 'RESEARCHING' | 'PLANNING' | 'GENERATING' | 'REVIEWING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 export type Layout = 'cover' | 'section' | 'summary' | 'comparison' | 'timeline' | 'process' | 'metrics' | 'chart' | 'showcase' | 'editorial' | 'research' | 'quote' | 'closing';
 
-export interface Theme { background: string; ink: string; accent: string; muted: string; surface: string; font: string; profile?: 'standard' | 'consulting' }
+export interface DesignRules {
+  audience: string; purpose: string; industry: string; mood: string; brand_constraints: string; visual_references: string;
+  imagery: string; heading_font: string; spacing: 'compact' | 'regular' | 'spacious'; card_shape: 'rect' | 'round';
+  cover_style: 'rules' | 'panel' | 'circles'; cover_background: string; dense_surface: string; dense_ink: string; chart_colors: string[];
+}
+export interface Theme { design?: DesignRules | null; background: string; ink: string; accent: string; muted: string; surface: string; font: string; profile?: 'standard' | 'consulting' }
 export interface Source { id: string; title: string; url: string | null; excerpt: string; asset_id: string | null }
 export interface Geometry {
   id: string; x: number; y: number; w: number; h: number; rotation: number; z: number;
@@ -15,9 +20,9 @@ export interface TextElement extends Geometry {
 export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle'; fill: string }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
 export interface LineElement extends Geometry { type: 'line'; color: string; weight: number }
-export interface TableElement extends Geometry { type: 'table'; rows: string[][]; color: string; fill: string; size?: number; header_fill?: string | null; header_color?: string | null }
+export interface TableElement extends Geometry { type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number; header_fill?: string | null; header_color?: string | null }
 export interface ChartElement extends Geometry {
-  type: 'chart'; chart: 'bar' | 'column' | 'line' | 'pie'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
+  type: 'chart'; font?: string; label_color?: string; palette?: string[]; chart: 'bar' | 'column' | 'line' | 'pie'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }
 export type SlideElement = TextElement | ShapeElement | ImageElement | LineElement | TableElement | ChartElement | GroupElement;

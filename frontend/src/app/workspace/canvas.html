@@ -24,7 +24,7 @@
             @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
             @case ('line') { <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M 0 0 L 100 100" fill="none" [attr.stroke]="el.color" [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" /></svg> }
             @case ('table') {
-              <table [studioFitText]="el" [preferredFont]="font(el.size ?? 12)" [style.color]="el.color" [style.background]="el.fill">
+              <table [style.font-family]="el.font || 'Arial'" [studioFitText]="el" [preferredFont]="font(el.size ?? 12)" [style.color]="el.color" [style.background]="el.fill">
                 @for (row of el.rows; track $index) {
                   @if ($first && el.header_fill) {
                     <tr [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">
@@ -41,7 +41,7 @@
               @else {
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart" aria-hidden="true">
                   @for (series of chart(el); track $index; let index = $index) {
-                    @let color = index === 0 ? el.color : shades[index];
+                    @let color = chartColor(el, index);
                     @for (mark of series; track $index; let j = $index) {
                       @switch (el.chart) {
                         @case ('bar') { <svg:rect [attr.x]="mark.bx" [attr.y]="mark.by + mark.horizontal * index" [attr.width]="mark.bw" [attr.height]="mark.horizontal * .8" [attr.fill]="color" /> }
@@ -54,7 +54,7 @@
                     }
                   }
                 </svg>
-                @if (el.chart !== 'bar') { <div class="chart-labels" [style.font-size]="font(10)">@for (cat of el.categories; track $index) { <span>{{ cat }}</span> }</div> }
+                @if (el.chart !== 'bar') { <div class="chart-labels" [style.font-family]="el.font" [style.color]="el.label_color" [style.font-size]="font(10)">@for (cat of el.categories; track $index) { <span>{{ cat }}</span> }</div> }
               }
             }
             @case ('group') { <ng-container *ngTemplateOutlet="parts; context: {$implicit: el.elements, root: false}" /> }

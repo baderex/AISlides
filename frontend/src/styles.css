@@ -392,7 +392,7 @@ studio-canvas { display: block; width: 100%; }
 .slide-content { position: relative; overflow: hidden; }
 .slide-content > img { object-fit: fill; }
 .slide-content > table { display: table; table-layout: fixed; border-collapse: collapse; }
-.slide-content td, .slide-content th { font-family: Arial, sans-serif; vertical-align: top; text-align: left; border: 1px solid #fff; padding: .42cqw; overflow-wrap: anywhere; }
+.slide-content td, .slide-content th { font-family: inherit; vertical-align: top; text-align: left; border: 1px solid #fff; padding: .42cqw; overflow-wrap: anywhere; }
 .slide-text { height: 100%; white-space: pre-wrap; line-height: 1.13; overflow: hidden; overflow-wrap: anywhere; user-select: none; }
 .slide-shape.ellipse, .slide-pie { border-radius: 50%; }
 .slide-shape.triangle { clip-path: polygon(50% 0,100% 100%,0 100%); }

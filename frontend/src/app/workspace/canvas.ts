@@ -94,12 +94,17 @@ export class SlideCanvas {
     }));
   }
 
+  chartColor(el: ChartElement, index: number) {
+    const palette = el.palette?.length ? el.palette : [el.color, ...this.shades.slice(1)];
+    return palette[index % palette.length];
+  }
+
   pie(el: ChartElement) {
     const total = el.series[0].values.reduce((sum, value) => sum + value, 0) || 1;
     let start = 0;
     return 'conic-gradient(' + el.series[0].values.map((value, index) => {
       const end = start + value * 100 / total;
-      const entry = (index === 0 ? el.color : this.shades[index % this.shades.length]) + ' ' + start + '% ' + end + '%';
+      const entry = this.chartColor(el, index) + ' ' + start + '% ' + end + '%';
       start = end;
       return entry;
     }).join(',') + (el.series[0].values.length === 1 ? ', transparent 100%' : '') + ')';

@@ -15,6 +15,24 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class DesignRules(Contract):
+    audience: ShortText
+    purpose: ShortText
+    industry: ShortText
+    mood: ShortText
+    brand_constraints: str = Field(max_length=400)
+    visual_references: str = Field(max_length=400)
+    imagery: ShortText
+    heading_font: str = Field(min_length=1, max_length=60)
+    spacing: Literal["compact", "regular", "spacious"]
+    card_shape: Literal["rect", "round"]
+    cover_style: Literal["rules", "panel", "circles"]
+    cover_background: Color
+    dense_surface: Color
+    dense_ink: Color
+    chart_colors: list[Color] = Field(min_length=2, max_length=5)
+
+
 class Theme(Contract):
     background: Color = "#F7F8FF"
     ink: Color = "#181D3B"
@@ -23,6 +41,7 @@ class Theme(Contract):
     surface: Color = "#E7E9FF"
     font: str = Field(default="Arial", max_length=60)
     profile: Literal["standard", "consulting"] = "standard"
+    design: DesignRules | None = None
 
 
 class Source(Contract):
@@ -87,6 +106,7 @@ class Table(ElementBase):
     color: Color = "#181D3B"
     fill: Color = "#E7E9FF"
     size: float = Field(default=12, ge=8, le=28)
+    font: str = Field(default="Arial", max_length=60)
     header_fill: Color | None = None
     header_color: Color | None = None
 
@@ -114,6 +134,13 @@ class Chart(ElementBase):
     categories: list[ShortText] = Field(min_length=1, max_length=16)
     series: list[Series] = Field(min_length=1, max_length=5)
     color: Color = "#4C52D9"
+
+    palette: list[Color] = Field(default_factory=list, max_length=5)
+    label_color: Color = "#292C49"
+    font: str = Field(default="Arial", max_length=60)
+
+    def colors(self):
+        return self.palette or [self.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
 
     @model_validator(mode="after")
     def matching_series(self):

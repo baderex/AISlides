@@ -12,7 +12,8 @@ from app.composition import (
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
-from app.domain import Skill, Slide, Source, read_document
+from app.design import ArtDirection, DIRECTOR_PROMPT, reference_sheet
+from app.domain import Skill, Slide, Source, Theme, read_document
 from app.imagery import image_configured, render_image, source_web_image
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
 from app.previews import put_preview
@@ -340,6 +341,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
     version = None
     changed = None
     state = "queued"
+    if stage == "plan" and not context.get("design_completed"):
+        stage = "design"
     if stage == "analyze":
         if not start_status(job_id, token, "ANALYZING", "agent.started", "Analyzing the request and reference materials."):
             return None
@@ -419,7 +422,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 question = brief.follow_up
                 if question.type not in used_kinds and question.id not in used_ids:
                     pause_for_questions(context, Clarification(questions=[question]), events)
-                    return "plan", "waiting", "WAITING_FOR_USER", events, None, None
+                    return "design", "waiting", "WAITING_FOR_USER", events, None, None
         else:
             if data_driven:
                 reason = ("Web research returned no usable sources." if web_research else
@@ -428,7 +431,29 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                {"uncertainties": [reason]}))
             else:
                 events.append(("research.completed", "No reference sources were provided for this deck.", {}))
-        stage, status = "plan", "RESEARCHING"
+        stage, status = "design", "RESEARCHING"
+    elif stage == "design":
+        if not start_status(job_id, token, "PLANNING", "agent.started", "Choosing the deck typography, palette and visual rules."):
+            return None
+        baseline = design(direction or ("Data Driven" if data_driven else ""), item.request["mode"], skill.theme if skill else None)
+        locked = skill is not None or baseline.profile == "consulting"
+        references = [{"name": asset.name, "type": asset.media_type, "excerpt": asset.extracted[:900]} for asset in assets]
+        proposed = ai.structured(ArtDirection, DIRECTOR_PROMPT, {
+            "prompt": item.request["prompt"], "intent": context["intent"], "answers": context.get("answers", []),
+            "direction": direction, "selected_skill": context.get("skill"), "references": references,
+            "baseline": baseline.model_dump(), "locked_template": locked,
+        }, "design", reference_sheet(assets) if settings().llm_vision_enabled else None)
+        theme = Theme.model_validate(proposed.model_dump())
+        if locked:
+            rules = proposed.design
+            if baseline.design:
+                brief = rules.model_dump(include={"audience", "purpose", "industry", "mood", "visual_references"})
+                rules = baseline.design.model_copy(update=brief)
+            theme = baseline.model_copy(update={"design": rules})
+        document.theme = theme
+        context["design_completed"] = True
+        events.append(("design.completed", "Deck design system ready.", {"mood": theme.design.mood}))
+        stage, status, changed = "plan", "PLANNING", document
     elif stage == "plan":
         if not start_status(job_id, token, "PLANNING", "agent.started", "Planning the narrative and slide sequence."):
             return None
@@ -438,7 +463,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             if answer["question_id"] in context.get("count_questions", []) and answer["value"].isdigit():
                 count = int(answer["value"])
         count = count or 6
-        theme = design(direction or ("Data Driven" if data_driven else ""), item.request["mode"], skill.theme if skill else None)
+        theme = document.theme
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
         if data_driven:
             style_guidance += DATA_PLAN_GUIDANCE
@@ -456,11 +481,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         planning_inputs = evidence_inputs(item, context) if data_driven else inputs(item, context)
         outline = ai.structured(Outline,
             f"Plan exactly {count} slides. Honor the requested slide allocation and give every slide a distinct purpose. "
+            "If the user requests a cover, use the cover layout and their supplied deck title as its headline. "
             "Use chart layouts only when grounded data is available." + style_guidance + period_guidance + research_guidance + image_guidance,
-            {**planning_inputs, "slide_count": count}, "outline")
+            {**planning_inputs, "slide_count": count, "design": theme.model_dump()}, "outline")
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
-        document.theme = theme
         document = read_document({**document.model_dump(mode="json"), "sources": context["sources"]})
         changed = document
         events.append(("outline.completed", outline.narrative or "Slide outline ready.", {"outline": context["outline"]}))
@@ -493,7 +518,9 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if data_driven:
             style_guidance += DATA_SLIDE_GUIDANCE
         content = ai.structured(SlideContent, "Write concise content for the single item given. Use its exact title and fulfill its purpose. "
-             "Cover the current item only and do not repeat earlier slides. Make claims traceable via supplied source IDs. "
+             "Cover the current item only and do not repeat earlier slides. Write for the audience. Keep visual instructions, "
+             "color names and comments about the presentation design out of visible copy unless the subject is design. "
+             "Make claims traceable via supplied source IDs. "
              "Include actionable detail and relevant speaker notes. Use at most three points. Keep each point title within 65 characters "
              "and each point body within 130 characters. "
              "Distinguish established results from forecasts or hypotheses. Qualify claims about speed, feasibility, causality and performance "
@@ -503,6 +530,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              "When image generation is enabled and a relevant uploaded asset is unavailable, provide an illustration prompt in image_prompt."
              + style_guidance + period_guidance + point_icon_guidance(part, document, brand),
              {"item": part.model_dump(), "topic": document.title, "slide_index": index,
+              "imagery_direction": document.theme.design.imagery if document.theme.design else "",
               "earlier_slide_titles": [slide.title for slide in document.slides[-5:]],
               **slide_inputs(item, context, part if data_driven else None), "generate_image": bool(can_illustrate),
               "image_assets": [{"id": a.id, "name": a.name} for a in assets if a.id in images]}, "slide")
@@ -539,7 +567,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 raise ProviderError("The image provider is unavailable.")
             if settings().ai_job_cost_budget > 0 and ai.usage["estimated_cost"] + settings().image_cost_usd > settings().ai_job_cost_budget:
                 raise ProviderError("The estimated job budget has no room for this illustration.")
-            key = render_image(job_id, token, index, item.owner_id, content.image_prompt)
+            prompt = content.image_prompt
+            if document.theme.design:
+                prompt += " Deck imagery direction: " + document.theme.design.imagery
+            key = render_image(job_id, token, index, item.owner_id, prompt)
             if not key:
                 return None
             content.image_asset_id = key

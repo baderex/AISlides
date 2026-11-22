@@ -2,7 +2,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.domain import Contract, Identifier, Slide, Text, Theme
+from app.design import style_chart, style_table
+from app.domain import Chart, Contract, Group, Identifier, Slide, Table, Text, Theme
 from app.providers import Intelligence, ProviderError
 
 
@@ -60,6 +61,15 @@ def propose(item, document, request):
     return proposal
 
 
+def inherited_elements(elements):
+    for element in elements:
+        if element.edited:
+            continue
+        yield element
+        if isinstance(element, Group):
+            yield from inherited_elements(element.elements)
+
+
 def apply(document, proposal):
     from app.domain import read_document
 
@@ -68,18 +78,34 @@ def apply(document, proposal):
         if isinstance(operation, Restyle):
             keys = ("background", "ink", "accent", "muted", "surface")
             colors = {getattr(document.theme, key): getattr(operation.theme, key) for key in keys}
+            theme = operation.theme
+            previous = document.theme.design
+            if previous and theme.design is None:
+                # Older edit clients submit just the base palette.
+                updates = {key: colors.get(getattr(previous, key), getattr(previous, key))
+                           for key in ("cover_background", "dense_surface", "dense_ink")}
+                if previous.heading_font == document.theme.font:
+                    updates["heading_font"] = theme.font
+                updates["chart_colors"] = [colors.get(shade, shade) for shade in previous.chart_colors]
+                theme = theme.model_copy(update={"design": previous.model_copy(update=updates)})
+            rules = theme.design
             for slide in slides.values():
-                slide.background = colors.get(slide.background, slide.background)
-                for element in slide.elements:
-                    if element.edited:
-                        continue
-                    for attr in ("fill", "color", "border"):
+                if previous and rules and slide.layout in {"cover", "closing", "section", "quote"}:
+                    slide.background = rules.cover_background
+                else:
+                    slide.background = colors.get(slide.background, slide.background)
+                for element in inherited_elements(slide.elements):
+                    for attr in ("fill", "color", "border", "header_fill", "header_color", "label_color"):
                         value = getattr(element, attr, None)
                         if value in colors:
                             setattr(element, attr, colors[value])
                     if isinstance(element, Text):
-                        element.font = operation.theme.font
-            document.theme = operation.theme
+                        element.font = rules.heading_font if rules and element.text == slide.title else theme.font
+                    elif rules and isinstance(element, Chart):
+                        style_chart(element, theme, slide.background)
+                    elif rules and isinstance(element, Table):
+                        style_table(element, theme)
+            document.theme = theme
             continue
         slide = slides.get(operation.slide_id)
         if not slide:

@@ -278,7 +278,8 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
         assert kwargs["headers"] == {"Authorization": f"Bearer {expected_key}"}
         payload = {
             "model": expected_model,
-            "prompt": "Create a presentation illustration without captions, text or logos. An abstract blue shape",
+            "prompt": "Create a presentation illustration without captions, text or logos. An abstract blue shape"
+                      " Deck imagery direction: Restrained editorial imagery coordinated with the deck palette.",
         }
         if provider == "openai":
             payload.update(size="1024x1024", quality="medium", n=1)
@@ -292,6 +293,9 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
             "Outline": {"title": "Example", "slides": [{"title": "Example", "layout": "editorial"}]},
             "SlideContent": {"title": "Example", "image_prompt": "An abstract blue shape"},
         }
+        if schema.__name__ == "ArtDirection":
+            from app.demo import demo_response
+            return schema.model_validate(demo_response("ArtDirection", data))
         return schema.model_validate(fixtures[schema.__name__])
 
     monkeypatch.setattr(httpx, "post", request)
@@ -438,7 +442,7 @@ def test_image_queries_cannot_replace_planned_layouts_or_exhibits(monkeypatch, d
 def test_resuming_an_older_image_draft_restores_the_planned_layout():
     client = TestClient(app)
     path = create(client, "Generate one slide in editorial style about accessibility for new hires.")
-    work(5)
+    work(6)
     identifier = path.rsplit("/", 1)[1]
     source = Source(title="Old web photo", asset_id="old_asset")
     with Session.begin() as db:

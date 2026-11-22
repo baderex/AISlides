@@ -53,7 +53,7 @@ def test_guided_workflow_and_native_export():
     answers = {"answers": [{"question_id": "audience", "option_ids": ["executive"]},
                            {"question_id": "visual_direction", "option_ids": ["editorial"]}]}
     assert client.post(f"{path}/answers", json=answers).status_code == 202
-    work(4)
+    work(5)
     partial = client.get(path).json()
     assert partial["slide_count"] == 1
     assert partial["status"] == "GENERATING"

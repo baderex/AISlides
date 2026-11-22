@@ -6,6 +6,7 @@ from pydantic_core import PydanticCustomError
 
 from app.branding import choose_layout, compose_branded
 from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
+from app.design import readable, style_chart, style_table
 from app.domain import BrandTemplate, Chart, Contract, Document, Image, Layout, Shape, ShortText, Slide, Table, Text, Theme
 from app.lucide import ICON_NAMES
 from app.questions import Question
@@ -101,6 +102,15 @@ class SlideContent(Contract):
     chart: ChartContent | None = None
     table: list[list[str]] | None = Field(default=None, max_length=8)
 
+    @property
+    def chart_ready(self) -> bool:
+        return self.chart is not None and len(self.chart.values) == len(self.chart.categories)
+
+    @property
+    def table_ready(self) -> bool:
+        rows = self.table
+        return bool(rows and 1 <= len(rows[0]) <= 8 and all(len(row) == len(rows[0]) for row in rows))
+
 
 class ResearchQueries(Contract):
     queries: list[ShortText] = Field(min_length=1, max_length=4)
@@ -122,6 +132,7 @@ class Review(Contract):
     regenerate_content: bool = False
 
 
+DISPLAY_LAYOUTS = frozenset({"cover", "section", "quote", "closing"})
 IMAGE_LAYOUTS = frozenset({"showcase", "editorial", "research"})
 STANDARD_ICON_LAYOUTS = frozenset({"summary", "comparison", "timeline", "process", "metrics", "showcase", "editorial"})
 
@@ -161,17 +172,34 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
     return Theme()
 
 
+def select_layout(item, content, document, images, *, data_driven, allow_variants):
+    role = item.layout
+    if role in DISPLAY_LAYOUTS:
+        return role
+    sourced = bool(set(content.source_ids).intersection(source.id for source in document.sources))
+    chart_ready = sourced and content.chart_ready and len(content.chart.values) >= 2
+    if (data_driven and sourced) or allow_variants:
+        if chart_ready and not (role == "research" and content.table_ready):
+            return "chart"
+        if content.table_ready and (sourced or not any(re.search(r"\d", cell) for row in content.table for cell in row)):
+            return "research"
+    if allow_variants and role == "summary":
+        if content.image_asset_id in images:
+            return "editorial"
+        if sourced and len(content.points) >= 2 and all(point.value for point in content.points):
+            return "metrics"
+        if document.slides and document.slides[-1].layout == role and len(content.points) == 2:
+            return "comparison"
+    return role
+
+
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
             brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None, data_driven: bool = False) -> Slide:
     source_ids = {source.id for source in document.sources}
-    valid_chart = content.chart and len(content.chart.values) == len(content.chart.categories)
-    table = content.table
-    valid_table = table and 1 <= len(table[0]) <= 8 and all(len(row) == len(table[0]) for row in table)
-    if data_driven and source_ids.intersection(content.source_ids) and item.layout not in {"cover", "section", "quote", "closing"}:
-        if valid_chart and len(content.chart.values) >= 2 and not (item.layout == "research" and valid_table):
-            item = item.model_copy(update={"layout": "chart"})
-        elif valid_table:
-            item = item.model_copy(update={"layout": "research"})
+    rules = document.theme.design
+    layout = select_layout(item, content, document, image_ids, data_driven=data_driven,
+                           allow_variants=bool(rules and not brand and document.theme.profile == "standard"))
+    item = item.model_copy(update={"layout": layout})
     if brand:
         return compose_branded(item, content, document, image_ids, brand)
     t = document.theme
@@ -180,9 +208,14 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     editorial = t.font == "Georgia"
-    dark = item.layout in {"cover", "section", "quote", "closing"} and not editorial
+    dark = item.layout in DISPLAY_LAYOUTS and not editorial
     bg = t.ink if dark else t.background
     ink, muted, accent = ("#FFFFFF", "#DDE1F5", "#E0DBFF") if dark else (t.ink, t.muted, t.accent)
+    if rules:
+        bg = rules.cover_background if item.layout in DISPLAY_LAYOUTS else t.background
+        ink = readable(t.ink, bg, t.background)
+        muted = readable(t.muted, bg, ink)
+        accent = readable(t.accent, bg, ink)
     slide = Slide(title=item.title, background=bg, layout=item.layout, notes=content.notes,
                   source_ids=list(dict.fromkeys(s for s in content.source_ids if s in source_ids)))
     elements = slide.elements
@@ -190,22 +223,31 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     def rect(x, y, w, h, fill, shape="rect"):
         elements.append(Shape(x=x, y=y, w=w, h=h, fill=fill, shape=shape, z=-1))
 
-    def label(value, x, y, w, h, size, color=ink, bold=False):
+    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False):
         if value.strip():
-            elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * factor), color=color, bold=bold, font=t.font))
+            face = rules.heading_font if rules and heading else t.font
+            elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * factor),
+                                 color=color, bold=bold, font=face))
 
-    label(f"{index + 1:02d}  /  {item.layout.upper()}", .068, .065, .65, .045, 12, accent, True)
-    rect(.068, .137, .048, .008, accent)
-    if item.layout in {"cover", "section", "quote", "closing"}:
-        if editorial:
+    if not rules:
+        label(f"{index + 1:02d}  /  {item.layout.upper()}", .068, .065, .65, .045, 12, accent, True)
+        rect(.068, .137, .048, .008, accent)
+    elif item.layout not in DISPLAY_LAYOUTS:
+        rect(.068, .115, .048, .007, t.accent)
+    if item.layout in DISPLAY_LAYOUTS:
+        if rules and rules.cover_style == "rules":
+            rect(.07, .196, .86, .003, t.accent)
+            rect(.07, .90, .86, .003, t.accent)
+        elif (rules and rules.cover_style == "panel") or (not rules and editorial):
             rect(.76, .125, .172, .59, t.accent)
-            rect(.788, .20, .113, .008, "#E5B4A8")
-            rect(.788, .53, .113, .008, "#E5B4A8")
-            label(f"{index + 1:02d}", .788, .33, .12, .14, 38, "#FFFFFF", True)
+            rect(.788, .20, .113, .008, readable(t.muted, t.accent) if rules else "#E5B4A8")
+            rect(.788, .53, .113, .008, readable(t.muted, t.accent) if rules else "#E5B4A8")
+            if not rules:
+                label(f"{index + 1:02d}", .788, .33, .12, .14, 38, "#FFFFFF", True)
         else:
             rect(.77, .09, .19, .32, t.accent, "ellipse")
             rect(.82, .28, .135, .24, t.muted, "ellipse")
-        label(item.title, .068, .24, .66, .28, 47, ink, True)
+        label(item.title, .068, .24, .86 if rules and rules.cover_style == "rules" else .66, .28, 47, ink, True, heading=True)
         if content.subtitle:
             label(content.subtitle, .07, .58, .64 if editorial else .70, .13, 23, muted)
         points = content.points[:3]
@@ -216,12 +258,12 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             label(points[0].title, .07, .77, .65, .08, 18, muted)
         return slide
 
-    label(item.title, .068, .17, .87, .17, 35, ink, True)
+    label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
     label(content.subtitle, .07, .352, .86, .08, 17, muted)
     points = content.points
     use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table)
-    if item.layout == "research" and valid_table:
-        rows = [[cell[:180] for cell in row] for row in table]
+    if item.layout == "research" and content.table_ready:
+        rows = [[cell[:180] for cell in row] for row in content.table]
         elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
@@ -237,7 +279,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 y = .46 + i * .21
                 label(point.title, .07, y, .43, .06, 20, ink, True)
                 label(point.body, .07, y + .07, .43, .125, 16, muted)
-    elif item.layout == "chart" and slide.source_ids and valid_chart:
+    elif item.layout == "chart" and slide.source_ids and content.chart_ready:
         data = content.chart
         try:
             elements.append(Chart(x=.07, y=.51 if data_driven else .45, w=.54 if data_driven else .86,
@@ -270,10 +312,14 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             label(point.body, x, .72, width - .024, .18, 16, muted)
     elif item.layout in {"comparison", "metrics", "process", "showcase"} and points:
         points = points[:2 if item.layout == "comparison" else 3]
-        width = (.864 - .022 * (len(points) - 1)) / len(points)
+        gap = {"compact": .012, "regular": .022, "spacious": .032}[rules.spacing] if rules else .022
+        width = (.864 - gap * (len(points) - 1)) / len(points)
+        card_ink = readable(t.ink, t.surface) if rules else ink
+        card_muted = readable(t.muted, t.surface, card_ink) if rules else muted
+        card_accent = readable(t.accent, t.surface, card_ink) if rules else accent
         for i, point in enumerate(points):
-            x = .068 + i * (width + .022)
-            rect(x, .463, width, .426, t.surface, "round")
+            x = .068 + i * (width + gap)
+            rect(x, .463, width, .426, t.surface, rules.card_shape if rules else "round")
             value = point.value if slide.source_ids or not any(character.isdigit() for character in point.value) else ""
             offset = 0
             if use_icons and point.icon:
@@ -282,9 +328,9 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 offset = icon.w + .012
             if not value:
                 value = f"0{i + 1}" if item.layout == "process" else ("" if offset else "—")
-            label(value, x + .018 + offset, .495, width - .036 - offset, .083, 25, accent, True)
-            label(point.title, x + .018, .596, width - .036, .09, 18, ink, True)
-            label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, muted)
+            label(value, x + .018 + offset, .495, width - .036 - offset, .083, 25, card_accent, True)
+            label(point.title, x + .018, .596, width - .036, .09, 18, card_ink, True)
+            label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, card_muted)
     else:
         icon_column = use_icons and any(point.icon for point in points[:3])
         text_x = .125 if icon_column else .103
@@ -297,6 +343,12 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 rect(.07, y + .021, .014, .025, t.accent, "ellipse")
             label(point.title, text_x, y, text_width, .062, 20, ink, True)
             label(point.body, text_x, y + .063, text_width, .075, 16, muted)
+    if rules:
+        for element in elements:
+            if isinstance(element, Table):
+                style_table(element, t)
+            elif isinstance(element, Chart):
+                style_chart(element, t, bg)
     if len(points) > 3:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]

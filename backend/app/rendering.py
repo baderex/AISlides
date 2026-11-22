@@ -8,6 +8,7 @@ from PIL import ImageDraw, ImageFont
 from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from reportlab.pdfgen import canvas
 
 from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
@@ -84,7 +85,18 @@ def raster_text(value, width, height, size, bold, family="Arial", align="left") 
     return RasterText(face, tuple(runs), fits)
 
 
+@lru_cache(maxsize=100)
 def pdf_face(family, bold):
+    # Embed the same physical face used by preview when a TrueType file is available.
+    path = getattr(font(12, bold, family), "path", None)
+    if isinstance(path, (str, Path)) and Path(path).is_file():
+        name = "Studio-" + Path(path).stem
+        try:
+            if name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(name, path))
+            return name
+        except (OSError, TTFError):
+            pass
     serif = family.lower() in {"georgia", "times new roman", "serif"}
     return ("Times-Bold" if bold else "Times-Roman") if serif else ("Helvetica-Bold" if bold else "Helvetica")
 
@@ -191,6 +203,13 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
     for el, x, y, w, h in elements:
         if isinstance(el, Image) and el.asset_id not in assets and not bundled_icon(el.asset_id):
             warnings.append(f"Missing image: {el.alt or el.asset_id}")
+        if isinstance(el, Table):
+            for row in range(min(2, len(el.rows))):
+                fill, ink, header = el.row_style(row)
+                if contrast(ink, fill) < 4.5:
+                    warnings.append("Low table header contrast." if header else "Low table cell contrast.")
+        if isinstance(el, Chart) and el.palette and contrast(el.label_color, slide.background) < 4.5:
+            warnings.append("Low chart label contrast.")
         if isinstance(el, Text):
             overlap = any(min(x+w, px+pw)-max(x,px) > .008 and min(y+h, py+ph)-max(y,py) > .008
                           for px, py, pw, ph in boxes)
@@ -210,7 +229,7 @@ def table_text_fits(table: Table, width: float, height: float) -> bool:
     for index, row in enumerate(table.rows):
         _, _, header = table.row_style(index)
         for cell in row:
-            if not text_fits(cell, cell_width, cell_height, table.size, header):
+            if not text_fits(cell, cell_width, cell_height, table.size, header, table.font):
                 return False
     return True
 
@@ -229,7 +248,7 @@ def chart_marks(el: Chart, w: float, h: float):
     high, low = max(0, *values), min(0, *values)
     span = high - low or 1
     band = w / len(el.categories)
-    shades = [el.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
+    shades = el.colors()
     if el.chart == "pie":
         total = sum(values) or 1
         angle = 0
@@ -247,14 +266,14 @@ def chart_marks(el: Chart, w: float, h: float):
                 thickness = h / len(el.categories) * .72 / len(el.series)
                 zero = w * -low / span
                 end = w * (value - low) / span
-                yield ("rect", shades[si], (min(zero, end), i * h / len(el.categories) + thickness * si, abs(end - zero), thickness * .8))
+                yield ("rect", shades[si % len(shades)], (min(zero, end), i * h / len(el.categories) + thickness * si, abs(end - zero), thickness * .8))
             elif el.chart == "column":
                 thickness = band * .76 / len(el.series)
-                yield ("rect", shades[si], (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
+                yield ("rect", shades[si % len(shades)], (band * (i + .12) + thickness * si, min(baseline, pos), thickness * .85, abs(baseline - pos)))
             else:
                 points.append((band * (i + .5), pos))
         if el.chart == "line" and points:
-            yield ("line", shades[si], points)
+            yield ("line", shades[si % len(shades)], points)
 
 
 def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> bytes:
@@ -303,7 +322,7 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                     table_draw.rectangle(tuple(round(edge * TEXT_SCALE) for edge in (left, top, left + cw, top + rh)),
                                          fill=fill, outline="#FFFFFF")
                     if text_width > 0 and text_height > 0 and cell.strip():
-                        layout = raster_text(cell, text_width, text_height, el.size, header)
+                        layout = raster_text(cell, text_width, text_height, el.size, header, el.font)
                         tx, ty = round((left + CELL_INSET_X) * TEXT_SCALE), round((top + CELL_INSET_Y) * TEXT_SCALE)
                         if layout.fits:
                             draw_raster_text(table_draw, layout, ink, tx, ty)
@@ -324,9 +343,9 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000) -> by
                 elif len(dims) > 1:
                     draw.line(dims, fill=color, width=3)
             if el.chart not in {"pie", "bar"}:
-                face = font(max(1, round(10 * scale)), False)
+                face = font(max(1, round(10 * scale)), False, el.font)
                 for index, category in enumerate(el.categories):
-                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category[:20], fill="#292C49", font=face, anchor="mt")
+                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category[:20], fill=el.label_color, font=face, anchor="mt")
         if el.rotation:
             layer = layer.rotate(-el.rotation, expand=True, resample=PILImage.Resampling.BICUBIC)
         if el.opacity < 1:
@@ -391,7 +410,7 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 tw, th = cw - 2 * CELL_INSET_X, rh - 2 * CELL_INSET_Y
                 for row, cells in enumerate(el.rows):
                     fill, ink, header = el.row_style(row)
-                    face = pdf_face("Arial", header)
+                    face = pdf_face(el.font, header)
                     pdf.setFont(face, el.size)
                     for col, cell in enumerate(cells):
                         top, left = h-(row+1)*rh, col*cw
@@ -424,8 +443,8 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         for (x1, y1), (x2, y2) in zip(dims, dims[1:]):
                             pdf.line(x1, h-y1, x2, h-y2)
                 if el.chart not in {"pie", "bar"}:
-                    pdf.setFont("Helvetica", 10)
-                    pdf.setFillColor(HexColor("#292C49"))
+                    pdf.setFont(pdf_face(el.font, False), 10)
+                    pdf.setFillColor(HexColor(el.label_color))
                     for i, category in enumerate(el.categories):
                         pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category[:20])
             pdf.restoreState()

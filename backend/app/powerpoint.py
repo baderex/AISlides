@@ -110,6 +110,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = color(fill)
                         for paragraph in cell.text_frame.paragraphs:
+                            paragraph.font.name = el.font
                             paragraph.font.size = Pt(el.size)
                             paragraph.font.color.rgb = color(ink)
                             paragraph.font.bold = header
@@ -125,7 +126,9 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 filled = slot_kind == "chart"
                 obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
                 obj.chart.has_legend = len(el.series) > 1 or el.chart == "pie"
-                if el.chart not in {"line", "pie"}:
+                if el.palette:
+                    style_native_chart(obj.chart, el)
+                elif el.chart not in {"line", "pie"}:
                     obj.chart.series[0].format.fill.solid()
                     obj.chart.series[0].format.fill.fore_color.rgb = color(el.color)
             if filled:
@@ -163,6 +166,32 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
     output = io.BytesIO()
     presentation.save(output)
     return output.getvalue()
+
+
+def style_native_chart(chart, element):
+    palette = element.colors()
+    chart.element.chart.get_or_add_autoTitleDeleted().val = True
+    chart.font.name = element.font
+    chart.font.color.rgb = color(element.label_color)
+    chart.font.size = Pt(10)
+    # A transparent chart area keeps axis labels on the same surface as the editor.
+    properties = OxmlElement("c:spPr")
+    properties.append(OxmlElement("a:noFill"))
+    chart.element.insert_element_before(properties, "c:txPr", "c:externalData", "c:printSettings")
+    marks = chart.series[0].points if element.chart == "pie" else chart.series
+    for index, mark in enumerate(marks):
+        shade = color(palette[index % len(palette)])
+        if element.chart == "line":
+            mark.format.line.color.rgb = shade
+        else:
+            mark.format.fill.solid()
+            mark.format.fill.fore_color.rgb = shade
+    if element.chart != "pie":
+        chart.value_axis.has_major_gridlines = False
+        for axis in (chart.category_axis, chart.value_axis):
+            axis.tick_labels.font.name = element.font
+            axis.tick_labels.font.color.rgb = color(element.label_color)
+            axis.tick_labels.font.size = Pt(10)
 
 
 def remove_sample_slides(presentation):
