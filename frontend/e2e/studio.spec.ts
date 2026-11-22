@@ -98,10 +98,32 @@ test('Web research defaults to checked when available and can be turned off', as
   expect(await submit()).toBe(false);
 
   researchAvailable = false;
+  const capabilitiesPromise = page.waitForResponse('**/api/v1/capabilities');
   await page.reload();
+  await capabilitiesPromise;
   await expect(research).toHaveCount(0);
   await page.getByLabel('Describe your presentation').fill('Create a presentation');
   expect(await submit()).toBe(false);
+});
+
+test('submitting while capabilities load preserves automatic research', async ({ page }) => {
+  let releaseCapabilities!: () => void;
+  const capabilities = new Promise<void>(resolve => { releaseCapabilities = resolve; });
+  await page.route('**/api/v1/capabilities', async route => {
+    await capabilities;
+    await route.fulfill({ json: { research: true, images: false } });
+  });
+  await page.route('**/api/v1/presentations', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 400, json: { detail: 'Test submission' } })
+    : route.continue());
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.getByLabel('Describe your presentation').fill('Chart annual electricity generation');
+  const [request] = await Promise.all([
+    page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/v1/presentations')),
+    page.getByRole('button', { name: 'Generate slides' }).click(),
+  ]);
+  releaseCapabilities();
+  expect(request.postDataJSON().research).toBeNull();
 });
 
 test('the Skills page opens a reusable skill without losing the draft', async ({ page }) => {

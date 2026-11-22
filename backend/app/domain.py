@@ -230,6 +230,6 @@ class CreatePresentation(Contract):
     aspect_ratio: Aspect = "16:9"
     skill_id: Identifier | None = None
     asset_ids: list[Identifier] = Field(default_factory=list, max_length=15)
-    research: bool = False
+    research: bool | None = None
     generate_images: bool = False
     generate: bool = True

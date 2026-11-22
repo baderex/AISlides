@@ -83,7 +83,7 @@ def demo_response(schema: str, data: dict) -> dict:
                 "notes": "Offline Studio Demo content. Configure a model provider to generate source-grounded material."}
     if schema == "ResearchQueries":
         return {"queries": [data["intent"]["subject"]]}
-    if schema == "ResearchBrief":
+    if schema in {"ResearchBrief", "EvidenceSummary"}:
         return {"summary": "Reference material is available for review.", "uncertainties": []}
     if schema == "Review":
         return {"issues": [], "regenerate_content": False}

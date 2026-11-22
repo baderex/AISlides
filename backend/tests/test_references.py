@@ -11,6 +11,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Inches
 from sqlalchemy import select
 
+from app.api import fetch_events
 from app.composition import Intent, Outline, ResearchBrief, ResearchQueries, SlideContent
 from app.config import Settings, settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
@@ -118,11 +119,14 @@ def test_relative_annual_searches_correct_stale_model_dates():
     assert period == (2021, 2025)
     assert align_query_period("Index annual returns 2019 to 2023", period) == "Index annual returns 2021-2025"
     assert align_query_period("Top 5 by market cap as of 2023-12-31", period) == "Top 5 by market cap as of 2025-12-31"
+    assert align_query_period("Largest companies by market cap at year end 2025", period).endswith("December 31, 2025 historical snapshot")
     assert align_query_period("Index return in 2022", period) == "Index return in 2022"
     assert requested_calendar_period("Last 5 years before 2021", date(2026, 11, 22)) is None
 
 
-def test_data_driven_answer_retrieves_and_cites_focused_chart_evidence(monkeypatch):
+@pytest.mark.parametrize(("research", "style_question"), [(None, True), (False, True), (True, True), (None, False)])
+def test_quantitative_deck_retrieves_and_cites_focused_chart_evidence(monkeypatch, research, style_question):
+    monkeypatch.setattr(settings(), "research_api_key", "test-search-token")
     overview = Source(id="overview", title="Exchange overview", url="https://example.test/index", excerpt="Index statistics")
     ranking = Source(id="ranking", title="Exchange ranking", url="https://example.test/ranking", excerpt="A ranks first.")
     series = Source(id="series", title="Index annual series", url="https://example.test/series", excerpt="2024: 10, 2025: 12")
@@ -140,21 +144,24 @@ def test_data_driven_answer_retrieves_and_cites_focused_chart_evidence(monkeypat
 
     def plan(self, schema, task, data, stage="planning", image=None):
         if schema is Intent:
-            return Intent(subject="Index", slide_count=2)
+            return Intent(subject="Index", slide_count=2, requires_quantitative_evidence=not style_question)
         if schema is Clarification:
+            if not style_question:
+                return Clarification()
             return Clarification.model_validate({"questions": [{"id": "design", "type": "visual_style", "title": "Design",
                 "options": [{"id": "data", "label": "Data Driven"}, {"id": "visual", "label": "Visual"}]}]})
         if schema is ResearchQueries:
-            assert data["answers"][0]["value"] == "Data Driven"
+            if style_question:
+                assert data["answers"][0]["value"] == "Data Driven"
             return ResearchQueries(queries=["Index annual returns", "Constituent ranking"])
         if schema is Outline:
             assert [source["id"] for source in data["sources"]] == [overview.id, ranking.id]
             return Outline.model_validate({"title": "Index and Company A", "slides": [
-                {"title": "Index performance", "layout": "chart", "research_query": "Index annual closes"},
+                {"title": "Index performance", "layout": "summary", "research_query": "Index annual closes"},
                 {"title": "Company A", "layout": "metrics", "research_query": "Company A results"},
             ]})
         if schema is SlideContent:
-            if data["item"]["layout"] == "chart":
+            if data["item"]["title"] == "Index performance":
                 assert data["sources"][0]["id"] == series.id
                 return SlideContent(title="Index performance", source_ids=[series.id], chart={
                     "chart": "line", "label": "Index points", "categories": ["2024", "2025"], "values": [10, 12]})
@@ -165,10 +172,19 @@ def test_data_driven_answer_retrieves_and_cites_focused_chart_evidence(monkeypat
     monkeypatch.setattr("app.workflow.collect", search)
     monkeypatch.setattr(Intelligence, "structured", plan)
     client = TestClient(app)
-    path = create(client, "Two slides on the index and its top company", research=True)
+    path = create(client, "Two slides on the index and its top company", **({} if research is None else {"research": research}))
     work()
-    assert client.post(path + "/answers", json={"answers": [{"question_id": "design", "option_ids": ["data"]}]}).status_code == 202
-    work()
+    if style_question:
+        answers = {"answers": [{"question_id": "design", "option_ids": ["data"]}]}
+        assert client.post(path + "/answers", json=answers).status_code == 202
+        work()
+    if research is False:
+        assert queries == []
+        question, = client.get(path + "/questions").json()["questions"]
+        assert question["title"] == "Use web research for your charts and statistics?"
+        answers = {"answers": [{"question_id": question["id"], "option_ids": ["use_web"]}]}
+        assert client.post(path + "/answers", json=answers).status_code == 202
+        work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
     assert queries == [("Index annual returns", 4), ("Constituent ranking", 4), ("Index annual closes", 3), ("Company A results", 3)]
@@ -179,6 +195,34 @@ def test_data_driven_answer_retrieves_and_cites_focused_chart_evidence(monkeypat
     assert next(el for el in index["elements"] if el["type"] == "table")["rows"][1:] == [["2024", "10"], ["2025", "12"]]
     assert company["source_ids"] == [filing.id]
     assert any(el.get("text") == "$10M" for el in company["elements"])
+
+
+def test_data_driven_can_continue_without_web_research(monkeypatch):
+    monkeypatch.setattr(settings(), "research_api_key", "test-search-token")
+    structured = Intelligence.structured
+
+    def plan(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Electricity generation", slide_count=1, visual_direction="Data Driven")
+        return structured(self, schema, task, data, stage, image)
+
+    def unexpected_search(*args, **kwargs):
+        pytest.fail("Web research was declined")
+
+    monkeypatch.setattr(Intelligence, "structured", plan)
+    monkeypatch.setattr("app.workflow.collect", unexpected_search)
+    client = TestClient(app)
+    path = create(client, "One slide about electricity generation", research=False)
+    work()
+    question, = client.get(path + "/questions").json()["questions"]
+    answers = {"answers": [{"question_id": question["id"], "option_ids": ["continue"]}]}
+    assert client.post(path + "/answers", json=answers).status_code == 202
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    assert result["document"]["sources"] == []
+    notice, = [event for event in fetch_events(result["id"], 0) if event["type"] == "research.completed"]
+    assert notice["payload"]["uncertainties"] == ["Web research is off."]
 
 
 def test_worker_heartbeat_recovers_checkpoint_without_waiting_for_lease():

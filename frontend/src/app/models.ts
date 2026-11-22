@@ -29,7 +29,7 @@ export interface PresentationSummary {
 }
 export interface CreatePresentation {
   prompt: string; aspect_ratio: Aspect;
-  skill_id: string | null; asset_ids: string[]; research: boolean; generate_images: boolean; generate: boolean;
+  skill_id: string | null; asset_ids: string[]; research: boolean | null; generate_images: boolean; generate: boolean;
 }
 export interface Presentation extends PresentationSummary { document: Deck; request: CreatePresentation }
 export interface Skill {

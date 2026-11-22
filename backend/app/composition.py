@@ -17,6 +17,7 @@ class Intent(Contract):
     audience: str = Field(default="", max_length=250)
     tone: str = Field(default="", max_length=250)
     visual_direction: str = Field(default="", max_length=250)
+    requires_quantitative_evidence: bool = False
     slide_count: int | None = Field(default=None, ge=1, le=30)
     web_images_requested: bool = False
     missing: list[str] = Field(default_factory=list, max_length=8)
@@ -94,6 +95,11 @@ class ResearchQueries(Contract):
     queries: list[ShortText] = Field(min_length=1, max_length=4)
 
 
+class EvidenceSummary(PlanningResponse):
+    summary: str = Field(max_length=2200)
+    uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
+
+
 class ResearchBrief(Contract):
     summary: str = Field(max_length=1800)
     uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
@@ -117,7 +123,7 @@ def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemp
 
 
 def is_data_driven(direction: str) -> bool:
-    return bool(re.search(r"\bdata[\s_-]+driven\b", direction, re.IGNORECASE))
+    return bool(re.search(r"\bdata[\s_-]+(?:driven|visuali[sz]ations?)\b", direction, re.IGNORECASE))
 
 
 def design(direction: str, mode: str, selected: Theme | None) -> Theme:
@@ -140,6 +146,15 @@ def design(direction: str, mode: str, selected: Theme | None) -> Theme:
 
 def compose(item: OutlineItem, content: SlideContent, document: Document, index: int, image_ids: set[str],
             brand: BrandTemplate | None = None, *, web_image_ratio: float | None = None, data_driven: bool = False) -> Slide:
+    source_ids = {source.id for source in document.sources}
+    valid_chart = content.chart and len(content.chart.values) == len(content.chart.categories)
+    table = content.table
+    valid_table = table and 1 <= len(table[0]) <= 8 and all(len(row) == len(table[0]) for row in table)
+    if data_driven and source_ids.intersection(content.source_ids) and item.layout not in {"cover", "section", "quote", "closing"}:
+        if valid_chart and len(content.chart.values) >= 2 and not (item.layout == "research" and valid_table):
+            item = item.model_copy(update={"layout": "chart"})
+        elif valid_table:
+            item = item.model_copy(update={"layout": "research"})
     if brand:
         return compose_branded(item, content, document, image_ids, brand)
     t = document.theme
@@ -152,7 +167,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     bg = t.ink if dark else t.background
     ink, muted, accent = ("#FFFFFF", "#DDE1F5", "#E0DBFF") if dark else (t.ink, t.muted, t.accent)
     slide = Slide(title=item.title, background=bg, layout=item.layout, notes=content.notes,
-                  source_ids=list(dict.fromkeys(s for s in content.source_ids if s in {v.id for v in document.sources})))
+                  source_ids=list(dict.fromkeys(s for s in content.source_ids if s in source_ids)))
     elements = slide.elements
 
     def rect(x, y, w, h, fill, shape="rect"):
@@ -187,8 +202,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     label(item.title, .068, .17, .87, .17, 35, ink, True)
     label(content.subtitle, .07, .352, .86, .08, 17, muted)
     points = content.points
-    table = content.table
-    if item.layout == "research" and table and len({len(row) for row in table}) == 1 and 1 <= len(table[0]) <= 8:
+    if item.layout == "research" and valid_table:
         rows = [[cell[:180] for cell in row] for row in table]
         elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
@@ -205,7 +219,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 y = .46 + i * .21
                 label(point.title, .07, y, .43, .06, 20, ink, True)
                 label(point.body, .07, y + .07, .43, .125, 16, muted)
-    elif item.layout == "chart" and slide.source_ids and content.chart and len(content.chart.values) == len(content.chart.categories):
+    elif item.layout == "chart" and slide.source_ids and valid_chart:
         data = content.chart
         try:
             elements.append(Chart(x=.07, y=.51 if data_driven else .45, w=.54 if data_driven else .86,

@@ -32,6 +32,8 @@ Set `RESEARCH_API_KEY` in `.env` to make **Web research** checked by default in 
 
 With **Web research** enabled, requests for photos or portraits also use Brave Image Search. FrameCraft embeds a preview-sized copy and links the original page in the slide sources. The same key must have Image Search access. You can override the default endpoint with `RESEARCH_IMAGE_API_URL`.
 
+For a **Data Driven** deck without reference material, the worker uses configured web research when the request leaves the research setting unspecified. If Web research was turned off, the studio offers a choice before searching.
+
 Set `IMAGE_PROVIDER` to `openai` or `openrouter` in `backend/.env` to enable **Generate illustrations**. Use `IMAGE_GEN_API_KEY` for the selected provider. You can leave it blank if `LLM_API_URL` points to the same provider and `LLM_API_KEY` is set. Existing OpenAI configurations can still use `IMAGE_OPENAI_API_KEY` as a fallback.
 
 | `IMAGE_PROVIDER` | Default image generation URL | Default `IMAGE_MODEL` |

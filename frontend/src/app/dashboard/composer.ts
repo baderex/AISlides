@@ -42,7 +42,8 @@ export class Composer {
     this.generating.emit({ prompt: this.prompt.value.trim(),
       aspect_ratio: this.formats().includes(this.aspect.value) ? this.aspect.value : this.formats()[0],
       skill_id: this.skill()?.id ?? null, asset_ids: this.assets().map(asset => asset.id),
-      research: this.capabilities()?.research === true && this.research(), generate_images: this.images(), generate: true });
+      research: this.research() ? this.capabilities()?.research ?? null : false,
+      generate_images: this.images(), generate: true });
   }
 
   start(prompt?: string) {
