@@ -11,6 +11,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
+from app.lucide import bundled_icon, icon_asset_id
 
 
 TEXT_SCALE = 2
@@ -123,6 +124,13 @@ def fit_image(image: Image, document: Document, ratio: float) -> Image:
     return image.model_copy(update={"x": image.x + (image.w - w) / 2, "y": image.y + (image.h - h) / 2, "w": w, "h": h})
 
 
+def slide_icon(document: Document, name: str, x: float, y: float, h: float, background: str) -> Image:
+    width, height = document.dimensions
+    theme = document.theme
+    color = theme.accent if contrast(theme.accent, background) >= 3 else theme.ink
+    return Image(x=x, y=y, w=h * height / width, h=h, asset_id=icon_asset_id(name, color))
+
+
 def flattened(elements, ox=0., oy=0., sx=1., sy=1.):
     for el in sorted(elements, key=lambda element: element.z):
         x, y, w, h = ox + el.x * sx, oy + el.y * sy, el.w * sx, el.h * sy
@@ -181,7 +189,7 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
     boxes = []
     elements = list(flattened(slide.elements))
     for el, x, y, w, h in elements:
-        if isinstance(el, Image) and el.asset_id not in assets:
+        if isinstance(el, Image) and el.asset_id not in assets and not bundled_icon(el.asset_id):
             warnings.append(f"Missing image: {el.alt or el.asset_id}")
         if isinstance(el, Text):
             overlap = any(min(x+w, px+pw)-max(x,px) > .008 and min(y+h, py+ph)-max(y,py) > .008

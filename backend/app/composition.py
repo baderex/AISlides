@@ -5,10 +5,11 @@ from pydantic import ConfigDict, Field, ValidationInfo, field_validator
 from pydantic_core import PydanticCustomError
 
 from app.branding import choose_layout, compose_branded
-from app.consulting import compose_consulting, consulting_theme, requested_consulting
+from app.consulting import CONSULTING_ICON_LAYOUTS, compose_consulting, consulting_theme, requested_consulting
 from app.domain import BrandTemplate, Chart, Contract, Document, Image, Layout, Shape, ShortText, Slide, Table, Text, Theme
+from app.lucide import ICON_NAMES
 from app.questions import Question
-from app.rendering import fit_image
+from app.rendering import fit_image, slide_icon
 
 
 class Intent(Contract):
@@ -70,6 +71,16 @@ class Point(Contract):
     title: Annotated[str, Field(min_length=1, max_length=65)]
     body: str = Field(default="", max_length=250)
     value: str = Field(default="", max_length=25)
+    icon: str | None = Field(default=None, description=f"Optional Lucide icon. Use one of: {', '.join(ICON_NAMES)}.")
+
+    @field_validator("icon", mode="before")
+    @classmethod
+    def known_icon(cls, value: object) -> str | None:
+        if isinstance(value, str):
+            name = value.strip().lower()
+            if name in ICON_NAMES:
+                return name
+        return None
 
 
 class ChartContent(Contract):
@@ -112,6 +123,12 @@ class Review(Contract):
 
 
 IMAGE_LAYOUTS = frozenset({"showcase", "editorial", "research"})
+STANDARD_ICON_LAYOUTS = frozenset({"summary", "comparison", "timeline", "process", "metrics", "showcase", "editorial"})
+
+
+def supports_point_icons(layout: Layout, theme: Theme, brand: BrandTemplate | None) -> bool:
+    layouts = CONSULTING_ICON_LAYOUTS if theme.profile == "consulting" else STANDARD_ICON_LAYOUTS
+    return brand is None and layout in layouts
 
 
 def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemplate | None) -> bool:
@@ -202,6 +219,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     label(item.title, .068, .17, .87, .17, 35, ink, True)
     label(content.subtitle, .07, .352, .86, .08, 17, muted)
     points = content.points
+    use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table)
     if item.layout == "research" and valid_table:
         rows = [[cell[:180] for cell in row] for row in table]
         elements.append(Table(x=.07, y=.46, w=.86, h=.44, rows=rows, color=t.ink, fill=t.surface))
@@ -242,7 +260,12 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         for i, point in enumerate(points):
             x = .07 + width * i
             rect(x, .521, .026, .047, t.accent, "ellipse")
-            label(point.value or f"0{i + 1}", x, .465, width - .024, .047, 14, accent, True)
+            offset = 0
+            if use_icons and point.icon:
+                icon = slide_icon(document, point.icon, x, .464, .047, bg)
+                elements.append(icon)
+                offset = icon.w + .008
+            label(point.value or f"0{i + 1}", x + offset, .465, width - .024 - offset, .047, 14, accent, True)
             label(point.title, x, .605, width - .024, .095, 20, ink, True)
             label(point.body, x, .72, width - .024, .18, 16, muted)
     elif item.layout in {"comparison", "metrics", "process", "showcase"} and points:
@@ -252,16 +275,28 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             x = .068 + i * (width + .022)
             rect(x, .463, width, .426, t.surface, "round")
             value = point.value if slide.source_ids or not any(character.isdigit() for character in point.value) else ""
-            label(value or (f"0{i + 1}" if item.layout == "process" else "—"), x + .018, .495,
-                  width - .036, .083, 25, accent, True)
+            offset = 0
+            if use_icons and point.icon:
+                icon = slide_icon(document, point.icon, x + .018, .503, .062, t.surface)
+                elements.append(icon)
+                offset = icon.w + .012
+            if not value:
+                value = f"0{i + 1}" if item.layout == "process" else ("" if offset else "—")
+            label(value, x + .018 + offset, .495, width - .036 - offset, .083, 25, accent, True)
             label(point.title, x + .018, .596, width - .036, .09, 18, ink, True)
             label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, muted)
     else:
+        icon_column = use_icons and any(point.icon for point in points[:3])
+        text_x = .125 if icon_column else .103
+        text_width = .913 - text_x
         for i, point in enumerate(points[:3]):
             y = .46 + .146 * i
-            rect(.07, y + .021, .014, .025, t.accent, "ellipse")
-            label(point.title, .103, y, .81, .062, 20, ink, True)
-            label(point.body, .103, y + .063, .81, .075, 16, muted)
+            if icon_column and point.icon:
+                elements.append(slide_icon(document, point.icon, .068, y + .008, .047, bg))
+            else:
+                rect(.07, y + .021, .014, .025, t.accent, "ellipse")
+            label(point.title, text_x, y, text_width, .062, 20, ink, True)
+            label(point.body, text_x, y + .063, text_width, .075, 16, muted)
     if len(points) > 3:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]

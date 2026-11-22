@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 
 from app.composition import (
     IMAGE_LAYOUTS, EvidenceSummary, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review, SlideContent, accepts_web_image,
-    compose, design, is_data_driven,
+    compose, design, is_data_driven, supports_point_icons,
 )
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
@@ -24,6 +24,11 @@ from app.research import collect
 from app.storage import Storage
 
 log = logging.getLogger(__name__)
+POINT_ICON_GUIDANCE = (
+    " Use the optional point.icon field only when a listed Lucide symbol helps readers recognize a concept or distinguish "
+    "one step or card from another. Choose at most one icon per point. Leave it null for generic decoration, charts, tables, "
+    "or when an illustration already carries the meaning. Respect requests to omit icons."
+)
 DATA_PLAN_GUIDANCE = (
     " Lead with the requested evidence. For a time series, dedicate a chart slide to the full requested period, using "
     "comparable observations and a clear unit. Give each requested ranked entity its own slide, named with its actual "
@@ -55,6 +60,12 @@ def inputs(item, context):
     return {"prompt": item.request["prompt"], "intent": context.get("intent"),
             "answers": context.get("answers", []), "skill": context.get("skill"),
             "sources": context.get("sources", []), "research": context.get("research")}
+
+
+def point_icon_guidance(part, document, brand):
+    if supports_point_icons(part.layout, document.theme, brand):
+        return POINT_ICON_GUIDANCE
+    return " Leave point.icon null for this layout."
 
 
 def visual_direction(item, context):
@@ -490,7 +501,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              "Only include numerical charts if their values are grounded in sources. Provide a table as an array of rows, or null if absent. "
              "Use an image ID only from provided image assets. "
              "When image generation is enabled and a relevant uploaded asset is unavailable, provide an illustration prompt in image_prompt."
-             + style_guidance + period_guidance,
+             + style_guidance + period_guidance + point_icon_guidance(part, document, brand),
              {"item": part.model_dump(), "topic": document.title, "slide_index": index,
               "earlier_slide_titles": [slide.title for slide in document.slides[-5:]],
               **slide_inputs(item, context, part if data_driven else None), "generate_image": bool(can_illustrate),
@@ -588,7 +599,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
     elif stage == "revise":
         index = context.get("progress_index", len(document.slides))
         part = OutlineItem.model_validate(context["outline"]["slides"][index])
-        content = ai.structured(SlideContent, "Rewrite the content concisely to address the visual review findings. Preserve the meaning and supplied source IDs.", {
+        content = ai.structured(SlideContent, "Rewrite the content concisely to address the visual review findings. Preserve the meaning and supplied source IDs."
+            + point_icon_guidance(part, document, brand), {
             **slide_inputs(item, context, part if data_driven else None), "item": part.model_dump(), "topic": document.title,
             "previous": context["slide_content"], "issues": context["review_issues"],
         }, "slide")

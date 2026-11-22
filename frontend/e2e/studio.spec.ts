@@ -46,6 +46,14 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
   await expect(page.locator('.canvas-frame')).toBeInViewport({ ratio: .9 });
   await page.screenshot({ path: info.outputPath('workspace.png') });
 
+  await page.getByRole('button', { name: /Slide 2: What makes it different/ }).click();
+  const icons = page.locator('.canvas-frame img[src*="/assets/lucide-"]');
+  await expect(icons).toHaveCount(2);
+  await expect.poll(() => icons.evaluateAll(images => images.every(image => (image as HTMLImageElement).naturalWidth > 0)))
+    .toBe(true);
+  await page.screenshot({ path: info.outputPath('workspace-icons.png') });
+  await page.getByRole('button', { name: /Slide 1: Quantum Computing/ }).click();
+
   const text = page.locator('.canvas-frame .slide-text').filter({ hasText: /^Quantum Computing$/ });
   await text.click();
   await page.getByRole('button', { name: 'Edit text', exact: true }).click();

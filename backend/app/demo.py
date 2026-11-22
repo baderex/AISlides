@@ -56,6 +56,7 @@ def demo_response(schema: str, data: dict) -> dict:
     if schema == "SlideContent":
         item = data["item"]
         title = item["title"]
+        icons = {}
         if "quantum computing" in data.get("topic", "").lower():
             variants = {
                 "cover": ("A practical briefing on the science, its potential, and what remains experimental.", []),
@@ -74,12 +75,15 @@ def demo_response(schema: str, data: dict) -> dict:
                 ("Software", "Algorithms must be benchmarked on appropriately scoped tasks."),
                 ("Error correction", "Logical qubits use multiple physical qubits to reduce faults."),
             ]))
+            icons = {"Classical bits": "cpu", "Quantum bits": "atom", "Hardware": "cpu",
+                     "Software": "code", "Error correction": "shield"}
         else:
             subtitle = item.get("purpose", "")[:210]
             points = [("What matters", "Identify the main problem, who it affects, and what would count as a meaningful improvement."),
                       ("What to validate", "Compare assumptions with available evidence and document open questions."),
                       ("What happens next", "Choose one practical next step with a clear owner and a review date.")]
-        return {"title": title, "subtitle": subtitle, "points": [{"title": name, "body": body} for name, body in points],
+        return {"title": title, "subtitle": subtitle,
+                "points": [{"title": name, "body": body, "icon": icons.get(name)} for name, body in points],
                 "notes": "Offline Studio Demo content. Configure a model provider to generate source-grounded material."}
     if schema == "ResearchQueries":
         return {"queries": [data["intent"]["subject"]]}

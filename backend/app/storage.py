@@ -12,6 +12,7 @@ from PIL import Image as PILImage
 from pypdf import PdfReader
 
 from app.config import settings
+from app.lucide import bundled_icon, icon_png
 
 PILImage.MAX_IMAGE_PIXELS = 24_000_000
 
@@ -40,6 +41,8 @@ class Storage:
             temporary.replace(self.root / key)
 
     def get(self, key: str) -> bytes:
+        if icon := bundled_icon(key):
+            return icon_png(*icon)
         key = self._key(key)
         if self.s3:
             try:

@@ -7,7 +7,7 @@ from PIL import ImageChops
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from app.composition import OutlineItem, SlideContent, compose
+from app.composition import OutlineItem, Point, SlideContent, compose
 from app.consulting import consulting_theme
 from app.domain import Chart, Document, Group, Image, Line, Shape, Slide, Table, Text
 from app.powerpoint import to_pptx
@@ -52,6 +52,26 @@ def test_fit_validator_reduces_text_size():
     doc = Document(title="Fit", slides=[slide])
     validate_slide(doc, slide, set())
     assert 8 < element.size < 60
+
+
+@pytest.mark.parametrize("theme", [{}, consulting_theme()])
+def test_point_icons_fit_square_slides_and_skip_evidence_exhibits(theme):
+    doc = Document(title="Secure handoff", aspect_ratio="1:1", theme=theme)
+    part = OutlineItem(title=doc.title, layout="process")
+    content = SlideContent(title=doc.title, points=[Point(title="Review"), Point(title="Protect", icon=" Shield "),
+                                                    Point(title="Deliver", icon="missing-icon")])
+    slide = compose(part, content, doc, 0, set())
+    icon, = [element for element in slide.elements if isinstance(element, Image)]
+    assert icon.w == pytest.approx(icon.h)
+    assert icon.asset_id.startswith("lucide-shield_")
+    assert any(isinstance(element, Text) and element.text == "02" for element in slide.elements)
+    assert validate_slide(doc, slide, set()) == []
+
+    part.layout = "research"
+    content.table = [["Step", "Purpose"], ["Protect", "Secure handoff"]]
+    slide = compose(part, content, doc, 0, set())
+    assert any(isinstance(element, Table) for element in slide.elements)
+    assert not any(isinstance(element, Image) for element in slide.elements)
 
 
 def test_farming_headline_renders_completely_at_multiple_preview_widths():
