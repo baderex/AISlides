@@ -17,14 +17,14 @@
         <div class="slide-content" [style.opacity]="el.opacity" [style.border]="el.border ? '1px solid ' + el.border : null">
           @switch (el.type) {
             @case ('text') {
-              <div class="slide-text" [style.font-family]="el.font" [style.font-size]="font(el.size)" [style.color]="el.color"
+              <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="el.font" [style.color]="el.color"
                 [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">{{ el.text }}</div>
             }
             @case ('shape') { <div class="slide-shape" [class]="el.shape" [style.background]="el.fill" [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div> }
             @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
             @case ('line') { <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M 0 0 L 100 100" fill="none" [attr.stroke]="el.color" [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" /></svg> }
             @case ('table') {
-              <table [style.color]="el.color" [style.background]="el.fill" [style.font-size]="font(el.size ?? 12)">
+              <table [studioFitText]="el" [preferredFont]="font(el.size ?? 12)" [style.color]="el.color" [style.background]="el.fill">
                 @for (row of el.rows; track $index) {
                   @if ($first && el.header_fill) {
                     <tr [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">

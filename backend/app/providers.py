@@ -39,6 +39,8 @@ def validation_hint(error: ValidationError) -> str:
         limits = issue.get("ctx", {})
         if kind == "slide_count":
             hint = f"return exactly {limits['expected']} slides (received {limits['actual']})"
+        elif kind == "literal_error":
+            hint = f"use one of {limits['expected']}"
         elif kind in {"string_too_long", "string_too_short"}:
             limit = "max_length" if kind == "string_too_long" else "min_length"
             rule = "at most" if limit == "max_length" else "at least"

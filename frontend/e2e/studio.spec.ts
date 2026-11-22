@@ -98,6 +98,41 @@ test('the Skills page opens a reusable skill without losing the draft', async ({
   await expect(page.getByRole('heading', { level: 1, name: 'Skill library' })).toBeVisible();
 });
 
+test('the canvas fits saved text and table cells at different viewport widths', async ({ page, request }) => {
+  const headline = 'Water Scarcity and Agricultural Importance Define Investment Opportunity Across Middle Eastern Countries';
+  const created = await request.post('/api/v1/presentations', { data: { prompt: 'Text fit check', generate: false } });
+  expect(created.status()).toBe(201);
+  const { id, revision, document } = await created.json();
+  const saved = await request.patch('/api/v1/presentations/' + id, { data: {
+    revision,
+    document: { ...document, slides: [{ title: headline, layout: 'comparison', elements: [
+      { type: 'text', x: .06, y: .08, w: .70, h: .15, text: headline, size: 36, bold: true },
+      { type: 'table', x: .06, y: .3, w: .60, h: .22, size: 24, rows: [
+        ['Topic', 'Explain the expected outcome in plain language.'],
+        ['Timing', 'Review the result after answering the practice question.'],
+      ] },
+    ] }] },
+  } });
+  expect(saved.status()).toBe(200);
+  await page.goto('/presentation/' + id);
+  const box = page.locator('.canvas-frame .slide-text').filter({ hasText: headline });
+  const table = page.locator('.canvas-frame .slide-content > table');
+  await expect(box).toBeVisible();
+  await expect(table).toBeVisible();
+
+  for (const width of [1440, 900]) {
+    await page.setViewportSize({ width, height: 960 });
+    for (const [element, requested] of [[box, 36], [table, 24]] as const) {
+      await expect.poll(() => element.evaluate((node, size) => {
+        const frame = node.parentElement!;
+        const nominal = node.closest('.slide-canvas')!.clientWidth * size / 960;
+        return node.scrollHeight <= frame.clientHeight && node.scrollWidth <= frame.clientWidth
+          && parseFloat(getComputedStyle(node).fontSize) < nominal - .1;
+      }, requested)).toBe(true);
+    }
+  }
+});
+
 test('Recent Presentations supports confirmed deletion and links to the full list', async ({ page, request }) => {
   const title = 'Presentation to delete';
   const created = await request.post('/api/v1/presentations', { data: { prompt: title, generate: false } });

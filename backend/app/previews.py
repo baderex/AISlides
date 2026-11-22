@@ -1,12 +1,12 @@
 import hashlib
 
 from app.db import SlidePreview, uid
-from app.rendering import preview
+from app.rendering import fit_slide_text, preview
 from app.storage import Storage
 
 
 def fingerprint(document, slide):
-    value = document.aspect_ratio + slide.model_dump_json(exclude={"warnings", "notes", "source_ids"})
+    value = "text-layout-2:" + document.aspect_ratio + slide.model_dump_json(exclude={"warnings", "notes", "source_ids"})
     return hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -25,4 +25,6 @@ def get_preview(db, presentation_id, document, slide):
             return storage.get(record.storage_key)
         except FileNotFoundError:
             pass
-    return preview(document, slide, storage.get)
+    fitted = slide.model_copy(deep=True)
+    fit_slide_text(document, fitted)
+    return preview(document, fitted, storage.get)

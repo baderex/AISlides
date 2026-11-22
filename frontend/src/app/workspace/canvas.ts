@@ -1,6 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
 import { Component, computed, input, output, signal } from '@angular/core';
 import { Aspect, ChartElement, Geometry, Slide, SlideElement } from '../models';
+import { FitText } from './fit-text';
 
 type Change = Pick<Geometry, 'x' | 'y' | 'w' | 'h'>;
 interface Drag { id: string; pointer: number; startX: number; startY: number; resize: boolean; original: Change }
@@ -9,7 +10,7 @@ function bounded(value: number, min: number, max: number) { return Math.min(max,
 
 @Component({
   selector: 'studio-canvas',
-  imports: [NgTemplateOutlet],
+  imports: [NgTemplateOutlet, FitText],
   templateUrl: './canvas.html',
 })
 export class SlideCanvas {

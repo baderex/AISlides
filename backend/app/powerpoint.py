@@ -13,6 +13,7 @@ from pptx.util import Inches, Pt
 
 from app.branding import SLOT_TYPES, choose_layout, native_layouts
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
+from app.rendering import CELL_INSET_X, CELL_INSET_Y, TEXT_LEADING
 
 
 def color(value):
@@ -60,7 +61,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                     frame.margin_top = frame.margin_bottom = frame.margin_left = frame.margin_right = 0
                 for paragraph in frame.paragraphs:
                     paragraph.alignment = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[el.align]
-                    paragraph.line_spacing = 1.13
+                    paragraph.line_spacing = TEXT_LEADING
                     paragraph.space_before = paragraph.space_after = Pt(0)
                     paragraph.font.name = el.font
                     paragraph.font.size = Pt(el.size)
@@ -103,17 +104,17 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                     for j, value in enumerate(row):
                         cell = obj.table.cell(i, j)
                         cell.text = value
-                        if el.header_fill:
-                            cell.margin_left = cell.margin_right = Pt(6)
-                            cell.margin_top = cell.margin_bottom = Pt(3)
-                            cell.text_frame.word_wrap = True
+                        cell.margin_left = cell.margin_right = Pt(CELL_INSET_X)
+                        cell.margin_top = cell.margin_bottom = Pt(CELL_INSET_Y)
+                        cell.text_frame.word_wrap = True
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = color(fill)
                         for paragraph in cell.text_frame.paragraphs:
                             paragraph.font.size = Pt(el.size)
                             paragraph.font.color.rgb = color(ink)
-                            if header:
-                                paragraph.font.bold = True
+                            paragraph.font.bold = header
+                            paragraph.line_spacing = TEXT_LEADING
+                            paragraph.space_before = paragraph.space_after = Pt(0)
             elif isinstance(el, Chart):
                 chart_data = CategoryChartData()
                 chart_data.categories = el.categories

@@ -27,7 +27,7 @@ from app.presentations import (
 from app.previews import get_preview
 from app.questions import Answers, Clarification, Choice, SlideCount, validate_answers
 from app.queue import notify
-from app.rendering import to_pdf
+from app.rendering import fit_slide_text, to_pdf
 from app.skills import list_skills
 from app.storage import Storage, parse_upload
 
@@ -629,6 +629,8 @@ def export_snapshot(item_id, owner_id, expected=None):
             asset = db.get(Asset, brand.asset_id)
             if not asset or asset.owner_id != owner_id or asset.media_type != PPTX:
                 raise HTTPException(409, "The original PowerPoint template is unavailable.")
+        for slide in document.slides:
+            fit_slide_text(document, slide)
     return document, revision, brand
 
 

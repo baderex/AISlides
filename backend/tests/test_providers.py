@@ -148,3 +148,27 @@ def test_outline_falls_back_and_repairs_the_count_without_rejecting_extra_fields
         assert all("default" not in field for field in obj["properties"].values())
     assert fallback["response_format"] == repair["response_format"] == {"type": "json_object"}
     assert "slides: return exactly 2 slides (received 1)" in repair["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(("layout", "expected"), [(" Line_Chart ", "chart"), ("data-table", "research"), (" Metrics ", "metrics")])
+def test_outline_retries_invalid_layout_and_normalizes_known_layout_names(monkeypatch, layout, expected):
+    client = openrouter(monkeypatch)
+    prompts = []
+    layouts = iter(["private model label", layout])
+
+    def post(url, body, headers):
+        prompts.append(body["messages"][0]["content"])
+        outline = {"title": "TASI", "slides": [{"title": "TASI performance", "layout": next(layouts)}]}
+        return {"choices": [{"message": {"content": json.dumps(outline)}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    outline = client.structured(Outline, "Plan one slide.", {
+        "prompt": "generate impressive slide about TASI preformance in the last 5 years and top 5 companies",
+        "slide_count": 1,
+    }, "outline")
+
+    assert [slide.layout for slide in outline.slides] == [expected]
+    correction = prompts[1].split("Correct these issues: ", 1)[1]
+    assert correction.startswith("slides.0.layout: use one of")
+    assert "'chart'" in correction and "'research'" in correction
+    assert "private model label" not in correction

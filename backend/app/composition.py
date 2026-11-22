@@ -28,9 +28,24 @@ class PlanningResponse(Contract):
 
 class OutlineItem(PlanningResponse):
     title: ShortText
-    layout: Layout
+    layout: Layout = Field(description="Use one exact layout ID from the enum. Use chart for a sourced chart and research for a data table.")
     purpose: str = Field(default="", max_length=500)
     image_query: str = Field(default="", max_length=380)
+
+    @field_validator("layout", mode="before")
+    @classmethod
+    def normalize_layout(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        label = " ".join(value.lower().replace("_", " ").replace("-", " ").split())
+        return {
+            "line chart": "chart",
+            "bar chart": "chart",
+            "column chart": "chart",
+            "pie chart": "chart",
+            "table": "research",
+            "data table": "research",
+        }.get(label, label)
 
 
 class Outline(PlanningResponse):

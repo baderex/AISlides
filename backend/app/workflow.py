@@ -16,7 +16,7 @@ from app.previews import put_preview
 from app.providers import Intelligence, ProviderError
 from app.questions import Clarification, standard_options
 from app.queue import notify
-from app.rendering import preview, validate_slide
+from app.rendering import flattened, preview, validate_slide
 from app.research import collect
 from app.storage import Storage
 
@@ -318,13 +318,15 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         images = image_ids(assets, context)
         if warning := context.get("web_image_warning"):
             slide.warnings.append(warning)
-        initial = {element.id: element.size for element in slide.elements if element.type == "text"}
+        text_elements = [element for element, *_ in flattened(slide.elements) if element.type in {"text", "table"}]
+        dimensions = [(element.size, element.h) for element in text_elements]
         slide.warnings.extend(validate_slide(document, slide, images))
         storage = Storage()
         png = preview(document, slide, storage.get)
-        fixed = sum(initial[element.id] != element.size for element in slide.elements if element.type == "text")
+        fixed = sum(original != (element.size, element.h) for original, element in zip(dimensions, text_elements))
         if fixed:
-            events.append(("slide.revised", f"Adjusted {fixed} text boxes to fit slide {index + 1}.", {"index": index}))
+            events.append(("slide.revised", f"Adjusted text fit in {fixed} elements on slide {index + 1}.",
+                           {"index": index, "text_elements": fixed}))
         if settings().llm_vision_enabled and ai.provider != "demo" and not context.get("review_attempted"):
             review = ai.structured(Review, "Inspect the rendered slide for density, clipping, contrast and balance. Request regeneration only if a concise rewrite would improve it. Return actionable issues.", {
                 "title": slide.title, "layout": slide.layout, "warnings": slide.warnings,
