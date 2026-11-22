@@ -7,10 +7,11 @@
 - [x] Reference grounding, optional search, layout validation and conversational edit proposals.
 - [x] Native setup, tests and deployment documentation.
 - [x] Import reusable branded PowerPoint layouts and review the rendered PowerPoint export.
+- [x] Prompt-aware art direction, editable diagram exhibits, native stacked charts and styled financial tables.
 - [ ] Run a staging deployment against PostgreSQL, Redis and an S3-compatible server.
 - [ ] Exercise credentialed hosted providers, web research and vision against live services.
 
-The local acceptance scenario passed in Edge using a Qwen model behind llama.cpp’s OpenAI-compatible endpoint. A second live deck completed after the services restarted from saved state. A real model also proposed a targeted edit through the structured conversation API. Automated tests cover the browser workflow with the explicit offline provider. Export tests reopen OOXML and check text objects, vector shapes, chart data, tables, media and notes. Desktop Microsoft PowerPoint opened and rendered the reviewed three-slide deck with editable text.
+Earlier local acceptance testing used Edge and a Qwen model behind llama.cpp’s OpenAI-compatible endpoint. It covered generation, resuming after a restart and a structured edit proposal. Desktop Microsoft PowerPoint opened and rendered the reviewed three-slide deck with editable text. The current automated suites cover the browser workflow with the demo provider and reopen generated PowerPoint packages to check native text, shapes, connectors, chart data, tables, media and notes. The [design benchmark runner](agent-workflow.md#design-benchmarks) supports additional live-provider checks across four briefs.
 
 ## Current format limits
 

@@ -6,7 +6,7 @@ import re
 from PIL import Image as PILImage
 from pydantic import Field
 
-from app.domain import Color, Contract, DesignRules, Table, Theme
+from app.domain import Color, Contract, DesignConstraints, DesignRules, Table, Theme
 from app.rendering import contrast, flattened
 from app.storage import Storage
 
@@ -44,11 +44,84 @@ def font_family(value):
     return re.sub(r"\s+(?:bold|regular)$", "", value.strip(), flags=re.IGNORECASE)
 
 
-def apply_cover_direction(theme, direction):
-    """Keep explicit light presentation styles light on display slides as well."""
-    if re.search(r"\blight[- ](?:background|palette|theme|financial|report|analytical|editorial|corporate|style)\b",
-                 direction, re.I) and contrast(theme.design.cover_background, "#FFFFFF") > 2:
-        theme.design.cover_background = theme.background if contrast(theme.background, "#FFFFFF") <= 2 else "#F7F5EF"
+BACKGROUND_DIRECTION = re.compile(
+    r"(light|dark)[- ](?:backgrounds?|palettes?|themes?|financial|reports?|analytical|editorial|corporate|styles?)", re.I
+)
+HEX_COLOR = r"#[0-9a-fA-F]{6}(?![\da-fA-F])"
+COLOR_ROLES = {
+    "cover background": "cover_background", "slide background": "background", "background": "background",
+    "accent": "accent", "body ink": "ink", "text color": "ink", "muted": "muted",
+    "table surface": "dense_surface", "surface": "surface",
+}
+
+
+def explicit_constraints(prompt: str, style_answer: str = "") -> DesignConstraints | None:
+    rules = DesignConstraints()
+    for text in (prompt, style_answer):
+        if match := BACKGROUND_DIRECTION.search(text):
+            rules.background_mode = match[1].lower()
+        elif re.search(r"restrained\s+(?:light\s+)?financial[- ]report", text, re.I):
+            rules.background_mode = "light"
+        if re.search(r"restrained", text, re.I):
+            rules.restrained = True
+        palette = re.search(r"(?:use only|allowed colors|locked palette)([^.;
+]{0,220})", text, re.I)
+        if palette and (colors := re.findall(HEX_COLOR, palette[1])):
+            rules.palette = list(dict.fromkeys(c.upper() for c in colors))[:10]
+        for role, field in COLOR_ROLES.items():
+            if match := re.search(rf"(?<![\w-]){role}\s*(?:[:=]|(?:is|of)\s+)?\s*({HEX_COLOR})", text, re.I):
+                rules.colors[field] = match[1].upper()
+        for role, field in (("headings?", "heading_font"), ("body(?: text)?", "body_font")):
+            if match := re.search(rf"{role}\s+(?:font\s*)?(?:[:=]|is)\s*["“]?([A-Za-z][A-Za-z0-9 -]{{0,48}}?)["”]?(?=[,.;
+]|$)", text, re.I):
+                setattr(rules, field, font_family(match[1]))
+            elif match := re.search(rf"(?:use|set)\s+["“]?([A-Za-z][A-Za-z0-9 -]{{0,48}}?)["”]?\s+for\s+{role}", text, re.I):
+                setattr(rules, field, font_family(match[1]))
+    return rules if rules != DesignConstraints() else None
+
+
+def enforce_constraints(theme: Theme, constraints: DesignConstraints | None) -> Theme:
+    if constraints is None:
+        return theme
+    theme = theme.model_copy(deep=True, update={"constraints": constraints})
+    rules = theme.design
+    roles = {"background": theme, "ink": theme, "accent": theme, "muted": theme, "surface": theme}
+    if rules:
+        roles.update(dict.fromkeys(("cover_background", "dense_surface"), rules))
+    for field, model in roles.items():
+        current = getattr(model, field).upper()
+        if field in constraints.colors:
+            current = constraints.colors[field]
+        elif constraints.palette and current not in constraints.palette:
+            def distance(candidate):
+                return sum((int(candidate[i:i+2], 16) - int(current[i:i+2], 16)) ** 2 for i in (1, 3, 5))
+            current = min(constraints.palette, key=distance)
+        if field in {"background", "cover_background", "surface", "dense_surface"} and field not in constraints.colors:
+            if constraints.background_mode == "light":
+                acceptable = [color for color in constraints.palette if contrast(color, "#FFFFFF") <= 1.55]
+                if contrast(current, "#FFFFFF") > 1.55:
+                    current = acceptable[0] if acceptable else "#F7F5EF"
+            elif constraints.background_mode == "dark" and field in {"background", "cover_background"}:
+                acceptable = [color for color in constraints.palette if contrast(color, "#FFFFFF") >= 7]
+                if contrast(current, "#FFFFFF") < 7:
+                    current = acceptable[0] if acceptable else "#191B20"
+        if constraints.restrained and field in {"background", "cover_background", "surface", "dense_surface"} and (
+                not constraints.palette and field not in constraints.colors):
+            channels = [int(current[i:i+2], 16) for i in (1, 3, 5)]
+            if max(channels) - min(channels) > 33:
+                gray = round(sum(channels) / 3)
+                current = blend(current, "#" + f"{gray:02X}" * 3, .78)
+        setattr(model, field, current)
+    if constraints.body_font:
+        theme.font = constraints.body_font
+    if rules:
+        if constraints.heading_font:
+            rules.heading_font = constraints.heading_font
+        if constraints.palette:
+            rules.chart_colors = list(dict.fromkeys([theme.accent, *constraints.palette, theme.ink]))[:5]
+            if len(rules.chart_colors) < 2:
+                rules.chart_colors.append(readable(theme.ink, theme.background))
+    return theme
 
 
 def reference_sheet(assets):

@@ -45,6 +45,9 @@ EXHIBIT_LAYOUTS: dict[Exhibit, Layout] = {
 
 class OutlineItem(PlanningResponse):
     title: ShortText
+    topic: str = Field(default="", max_length=180, description="A neutral label for the subject.")
+    key_message: str = Field(default="", max_length=140, description="The concise supported takeaway or recommendation.")
+    lock_title: bool = Field(default=False, description="True only if the user supplies the exact slide title.")
     layout: Layout = Field(description="Use one exact layout ID from the enum. Use chart for a sourced chart and research for a data table.")
     purpose: str = Field(default="", max_length=500)
     required_details: list[ShortText] = Field(default_factory=list, max_length=8)
