@@ -4,7 +4,7 @@ A self-hosted presentation studio that turns prompts and references into editabl
 
 ## Run locally
 
-Install Python 3.11+, Node.js compatible with Angular 21, npm and Git. Node 22 LTS is a supported choice.
+Install Python 3.11 or later, Node.js 22.13 or later in the 22.x series, npm and Git. The [local development guide](docs/local-development.md) lists the other supported Node.js versions.
 
 ```sh
 python scripts/setup.py
@@ -13,7 +13,7 @@ python scripts/dev.py
 
 Open [the studio](http://localhost:4200) or [API documentation](http://localhost:8000/docs). Check services with `python scripts/check.py`.
 
-Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env`, then restart the API and worker. The example configuration uses OpenAI. To try the interface offline, set `LLM_API_URL=demo` in `backend/.env`. Enter `Generate three slides about quantum computing.`, choose **Executive / Board** and **Editorial report**, then edit a slide and export PowerPoint.
+Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env`, then restart the API and worker. The example configuration uses OpenAI. For an offline walkthrough, set `LLM_API_URL=demo` in `backend/.env`, restart both services, and enter `Generate three slides about quantum computing.` Choose **Executive / Board** and **Editorial report**, then edit a slide and export PowerPoint.
 
 ## Capabilities
 
@@ -22,7 +22,8 @@ Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env`, then rest
 - Reference uploads, optional search, source references, reusable skill manifests and deck version history.
 - Branded PowerPoint templates reuse the original slide masters and layouts with editable generated content.
 - Slide and element editing, undo and redo, presentation mode, and live-provider conversational edit previews.
-- Native PowerPoint text, shapes, connectors, tables, charts, pictures and notes. PDF and PNG previews share the slide model.
+- Prompt-aware visual design with editable diagrams, styled tables and native charts. PowerPoint preserves editable text, shapes, connectors, tables, charts, pictures and speaker notes.
+- PDF downloads and per-slide PNG previews use the same slide model.
 - Optional visual review renders the exported PowerPoint in LibreOffice Impress and flags potential clipping, overlapping text and font changes.
 
 The local application uses SQLite and filesystem storage. Production configuration supports PostgreSQL, Redis job dispatch, and S3-compatible storage. See the implementation checklist for verification status and known gaps.

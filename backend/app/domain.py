@@ -34,6 +34,15 @@ class DesignRules(Contract):
     chart_colors: list[Color] = Field(min_length=2, max_length=5)
 
 
+class DesignConstraints(Contract):
+    background_mode: Literal["light", "dark"] | None = None
+    restrained: bool = False
+    palette: list[Color] = Field(default_factory=list, max_length=10)
+    colors: dict[Literal["background", "cover_background", "ink", "accent", "muted", "surface", "dense_surface"], Color] = Field(default_factory=dict)
+    heading_font: str | None = Field(default=None, max_length=60)
+    body_font: str | None = Field(default=None, max_length=60)
+
+
 class Theme(Contract):
     background: Color = "#F7F8FF"
     ink: Color = "#181D3B"
@@ -43,6 +52,7 @@ class Theme(Contract):
     font: str = Field(default="Arial", max_length=60)
     profile: Literal["standard", "consulting"] = "standard"
     design: DesignRules | None = None
+    constraints: DesignConstraints | None = None
 
 
 class Source(Contract):

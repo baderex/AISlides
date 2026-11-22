@@ -1,14 +1,14 @@
 # Agent workflow
 
-Generation moves through created, analyzing, waiting for user, researching, planning, generating, reviewing and completed. Waiting for user returns control to the queue. Answer submission validates the persisted question batch and moves the job to its next checkpoint. A reclaimed job reads its existing plan and appends slides only after review and verification of lease ownership.
+The worker analyzes the prompt and references, asks for clarification when needed, researches, chooses an art direction, and plans the deck. It then drafts, composes and reviews one slide at a time. If a checkpoint needs an answer, the worker parks the job and frees the queue. Answer submission validates the saved question batch and requeues the job at the checkpoint recorded for that pause.
 
 Provider responses are schema-validated. Source material is supplied as untrusted data and never grants tools or authority. Deterministic layout, rendering and export consume the presentation IR.
 
-After clarification and research, the design checkpoint asks the model for a typed art direction. The worker saves the palette, typography, imagery, and component rules on the document before requesting the outline. Selected template colors and fonts take precedence. Composition uses the actual slide content to choose an exhibit, then resolves its styles into editable elements shared by the editor, preview, PDF, and PowerPoint writers. Older documents without design rules retain the original composition path.
+After clarification and research, the design checkpoint asks the model for a typed art direction. The worker saves palette, typography, imagery and component rules on the document before requesting the outline. The selected skill or consulting profile supplies the base theme when either applies. For standard, unbranded decks, planning can assign an exhibit such as a financial readout, a stacked comparison or a flow or branching diagram. The worker validates the draft against the planned exhibit and composes its content into editable slide elements.
 
-A source conflict can trigger one additional question before planning if earlier answers do not resolve it. The worker can attach a generated illustration to an eligible slide when image generation is enabled. It previews each slide, fits text, and can use the configured model for at most one content rewrite when vision review is enabled. Validated previews and slides commit with their event before the next checkpoint.
+A source conflict can trigger one additional question before planning if earlier answers do not resolve it. Data-driven briefs can also pause to ask about web research when quantitative evidence is missing. The worker can place an uploaded image, retrieve a requested photo through configured image search, or generate an illustration on an eligible slide when enabled. It fits and validates text and tables, renders a PNG, and can request one content rewrite per slide when vision review is enabled. The slide, preview record and completion event commit before the next checkpoint.
 
-The queue fences commits by lease token and recovers work when a worker heartbeat disappears. A cancelled in-flight provider request can still finish at the provider. Its expired lease prevents it from writing new slides.
+The queue checks the lease token on each commit. A worker can reclaim a running checkpoint after its lease expires or its worker heartbeat becomes stale. Failed jobs can retry from the saved checkpoint. Cancelling a job invalidates its lease so any pending provider response is discarded before it can change the deck.
 
 ## Design benchmarks
 

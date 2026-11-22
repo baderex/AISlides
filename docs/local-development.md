@@ -1,8 +1,8 @@
 # Local development
 
-Install Git, Python 3.11 or later, and Node 20.19+, 22.13+, or 24.x with npm. Run `python scripts/setup.py` followed by `python scripts/dev.py` from the repository root. The setup script creates a virtual environment, installs dependencies, applies migrations and seeds the skill library. The development supervisor starts the API, worker and Angular CLI.
+Install Git, Python 3.11 or later, and Node 20.19+ (20.x), 22.13+ (22.x), or 24.x with npm. Run `python scripts/setup.py` followed by `python scripts/dev.py` from the repository root. Setup creates `backend/.venv`, copies the example `.env` files where needed, installs dependencies, applies migrations and seeds the skill library. The development supervisor starts the API, worker and Angular CLI.
 
-The studio is at [localhost:4200](http://localhost:4200), the API docs at [localhost:8000/docs](http://localhost:8000/docs), and readiness at [localhost:8000/health/ready](http://localhost:8000/health/ready). Local development uses one implicit local workspace. Set `LOCAL_SESSION=false` to exercise account registration and login. Both the worker and API read the same configuration. For `LLM_API_URL` and `LLM_MODEL_ID`, the services read `backend/.env` first and fall back to the root `.env`. Other variables can also be set in the process environment, which takes precedence for those variables.
+The studio is at [localhost:4200](http://localhost:4200), the API docs at [localhost:8000/docs](http://localhost:8000/docs), and readiness at [localhost:8000/health/ready](http://localhost:8000/health/ready). Local development uses one implicit local workspace. Set `LOCAL_SESSION=false` to exercise account registration and login. Both services read the root `.env` with overrides from `backend/.env`. Process environment variables take precedence for settings other than `LLM_API_URL` and `LLM_MODEL_ID`, which are read from the `.env` files.
 
 The Angular dev server reloads frontend changes. Restart the supervisor after changing backend code or configuration.
 
@@ -14,7 +14,7 @@ Install LibreOffice Impress for **Export → Review PowerPoint export**. FrameCr
 
 ## Model setup
 
-Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env` and restart the API and worker. The URL determines the request format. Generation and conversational editing use the same model. Set `LLM_VISION_ENABLED=true` to enable screenshot review when that model supports images.
+Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env` and restart the API and worker. The URL determines the request format. Generation and conversational editing use the same model. Conversational editing requires a live provider. Set `LLM_VISION_ENABLED=true` when the model supports image inputs to let it use uploaded image references for art direction and review rendered slide previews during generation.
 
 | Service | Example `LLM_API_URL` | `LLM_API_KEY` |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ Set `RESEARCH_API_KEY` in `.env` to make **Web research** checked by default in 
 
 With **Web research** enabled, requests for photos or portraits also use Brave Image Search. FrameCraft embeds a preview-sized copy and links the original page in the slide sources. The same key must have Image Search access. You can override the default endpoint with `RESEARCH_IMAGE_API_URL`.
 
-For a **Data Driven** deck without reference material, the worker uses configured web research when the request leaves the research setting unspecified. If Web research was turned off, the studio offers a choice before searching.
+For a **Data Driven** deck or a brief that calls for quantitative evidence, the worker uses configured web research when the request leaves the research setting unspecified and has no reference sources. If Web research was turned off in that situation, the studio asks whether to search or continue without sources. A brief that explicitly limits sources to supplied material keeps external research off.
 
 Set `IMAGE_PROVIDER` to `openai` or `openrouter` in `backend/.env` to enable **Generate illustrations**. Use `IMAGE_GEN_API_KEY` for the selected provider. You can leave it blank if `LLM_API_URL` points to the same provider and `LLM_API_KEY` is set. Existing OpenAI configurations can still use `IMAGE_OPENAI_API_KEY` as a fallback.
 
@@ -47,6 +47,8 @@ Leave `IMAGE_GEN_URL` blank to use the provider default, or set it to the full i
 
 From `backend` create a virtual environment with `python -m venv .venv`. Activate it using `.venv\Scripts\Activate.ps1` on Windows PowerShell or `source .venv/bin/activate` on macOS/Linux. Run these commands in the backend directory.
 
+For a fresh manual setup, copy `backend/.env.example` to `backend/.env` and configure your provider before starting the services.
+
 ```sh
 pip install -e ".[dev]"
 alembic upgrade head
@@ -58,6 +60,8 @@ From a second backend terminal, start `python -m app.worker`. From `frontend`, r
 
 ## Verification
 
-Run `python -m pytest` in an activated backend environment. From `frontend`, run `npm test`, `npm run build`, `npx playwright install chromium` and `npm run e2e`. Playwright starts isolated services on the standard local ports, so stop other studio processes first. For an installed Edge or Chrome browser, set `STUDIO_BROWSER_CHANNEL=msedge` or `chrome` to use that browser. `STUDIO_E2E_REUSE=1` uses existing services and creates presentations in that workspace.
+Run `python -m pytest` from `backend` with its virtual environment activated. From `frontend`, run `npm test` and `npm run build`. To run the browser suite after setup, run `npx playwright install chromium` and `npm run e2e`. For an installed Edge or Chrome browser, set `STUDIO_BROWSER_CHANNEL=msedge` or `chrome` and skip the Chromium install.
 
-SQLite data is stored under `backend/data` by default. Stop both Python processes to copy the entire data directory as a consistent local backup.
+Playwright starts the API, worker and Angular on ports 8000 and 4200 with temporary SQLite and file storage and the built-in demo provider. Free both ports before running it. `STUDIO_E2E_REUSE=1` allows Playwright to reuse an existing server at port 4200, and the suite writes to that server's workspace. To include the branded PowerPoint review browser test, set `POWERPOINT_RENDERER` in the shell that launches Playwright, even if the application already finds Impress.
+
+With the default settings and backend working directory, SQLite uses `backend/data/app.db` and stored objects use `backend/data/uploads`. Stop both Python processes before copying `backend/data` for a consistent local backup.

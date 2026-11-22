@@ -16,6 +16,7 @@ from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, 
 from app.db import Job, PresentationRecord, Session, now
 from app.design import ArtDirection, DIRECTOR_PROMPT, apply_cover_direction, font_family, reference_sheet
 from app.domain import Image, Skill, Slide, Source, Theme, read_document
+from app.evidence import resolve_headline
 from app.imagery import image_configured, render_image, source_web_image
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
 from app.previews import put_preview
@@ -56,9 +57,11 @@ DATA_SLIDE_GUIDANCE = (
     "stronger exhibit than planned, supply it. Call out material data gaps. Do not mix currencies or reporting periods."
 )
 COMPOSITION_PLAN = (
-    " Give each slide one job and one primary visual. Use a short title that states a supported finding or directly names "
-    "what is being explained. Aim for 4–9 words unless the user requires exact wording. Put units and qualifications "
-    "in the subtitle or exhibit label when they make the headline unwieldy. "
+    " Give each slide one job and one primary visual. In topic name what the slide covers. In key_message write its concise "
+    "supported finding, recommendation, or explanation in natural language. Examples of useful headline structure are "
+    "'Operating profit recovers in Q4' and 'North and Central host the pilot'. Leave key_message empty for supplied titles, "
+    "neutral look-up tables, or where evidence does not yet support a finding. Set lock_title only for exact titles the user supplies. "
+    "Use title as a clear fallback. Keep introduced shorthand out of headings. Aim for 4–9 words. "
     "Choose chart for a measured trend, research for exact lookup, process for ordered steps, "
     "comparison for parallel alternatives, and summary for unrelated explanatory points. Use a section divider only "
     "for a transition. Mark use_uploaded_image on a slide explicitly assigned a reference image, including a cover. "
@@ -680,7 +683,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              "color names and comments about the presentation design out of visible copy unless the subject is design. "
              "Make claims traceable via supplied source IDs. "
              "Include actionable detail and relevant speaker notes. Use at most three points unless the user requires more. "
-             "Use short action phrases for process steps. The layout adds step numbers. Keep each point title within 65 characters "
+             "Use short action phrases for process steps. Do not put step numbers or generic prefixes in point titles. "
+             "For product features, name the feature and describe only what the brief establishes. Keep each point title within 65 characters "
              "and each point body within 130 characters. "
              "Distinguish established results from forecasts or hypotheses. If the brief limits claims to supplied facts, omit "
              "unsupported qualitative claims too, such as calling USB-C charging fast. If the brief asks to identify figures "
@@ -725,6 +729,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 context["web_image"] = {"source": source.model_dump(mode="json"), "ratio": web_image_ratio}
             except ProviderError as error:
                 context["web_image_warning"] = str(error)
+        part = resolve_headline(part, content, item.request["prompt"], document.sources,
+                                strict_copy=bool(inferred_intent.get("supplied_evidence_only")))
         context["slide_content"] = content.model_dump(mode="json")
         if can_illustrate and content.image_prompt and content.image_asset_id not in images and not (
             content.chart or content.table or content.stacked_comparison
@@ -739,7 +745,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if not start_status(job_id, token, "GENERATING", "agent.started", f"Generating an illustration for slide {index + 1}.", index=index):
             return None
         content = SlideContent.model_validate(context["slide_content"])
-        part = OutlineItem.model_validate(context["outline"]["slides"][index])
+        part = OutlineItem.model_validate(context["outline"]["slides"][index]).model_copy(update={"title": content.title})
         warning = ""
         try:
             if not image_configured():
@@ -837,6 +843,9 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 web_image = None
                 content.image_asset_id = None
                 content.source_ids = [key for key in content.source_ids if key != source_id]
+        part = resolve_headline(part, content, item.request["prompt"], document.sources,
+                                strict_copy=bool(inferred_intent.get("supplied_evidence_only")))
+        context["slide_content"] = content.model_dump(mode="json")
         context["draft"] = compose(part, content, document, index, images, brand,
                                    web_image_ratio=web_image["ratio"] if web_image else None,
                                    image_ratio=image_aspect(content.image_asset_id, images),
