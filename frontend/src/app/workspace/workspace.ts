@@ -8,6 +8,7 @@ import { icons, StudioIcon } from '../icons';
 import { Answer, EditPreview, ExportReview, Presentation, Question, Slide, StudioEvent, Version } from '../models';
 import { SlideCanvas } from './canvas';
 import { Editor, baseGeometry } from './editor';
+import { ExhibitChange, ExhibitEditor } from './exhibit-editor';
 import { GenerationPlan } from './generation-plan';
 import { Questions } from './questions';
 import { Timeline } from './timeline';
@@ -19,7 +20,7 @@ const STATUS_LABEL: Record<Presentation['status'], string> = {
 
 @Component({
   selector: 'studio-workspace',
-  imports: [RouterLink, SlideCanvas, Questions, Timeline, GenerationPlan, Dialog, FormsModule, DatePipe, StudioIcon],
+  imports: [RouterLink, SlideCanvas, Questions, Timeline, GenerationPlan, Dialog, FormsModule, DatePipe, StudioIcon, ExhibitEditor],
   providers: [Editor],
   templateUrl: './workspace.html',
 })
@@ -43,7 +44,7 @@ export class Workspace implements OnDestroy {
   readonly error = signal('');
   readonly notice = signal('');
   readonly streaming = signal(false);
-  readonly modal = signal<'export' | 'export-review' | 'versions' | 'sources' | 'text' | 'menu' | 'delete' | null>(null);
+  readonly modal = signal<'export' | 'export-review' | 'versions' | 'sources' | 'text' | 'exhibit' | 'menu' | 'delete' | null>(null);
   readonly presenting = signal(false);
   readonly zoom = signal(100);
   readonly snap = signal(true);
@@ -54,6 +55,11 @@ export class Workspace implements OnDestroy {
   readonly canEdit = computed(() => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(this.item()?.status ?? '') || this.item()?.request.generate === false && this.item()?.status === 'CREATED');
   readonly showPlan = computed(() => this.item() !== null && (!this.canEdit() || this.events().some(event => event.job_id !== null)));
   readonly sourceLinks = computed(() => this.editor.document()?.sources.filter(source => this.editor.current()?.source_ids.includes(source.id)) ?? []);
+  readonly exhibit = computed(() => {
+    const spec = this.editor.current()?.spec;
+    const visual = spec?.content.visual;
+    return visual && (visual.rows || visual.points || visual.nodes || visual.items) ? spec : null;
+  });
   readonly displayedSlide = computed(() => this.preview()?.document.slides.find(slide => slide.id === this.editor.current()?.id) ?? this.editor.current());
   readonly canvasArea = viewChild<ElementRef<HTMLElement>>('canvasArea');
   readonly agentScroll = viewChild<ElementRef<HTMLElement>>('agentScroll');
@@ -163,6 +169,23 @@ export class Workspace implements OnDestroy {
   async cancel() { await this.action(async () => { await this.api.cancel(this.id); await this.refresh(); }); }
 
   async save() { await this.action(async () => { await this.persist(); this.notice.set('Presentation saved.'); }); }
+
+  openExhibit() {
+    this.error.set('');
+    this.modal.set('exhibit');
+  }
+
+  async updateExhibit(change: ExhibitChange) {
+    await this.action(async () => {
+      const item = this.item(), slide = this.editor.current(), id = this.id;
+      if (!item || !slide) return;
+      const result = await this.api.editExhibit(id, item.revision, slide, change.visual, change.recipe, change.illustrative);
+      if (id !== this.id || this.modal() !== 'exhibit') return;
+      if (this.editor.current() !== slide) throw new Error('The slide changed. Reopen the exhibit and try again.');
+      this.editor.updateSlide(next => Object.assign(next, result));
+      this.modal.set(null);
+    });
+  }
 
   private async persist() {
     if (!this.editor.dirty()) return;

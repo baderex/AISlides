@@ -46,6 +46,26 @@ def renderer() -> str | None:
     return None
 
 
+def add_pdf_evidence(raw: bytes, document: Document) -> bytes:
+    """Restore the evidence annotations after a native PDF conversion."""
+    from pypdf import PdfWriter
+    from pypdf.annotations import Text as Note
+
+    from app.exhibit_evidence import display_evidence, evidence_notes
+
+    notes = [evidence_notes(document, display_evidence(document, slide)) for slide in document.slides]
+    if not any(notes):
+        return raw
+    writer = PdfWriter(clone_from=io.BytesIO(raw))
+    for i, (page, note) in enumerate(zip(writer.pages, notes)):
+        if note:
+            width, height = float(page.mediabox.width), float(page.mediabox.height)
+            writer.add_annotation(i, Note(text=note, rect=(.015 * width, .01 * height, .048 * width, .043 * height)))
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
 def render_powerpoint(executable: str, raw: bytes) -> bytes:
     with tempfile.TemporaryDirectory(prefix="framecraft-office-") as folder:
         work = Path(folder)

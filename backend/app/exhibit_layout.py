@@ -1,9 +1,13 @@
 """Deterministic layout for the semantic exhibit contracts."""
 
 from collections import defaultdict, deque
+from decimal import Decimal
 from itertools import accumulate
 from math import sqrt
 from textwrap import shorten
+
+from grandalf.graphs import Edge, Graph, Vertex
+from grandalf.layouts import SugiyamaLayout, VertexViewer
 
 from app.design import blend, readable
 from app.domain import ConnectorAnchor, Line, Shape, Table, Text, TextSpan, display_value
@@ -16,7 +20,7 @@ from app.visuals import (CodeVisual, FlowVisual, GraphVisual, MatrixVisual, Quan
 class ExhibitCanvas:
     """Map exhibit-local geometry into the slide body or a template slot."""
 
-    def __init__(self, document, slide, bounds, *, highlight_band=None):
+    def __init__(self, document, slide, bounds, *, highlight_band=None, recipe="standard"):
         self.document, self.slide = document, slide
         self.x, self.y, self.w, self.h = bounds
         self.theme = document.theme
@@ -30,6 +34,7 @@ class ExhibitCanvas:
         self.ptw, self.pth = physical(document)
         self.marks = {}
         self.highlight_band = highlight_band
+        self.recipe = recipe
 
     def box(self, x, y, w, h):
         return dict(x=self.x + x * self.w, y=self.y + y * self.h, w=w * self.w, h=h * self.h)
@@ -86,6 +91,15 @@ class ExhibitCanvas:
     def mark(self, label, x, y):
         self.marks[label] = (x, y)
 
+    def polygon(self, points, fill, *, element_key):
+        xs, ys = zip(*points)
+        x, y = min(xs), min(ys)
+        w, h = max(xs) - x, max(ys) - y
+        if not w or not h:
+            return
+        self.slide.elements.append(Shape(**self.box(x, y, w, h), fill=fill, z=-4, element_key=element_key,
+                                         polygon=[((px - x) / w, (py - y) / h) for px, py in points]))
+
 
 def fmt(value, signed=False):
     string = display_value(value)
@@ -115,10 +129,11 @@ def quantitative(c, v):
         for i, row in enumerate(rows):
             y, fraction = .025 + i * height, row.values[0] / values[0]
             width = .51 * fraction
+            identity = f"{kind}:{row.label}"
             if width:
-                c.shape(.27 - width / 2, y, width, height * .84, panel, border=c.accent)
-            c.label(row.label, .55, y + .01, .29, height * .72, bold=True)
-            c.label(fmt(row.values[0]), .85, y + .01, .14, height * .72, align="right")
+                c.shape(.27 - width / 2, y, width, height * .84, panel, border=c.accent, element_key=f"{identity}:bar")
+            c.label(row.label, .55, y + .01, .29, height * .72, bold=True, element_key=f"{identity}:label")
+            c.label(fmt(row.values[0]), .85, y + .01, .14, height * .72, align="right", element_key=f"{identity}:value-label")
             c.mark(row.label, .27 + width / 2, y + height * .42)
     else:
         tornado = kind == "tornado"
@@ -127,27 +142,29 @@ def quantitative(c, v):
         origin = v.baseline if tornado else 0
         domain = [origin, *(value for row in rows for value in row.values)]
         x = scale(domain, .32 if tornado else .39, .89 if tornado else .91)
-        c.line((x(origin), .04), (x(origin), .87), color=c.rule)
+        c.line((x(origin), .04), (x(origin), .87), color=c.rule, element_key=f"{kind}:origin")
         height = .81 / len(rows)
         for i, row in enumerate(rows):
+            identity = f"{kind}:{row.label}"
             left, right = row.values if tornado else sorted((origin, row.values[0]))
             position = x(row.values[0])
             y = .04 + i * height
             color = c.accent if not v.highlight or v.highlight == row.label else c.rule
             if row.label == c.highlight_band:
-                c.shape(0, y, 1, height, c.surface, z=-4)
+                c.shape(0, y, 1, height, c.surface, z=-4, element_key=f"{identity}:highlight")
             if left != right:
-                c.shape(x(left), y + height * .20, x(right) - x(left), height * .53, color)
-            c.label(row.label, 0, y + .01, .241 if tornado else .30, height * .88, bold=True)
+                c.shape(x(left), y + height * .20, x(right) - x(left), height * .53, color, element_key=f"{identity}:bar")
+            c.label(row.label, 0, y + .01, .241 if tornado else .30, height * .88, bold=True, element_key=f"{identity}:label")
             if tornado:
-                c.label(fmt(left), x(left) - .071, y + .01, .067, height * .88, 11, align="right")
-                c.label(fmt(right), x(right) + .006, y + .01, .097, height * .88, 11)
+                c.label(fmt(left), x(left) - .071, y + .01, .067, height * .88, 11, align="right", element_key=f"{identity}:low")
+                c.label(fmt(right), x(right) + .006, y + .01, .097, height * .88, 11, element_key=f"{identity}:high")
             else:
                 c.label(fmt(row.values[0]), position + .009 if row.values[0] >= 0 else position - .081,
-                        y + .01, .077, height * .88, 11, align="left" if row.values[0] >= 0 else "right")
+                        y + .01, .077, height * .88, 11, align="left" if row.values[0] >= 0 else "right",
+                        element_key=f"{identity}:value-label")
             c.mark(row.label, x(right), y + height * .46)
         if tornado:
-            c.label(f"Baseline {fmt(origin)}", .32, .89, .56, .10, 11, align="center")
+            c.label(f"Baseline {fmt(origin)}", .32, .89, .56, .10, 11, align="center", element_key="tornado:baseline")
 
 
 def waterfall(c, v):
@@ -155,23 +172,26 @@ def waterfall(c, v):
     labels = [v.start_label, *(row.label for row in v.rows), v.end_label]
     intervals = [(0, totals[0]), *zip(totals, totals[1:]), (0, totals[-1])]
     h = scale([0, *totals], .69, .16)
-    c.line((0, h(0)), (1, h(0)), color=c.rule)
+    c.line((0, h(0)), (1, h(0)), color=c.rule, element_key="waterfall:zero-axis")
     step = 1 / len(labels)
     for i, (label, (start, end)) in enumerate(zip(labels, intervals)):
         x = i * step + step * .18
         width = step * .64
         top, bottom = sorted((h(start), h(end)))
         total = i == 0 or i == len(labels) - 1
+        identity = f"waterfall:{'start' if i == 0 else 'end' if total else f'driver:{label}'}"
         value = end if total else v.rows[i - 1].values[0]
         color = c.accent if total or value >= 0 else "#A44742"
         if bottom > top:
-            c.shape(x, top, width, bottom - top, color)
+            c.shape(x, top, width, bottom - top, color, element_key=f"{identity}:bar")
         else:
-            c.line((x, top), (x + width, top), color=color, weight=2)
+            c.line((x, top), (x + width, top), color=color, weight=2, element_key=f"{identity}:zero-bar")
         if i < len(labels) - 1:
-            c.line((x + width, h(end)), (x + step, h(end)), color=c.muted, dashed=True)
-        c.label(fmt(value, not total), i * step, top - .14, step, .12, 12, bold=True, align="center")
-        c.label(label, i * step + .004, .73, step - .008, .22, 12, align="center")
+            c.line((x + width, h(end)), (x + step, h(end)), color=c.muted, dashed=True,
+                   element_key=f"{identity}:bridge")
+        c.label(fmt(value, not total), i * step, top - .14, step, .12, 12, bold=True, align="center",
+                element_key=f"{identity}:value-label")
+        c.label(label, i * step + .004, .73, step - .008, .22, 12, align="center", element_key=f"{identity}:label")
         c.mark(label, x + width / 2, top)
 
 
@@ -182,28 +202,32 @@ def composition(c, v):
     span = sum(widths)
     x = 0
     for row, weight in zip(rows, widths):
+        identity = f"{v.type}:{row.label}"
         column = weight / span
         width = column * (.98 if split else .72)
         left = x + (column - width) / 2
         bottom = .68
         total = sum(row.values)
         for i, value in enumerate(row.values):
+            segment = f"{identity}:{v.series[i]}"
             height = .55 * value / (total if split else maximum)
             if height:
                 fill = c.palette[i]
-                c.shape(left, bottom - height, width, height, fill)
+                c.shape(left, bottom - height, width, height, fill, element_key=f"{segment}:bar")
                 if height >= .11 and width >= .075:
                     c.label(f"{value / total:.0%}" if split else fmt(value), left, bottom - height, width, height,
-                            13, color=readable("#FFFFFF", fill), bold=True, align="center", centered=True)
+                            13, color=readable("#FFFFFF", fill), bold=True, align="center", centered=True,
+                            element_key=f"{segment}:value-label")
             bottom -= height
-        c.label(fmt(row.width if split else total), left, max(0, bottom - .105), width, .095, 11, bold=True, align="center")
-        c.label(row.label, x, .70, column, .14, 11, align="center")
+        c.label(fmt(row.width if split else total), left, max(0, bottom - .105), width, .095, 11, bold=True,
+                align="center", element_key=f"{identity}:value-label")
+        c.label(row.label, x, .70, column, .14, 11, align="center", element_key=f"{identity}:label")
         c.mark(row.label, x + column / 2, bottom)
         x += column
     for i, name in enumerate(v.series):
         step = 1 / len(v.series)
-        c.shape(i * step + .01, .89, .022, .035, c.palette[i])
-        c.label(name, i * step + .04, .86, step - .044, .11, 11)
+        c.shape(i * step + .01, .89, .022, .035, c.palette[i], element_key=f"{v.type}:legend:{name}:swatch")
+        c.label(name, i * step + .04, .86, step - .044, .11, 11, element_key=f"{v.type}:legend:{name}:label")
 
 
 def course(c, v):
@@ -227,13 +251,17 @@ def course(c, v):
                 bottom = column[i] - .088
             slots.append(column)
         for i, row in enumerate(v.rows):
+            identity = f"slope:{row.label}"
             left, right = map(positions, row.values)
             color = c.accent if not v.highlight or row.label == v.highlight else c.muted
-            c.line((.41, left), (.59, right), color=color, weight=2 if row.label == v.highlight else 1.2)
-            c.line((.39, slots[0][i] + .043), (.41, left), color=color)
-            c.line((.59, right), (.61, slots[1][i] + .043), color=color)
-            c.label(f"{row.label}  {fmt(row.values[0])}", 0, slots[0][i], .38, .086, 12, align="right")
-            c.label(f"{fmt(row.values[1])}  {row.label}", .62, slots[1][i], .38, .086, 12)
+            c.line((.41, left), (.59, right), color=color, weight=2 if row.label == v.highlight else 1.2,
+                   element_key=f"{identity}:connector")
+            c.line((.39, slots[0][i] + .043), (.41, left), color=color, element_key=f"{identity}:left-tick")
+            c.line((.59, right), (.61, slots[1][i] + .043), color=color, element_key=f"{identity}:right-tick")
+            c.label(f"{row.label}  {fmt(row.values[0])}", 0, slots[0][i], .38, .086, 12, align="right",
+                    element_key=f"{identity}:left-label")
+            c.label(f"{fmt(row.values[1])}  {row.label}", .62, slots[1][i], .38, .086, 12,
+                    element_key=f"{identity}:right-label")
             c.mark(row.label, .59, right)
     else:
         rows = sorted(v.rows, key=lambda row: row.values[0], reverse=True)
@@ -242,17 +270,20 @@ def course(c, v):
         c.line((.04, .70), (.96, .70), color=c.rule)
         previous = None
         for i, (row, cumulative) in enumerate(zip(rows, accumulate(values))):
+            identity = f"pareto:{row.label}"
             fraction = cumulative / sum(values)
             height = .48 * values[i] / max(values)
             x = .04 + step * (i + .5)
             y = .65 - .54 * fraction
             if height:
-                c.shape(x - step * .30, .70 - height, step * .60, height, blend(c.slide.background, c.accent, .55))
+                c.shape(x - step * .30, .70 - height, step * .60, height, blend(c.slide.background, c.accent, .55),
+                        element_key=f"{identity}:bar")
             if previous:
-                c.line(previous, (x, y), color=c.accent, weight=2)
-            c.label(f"{fraction:.0%}", x - step / 2, y - .105, step, .10, 11, bold=True, align="center")
-            c.label(fmt(values[i]), x - step / 2, .71, step, .087, 11, align="center")
-            c.label(row.label, x - step / 2, .80, step, .18, 11, align="center")
+                c.line(previous, (x, y), color=c.accent, weight=2, element_key=f"{identity}:connector")
+            c.label(f"{fraction:.0%}", x - step / 2, y - .105, step, .10, 11, bold=True, align="center",
+                    element_key=f"{identity}:share")
+            c.label(fmt(values[i]), x - step / 2, .71, step, .087, 11, align="center", element_key=f"{identity}:value-label")
+            c.label(row.label, x - step / 2, .80, step, .18, 11, align="center", element_key=f"{identity}:label")
             c.mark(row.label, x, y)
 
 
@@ -261,7 +292,8 @@ def matrix(c, v):
     weighted = bool(v.weights)
     weights = [w / sum(v.weights) for w in v.weights]
     show_key = heat or v.type == "raci"
-    headers = ["", *[f"{name} ({weight:.0%})" for name, weight in zip(v.columns, weights)]] if weighted else ["", *v.columns]
+    columns = [unit_label(name, unit) for name, unit in zip(v.columns, v.column_units)] if v.column_units else v.columns
+    headers = ["", *[f"{name} ({weight:.0%})" for name, weight in zip(columns, weights)]] if weighted else ["", *columns]
     if weighted:
         headers.append("Weighted score")
     values = [value for row in v.rows for value in row.cells if isinstance(value, (float, int))]
@@ -295,7 +327,8 @@ def matrix(c, v):
                                   numeric_columns=[i for i in range(1, len(headers)) if all(
                                       isinstance(row.cells[i - 1], (int, float)) for row in v.rows
                                   )] if not weighted else list(range(1, len(headers))),
-                                  cell_fills=fills if heat else [], cell_inks=inks if heat else []))
+                                  cell_fills=fills if heat else [], cell_inks=inks if heat else [],
+                                  element_key=f"{v.type}:table"))
     if heat:
         if v.levels:
             step = 1 / len(v.levels)
@@ -312,6 +345,10 @@ def matrix(c, v):
         c.label("R  Responsible     A  Accountable     C  Consulted     I  Informed", 0, .86, 1, .13, 11)
 
 
+def unit_label(label, unit):
+    return f"{label} ({unit})" if unit else label
+
+
 def scatter(c, v):
     points = v.points
     if points[0].quadrant:
@@ -320,8 +357,8 @@ def scatter(c, v):
     horizontal = [p.horizontal for p in points] + ([] if v.horizontal_split is None else [v.horizontal_split])
     vertical = [p.vertical for p in points] + ([] if v.vertical_split is None else [v.vertical_split])
     x, y = scale(horizontal, .19, .83), scale(vertical, .75, .21)
-    c.label(v.vertical_label, .10, 0, .80, .095, 13, bold=True)
-    c.label(v.horizontal_label, .12, .90, .76, .10, 13, bold=True, align="center")
+    c.label(unit_label(v.vertical_label, v.vertical_unit), .10, 0, .80, .095, 13, bold=True)
+    c.label(unit_label(v.horizontal_label, v.horizontal_unit), .12, .90, .76, .10, 13, bold=True, align="center")
     c.line((.12, .095), (.12, .83), color=c.rule)
     c.line((.12, .83), (.93, .83), color=c.rule)
     c.label(fmt(min(horizontal)), .09, .83, .14, .073, 10, align="center")
@@ -338,12 +375,14 @@ def scatter(c, v):
     largest = max((p.size or 0 for p in points))
     occupied = []
     for point in points:
+        identity = f"{v.type}:{point.label}"
         px, py = x(point.horizontal), y(point.vertical)
         max_height = min(.17, .25 * c.w * c.ptw / (c.h * c.pth))
         height = max_height * sqrt(point.size / largest) if point.size and v.type == "bubble-chart" else .035
         width = height * c.h * c.pth / (c.w * c.ptw)
         fill = c.accent if not v.highlight or point.label == v.highlight else c.muted
-        c.shape(px - width / 2, py - height / 2, width, height, fill, shape="ellipse", opacity=.78)
+        c.shape(px - width / 2, py - height / 2, width, height, fill, shape="ellipse", opacity=.78,
+                element_key=f"{identity}:point")
         label = f"{point.label} ({fmt(point.size)})" if v.type == "bubble-chart" else point.label
         candidates = [(px + width / 2 + .012, py - .042), (px - width / 2 - .202, py - .042),
                       (px - .095, py + height / 2), (px - .095, py - height / 2 - .085)]
@@ -353,7 +392,7 @@ def scatter(c, v):
             return sum(max(0, min(bx + .19, ox + .19) - max(bx, ox)) *
                        max(0, min(by + .085, oy + .085) - max(by, oy)) for ox, oy in occupied)
         bx, by = min(proposals or [(min(.80, max(.12, px - .095)), py - .042)], key=overlap)
-        c.label(label, bx, by, .19, .085, 11, bold=True)
+        c.label(label, bx, by, .19, .085, 11, bold=True, element_key=f"{identity}:label")
         occupied.append((bx, by))
         c.mark(point.label, px, py)
 
@@ -373,9 +412,10 @@ def qualitative_quadrants(c, v):
         for j, label in enumerate(labels):
             top = y + .068 + height * j
             fill = c.accent if label == v.highlight else c.surface
-            c.shape(x, top, .42, height * .93, fill)
+            identity = f"two-by-two:{label}"
+            c.shape(x, top, .42, height * .93, fill, element_key=f"{identity}:card")
             c.label(label, x + .012, top, .39, height * .93, 13, color=readable(c.ink, fill),
-                    bold=label == v.highlight, centered=True)
+                    bold=label == v.highlight, centered=True, element_key=f"{identity}:label")
             c.mark(label, x + .42, top + height / 2)
 def graph_ranks(v):
     nodes = [node.id for node in v.nodes]
@@ -409,12 +449,42 @@ def graph_ranks(v):
     return {key: ranks.get(key, 0) for key in nodes}
 
 
+def graph_order(v, ranks):
+    """Use crossing-minimized layers for dense graphs while retaining semantic groups."""
+    if (len(v.nodes) < 6 and len(v.edges) < 7) or v.type == "layered-stack":
+        return {}
+    vertices = {node.id: Vertex(node.id) for node in v.nodes}
+    for vertex in vertices.values():
+        vertex.view = VertexViewer(100, 60)
+    endpoints = dict.fromkeys((edge.source, edge.target) for edge in v.edges if edge.source != edge.target)
+    network = Graph(list(vertices.values()), [Edge(vertices[a], vertices[b]) for a, b in endpoints])
+    order = {}
+    for component in network.C:
+        if component.order() < 2:
+            continue
+        layout = SugiyamaLayout(component)
+        layout.init_all()
+        layout.draw()
+        for rank, layer in enumerate(layout.layers):
+            for slot, vertex in enumerate(layer):
+                if isinstance(vertex, Vertex):
+                    order[vertex.data] = slot
+                    ranks[vertex.data] = rank
+    return order
+
+
 def graph(c, v):
     ranks = graph_ranks(v)
     stack = v.type == "layered-stack"
     sankey = v.type == "sankey"
+    ordering = graph_order(v, ranks)
     rank_count = max(ranks.values()) + 1
-    vertical = stack or v.type in {"issue-tree", "driver-tree", "organization-chart"} or (rank_count > 5 and not sankey)
+    if sankey:
+        sankey_layout(c, v, ranks, ordering, rank_count)
+        return
+    vertical = (stack or v.type in {"issue-tree", "driver-tree", "organization-chart"} or
+                (v.type == "architecture" and c.recipe != "exhibit_horizontal") or
+                (rank_count > 5 and c.recipe != "exhibit_horizontal"))
     groups = list(dict.fromkeys(node.group for node in v.nodes))
     boxes, local = {}, {}
     cross_start = 0
@@ -431,15 +501,15 @@ def graph(c, v):
         strip = .062 if group else 0
         if group:
             if vertical:
-                c.shape(start, 0, cross - .01, 1, c.surface, border=c.rule, z=-6)
-                c.label(group, start + .01, 0, cross - .03, strip, 12, bold=True)
+                c.shape(start, 0, cross - .01, 1, c.surface, border=c.rule, z=-6, element_key=f"{v.type}:group:{group}:panel")
+                c.label(group, start + .01, 0, cross - .03, strip, 12, bold=True, element_key=f"{v.type}:group:{group}:heading")
             else:
-                c.shape(0, start, 1, cross - .01, c.surface, border=c.rule, z=-6)
-                c.label(group, .013, start, .32, min(strip, cross * .3), 12, bold=True)
+                c.shape(0, start, 1, cross - .01, c.surface, border=c.rule, z=-6, element_key=f"{v.type}:group:{group}:panel")
+                c.label(group, .013, start, .32, min(strip, cross * .3), 12, bold=True, element_key=f"{v.type}:group:{group}:heading")
         for rank, nodes in cohorts.items():
             gutter = min(strip, cross * .29)
             cell = (cross if vertical else cross - gutter) / len(nodes)
-            for i, node in enumerate(nodes):
+            for i, node in enumerate(sorted(nodes, key=lambda node: ordering.get(node.id, 0))):
                 along = .03 + major * rank
                 across = start + cell * i + (0 if vertical else gutter)
                 if vertical:
@@ -448,8 +518,6 @@ def graph(c, v):
                 else:
                     x, y = along + major * .05, across + cell * .10
                     w, h = major * .72, min(.53, cell * .70)
-                if sankey:
-                    w = min(w, .12)
                 if node.role == "decision":
                     shape, inset = "diamond", .20
                 else:
@@ -476,22 +544,18 @@ def graph(c, v):
                             align="left" if node.fields else "center", element_key=f"{identity}:detail")
                 c.mark(node.label, x + w, y + h / 2)
         cross_start += cross
-    if sankey:
-        draw_weighted_links(c, v, local)
-        return
     pairs = {(edge.source, edge.target) for edge in v.edges}
     order = {node.id: i for i, node in enumerate(v.nodes)}
     for edge in v.edges:
-        identity = f"{v.type}:{edge.source}:{edge.target}"
+        identity = edge_key(v, edge)
         sx, sy, sw, sh = local[edge.source]
         tx, ty, tw, th = local[edge.target]
         if edge.source == edge.target:
             start, end = (sx + sw, sy + sh / 2), (sx + sw / 2, sy + sh)
             bend_x, bend_y = min(.996, sx + sw + .029), min(.995, sy + sh + .04)
-            c.line(start, (bend_x, start[1]))
-            c.line((bend_x, start[1]), (bend_x, bend_y))
-            c.line((bend_x, bend_y), (end[0], bend_y))
-            c.line((end[0], bend_y), end, arrow=True)
+            points = [start, (bend_x, start[1]), (bend_x, bend_y), (end[0], bend_y), end]
+            for i, (a, b) in enumerate(zip(points, points[1:])):
+                c.line(a, b, arrow=i == 3, element_key=f"{identity}:loop:{i}")
             lx, ly = bend_x - .096, bend_y + .006
         else:
             same_rank = ranks[edge.source] == ranks[edge.target]
@@ -537,27 +601,80 @@ def graph_label(c, text, x, y, *, element_key=None):
     c.label(text, *min(candidates, key=overlap), width, height, 10, bold=True, align="center", element_key=element_key)
 
 
-def draw_weighted_links(c, visual, boxes):
+def edge_key(visual, edge):
+    identity = f"{visual.type}:{edge.source}:{edge.target}"
+    if sum((other.source, other.target) == (edge.source, edge.target) for other in visual.edges) > 1:
+        identity += f":{edge.label}"
+    return identity
+
+
+def flow_imbalances(visual):
+    incoming, outgoing = defaultdict(Decimal), defaultdict(Decimal)
+    for edge in visual.edges:
+        weight = Decimal(str(edge.weight))
+        outgoing[edge.source] += weight
+        incoming[edge.target] += weight
+    return {node.id: incoming[node.id] - outgoing[node.id] for node in visual.nodes
+            if node.id in incoming and node.id in outgoing and incoming[node.id] != outgoing[node.id]}
+
+
+def sankey_layout(c, visual, ranks, ordering, rank_count):
     outgoing, incoming = defaultdict(list), defaultdict(list)
     for i, edge in enumerate(visual.edges):
         outgoing[edge.source].append((i, edge))
         incoming[edge.target].append((i, edge))
-    max_flow = max(sum(edge.weight for _, edge in edges) for edges in [*outgoing.values(), *incoming.values()])
-    point_scale = min(20, min(h for _, _, _, h in boxes.values()) * c.h * c.pth * .78) / max_flow
+    max_weight = max(edge.weight for edge in visual.edges)
+    relative = [edge.weight / max_weight for edge in visual.edges]
+    cohorts = defaultdict(list)
+    node_weights = {}
+    for node in visual.nodes:
+        cohorts[ranks[node.id]].append(node)
+        node_weights[node.id] = max(sum(relative[i] for i, _ in incoming[node.id]),
+                                    sum(relative[i] for i, _ in outgoing[node.id]))
+    spacing = min(.11, .64 / max(map(len, cohorts.values())))
+    height_per_unit = min((.78 - len(nodes) * spacing) / total for nodes in cohorts.values()
+                          if (total := sum(node_weights[node.id] for node in nodes)))
+    # All ribbons and nodes use the same scale. At an imbalanced node, the
+    # unmatched height stays visible on the side with the smaller total.
+    boxes = {}
+    step = .92 / rank_count
+    width = min(.07, step * .45)
+    for rank, nodes in cohorts.items():
+        used = len(nodes) * spacing + sum(node_weights[node.id] * height_per_unit for node in nodes)
+        cursor = (.95 - used) / 2
+        for node in sorted(nodes, key=lambda node: ordering.get(node.id, 0)):
+            x = .04 + step * (rank + .5) - width / 2
+            top = cursor + spacing
+            height = node_weights[node.id] * height_per_unit
+            identity = f"sankey:{node.id}"
+            if height:
+                c.shape(x, top, width, height, c.accent, element_key=f"{identity}:node")
+            label_width = min(step * .97, .25)
+            c.label(node.label, x + (width - label_width) / 2, cursor, label_width, spacing,
+                    13, bold=True, align="center", element_key=f"{identity}:heading")
+            c.mark(node.label, x + width, top + height / 2)
+            boxes[node.id] = (x, top, width, height)
+            cursor = top + height
     ports = {}
     for direction, groups in (("out", outgoing), ("in", incoming)):
         for key, edges in groups.items():
             x, y, w, h = boxes[key]
-            weights = [edge.weight * point_scale / (c.h * c.pth) for _, edge in edges]
+            other = "target" if direction == "out" else "source"
+            edges = sorted(edges, key=lambda pair: boxes[getattr(pair[1], other)][1])
+            weights = [relative[i] * height_per_unit for i, _ in edges]
             cursor = y + (h - sum(weights)) / 2
             for (index, _), weight in zip(edges, weights):
                 ports[direction, index] = (x + w if direction == "out" else x, cursor + weight / 2)
                 cursor += weight
     for index, edge in enumerate(visual.edges):
         start, end = ports["out", index], ports["in", index]
-        identity = f"sankey:{edge.source}:{edge.target}"
-        c.line(start, end, color=c.accent, weight=max(.5, edge.weight * point_scale), z=-3,
-               element_key=f"{identity}:connector")
+        identity = edge_key(visual, edge)
+        half = relative[index] * height_per_unit / 2
+        center = [(start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t * t * (3 - 2 * t))
+                  for t in (i / 16 for i in range(17))]
+        ribbon = [(x, y - half) for x, y in center] + [(x, y + half) for x, y in reversed(center)]
+        color = blend(c.slide.background, c.accent, .52)
+        c.polygon(ribbon, color, element_key=f"{identity}:connector")
         graph_label(c, f"{edge.label} {fmt(edge.weight)}".strip(),
                     (start[0] + end[0]) / 2 - .085, (start[1] + end[1]) / 2 - .085, element_key=f"{identity}:label")
 
@@ -572,51 +689,61 @@ def schedule(c, v):
         x, end = positions[i:i + 2]
         step = end - x
         if period == c.highlight_band:
-            c.shape(x, .11, step, .87, c.surface, z=-5)
-        c.label(period, x + step * .025, 0, step * .95, .11, 11, bold=True, align="center")
-        c.line((x, .11), (x, .98), color=c.rule)
-    for i, item in enumerate(v.items):
+            c.shape(x, .11, step, .87, c.surface, z=-5, element_key=f"{v.type}:{period}:band")
+        c.label(period, x + step * .025, 0, step * .95, .11, 11, bold=True, align="center",
+                element_key=f"{v.type}:{period}:period")
+        c.line((x, .11), (x, .98), color=c.rule, element_key=f"{v.type}:{period}:rule")
+    items = v.items
+    if c.recipe == "exhibit_milestones":
+        items = sorted(items, key=lambda item: (item.kind not in {"milestone", "gate"}, item.start, item.end))
+    for i, item in enumerate(items):
+        identity = f"{v.type}:{item.id}"
         y = .12 + i * row
         x, end = positions[item.start], positions[item.end + 1]
         width = end - x
         mid = y + row * .42
         if item.label == c.highlight_band:
-            c.shape(0, y, 1, row * .93, c.surface, z=-5)
-        c.label(item.label, .003, y + .005, left - .025, row * .84, 13, bold=True)
+            c.shape(0, y, 1, row * .93, c.surface, z=-5, element_key=f"{identity}:highlight")
+        c.label(item.label, .003, y + .005, left - .025, row * .84, 13, bold=True, element_key=f"{identity}:label")
         if item.kind in {"gate", "milestone"}:
             marker_width = min(.023, width * .32)
             x, end = x + width / 2 - marker_width / 2, x + width / 2 + marker_width / 2
             c.shape(x, mid - row * .21, marker_width, row * .42, c.accent if item.kind == "gate" else c.muted,
-                    shape="diamond" if item.kind == "gate" else "ellipse")
+                    shape="diamond" if item.kind == "gate" else "ellipse", element_key=f"{identity}:marker")
         else:
             x, end = x + width * .04, end - width * .04
             c.shape(x, mid - row * .21, end - x, row * .42,
-                    c.accent if item.kind == "phase" else blend(c.slide.background, c.accent, .55), shape="round")
-        c.line((0, y + row * .93), (1, y + row * .93), color=c.rule, z=-4)
+                    c.accent if item.kind == "phase" else blend(c.slide.background, c.accent, .55), shape="round",
+                    element_key=f"{identity}:marker")
+        c.line((0, y + row * .93), (1, y + row * .93), color=c.rule, z=-4, element_key=f"{identity}:rule")
         coords[item.id] = (x, end, mid)
         c.mark(item.label, end, mid)
     for item in v.items:
         x, _, mid = coords[item.id]
         for key in item.predecessors:
             _, end, past_y = coords[key]
-            c.line((end, past_y), (x, mid), arrow=True, route="elbow")
+            c.line((end, past_y), (x, mid), arrow=True, route="elbow",
+                   element_key=f"{v.type}:{key}:{item.id}:dependency")
 
 
 def sequence(c, v):
     step = 1 / len(v.participants)
     for i, title in enumerate(v.participants):
         x = (i + .5) * step
-        c.shape(x - step * .40, .015, step * .80, .13, c.surface, border=c.accent)
-        c.label(title, x - step * .38, .035, step * .76, .095, 14, bold=True, align="center")
-        c.line((x, .145), (x, .98), color=c.rule, dashed=True, z=-4)
+        identity = f"sequence:{title}"
+        c.shape(x - step * .40, .015, step * .80, .13, c.surface, border=c.accent, element_key=f"{identity}:card")
+        c.label(title, x - step * .38, .035, step * .76, .095, 14, bold=True, align="center",
+                element_key=f"{identity}:label")
+        c.line((x, .145), (x, .98), color=c.rule, dashed=True, z=-4, element_key=f"{identity}:lifeline")
     height = .80 / len(v.messages)
     for i, message in enumerate(v.messages):
         start, end = [(key + .5) * step for key in (message.source, message.target)]
         y = .17 + (i + .8) * height
-        c.line((start, y), (end, y), arrow=True, dashed=message.kind == "return")
+        identity = f"sequence:message:{i}"
+        c.line((start, y), (end, y), arrow=True, dashed=message.kind == "return", element_key=f"{identity}:connector")
         left = min(start, end)
         c.label(message.label, left + .006, y - min(.092, height * .79), abs(end - start) - .012,
-                min(.086, height * .75), 12, align="center")
+                min(.086, height * .75), 12, align="center", element_key=f"{identity}:label")
         c.mark(message.label, end, y)
 
 
@@ -626,29 +753,33 @@ def venn(c, v):
     for i, (name, only) in enumerate(((v.left, v.left_only), (v.right, v.right_only))):
         center = .5 + (i - .5) * width * .64
         fill = blend(c.slide.background, c.palette[i], .38)
+        identity = "venn:left" if i == 0 else "venn:right"
         c.shape(center - width / 2, .54 - height / 2, width, height, fill,
-                shape="ellipse", opacity=.68, border=c.palette[i])
+                shape="ellipse", opacity=.68, border=c.palette[i], element_key=f"{identity}:circle")
         title_width = width * .60
-        c.label(name, center - title_width / 2, 0, title_width, .14, 15, bold=True, align="center")
+        c.label(name, center - title_width / 2, 0, title_width, .14, 15, bold=True, align="center",
+                element_key=f"{identity}:heading")
         x = center + (i - .5) * width * .31
-        c.label(only, x - width * .17, .40, width * .34, .28, 12, align="center")
+        c.label(only, x - width * .17, .40, width * .34, .28, 12, align="center", element_key=f"{identity}:label")
         c.mark(name, x, .54)
-    c.label(v.intersection, .5 - width * .17, .40, width * .34, .28, 12, bold=True, align="center")
+    c.label(v.intersection, .5 - width * .17, .40, width * .34, .28, 12, bold=True, align="center",
+            element_key="venn:intersection")
 
 
 def code(c, v):
     height = min(.12, .88 / len(v.lines))
-    c.label(v.language, .022, 0, .95, .10, 13, color=c.muted, bold=True)
-    c.shape(0, .105, 1, height * len(v.lines), c.surface)
+    c.label(v.language, .022, 0, .95, .10, 13, color=c.muted, bold=True, element_key="code:language")
+    c.shape(0, .105, 1, height * len(v.lines), c.surface, element_key="code:panel")
     for i, line in enumerate(v.lines):
         y = .105 + i * height
+        identity = f"code:line:{i + 1}"
         if line.highlight:
-            c.shape(.002, y, .996, height, blend(c.slide.background, c.accent, .22), z=-1)
-            c.shape(.002, y, .006, height, c.accent, z=-1)
+            c.shape(.002, y, .996, height, blend(c.slide.background, c.accent, .22), z=-1, element_key=f"{identity}:highlight")
+            c.shape(.002, y, .006, height, c.accent, z=-1, element_key=f"{identity}:accent")
         c.label(str(i + 1), .015, y + height * .08, .054, height * .85, 12, color=c.muted,
-                font="Courier New", align="right")
+                font="Courier New", align="right", element_key=f"{identity}:number")
         c.label(line.code.expandtabs(4), .09, y + height * .08, .90, height * .85, 14,
-                font="Courier New", bold=line.highlight)
+                font="Courier New", bold=line.highlight, element_key=f"{identity}:text")
         c.mark(str(i + 1), .98, y + height / 2)
 
 
@@ -688,14 +819,35 @@ DRAW = {QuantitativeVisual: quantitative, MatrixVisual: matrix, ScatterVisual: s
         FlowVisual: legacy_diagram, SwimlaneVisual: legacy_diagram}
 
 
-def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned_annotations=()):
+def exhibit_callouts(visual):
+    if visual.type == "ranked-bar":
+        selected = max(visual.rows, key=lambda row: row.values[0])
+        return [(f"Highest · {selected.label}\n{fmt(selected.values[0])}", selected.label, "highest")]
+    if visual.type == "waterfall":
+        selected = max(visual.rows, key=lambda row: abs(row.values[0]))
+        return [(f"Largest adjustment · {selected.label}\n{fmt(selected.values[0], True)}", selected.label, "driver")]
+    if visual.type == "decision-matrix":
+        return [(f"Recommended\n{visual.recommended}", visual.recommended, "recommendation")] if visual.recommended else []
+    if visual.type == "sankey":
+        edge = max(visual.edges, key=lambda edge: edge.weight)
+        labels = {node.id: node.label for node in visual.nodes}
+        return [(f"Largest flow · {fmt(edge.weight)}\n{labels[edge.source]} → {labels[edge.target]}", None, "largest-flow")]
+    if visual.type == "roadmap":
+        return [(f"{item.label}\n{visual.periods[item.start]}", item.label, item.id)
+                for item in sorted(visual.items, key=lambda item: item.start) if item.kind in {"milestone", "gate"}][:2]
+    return []
+
+
+def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned_annotations=(), recipe="standard"):
     visual, details = content.visual, content.decorations
     x, y, w, h = bounds
     annotations = list(annotations) or planned_annotations
-    notes = [(item if isinstance(item, str) else item.text, None if isinstance(item, str) else item.target)
-             for item in annotations]
+    notes = [(item if isinstance(item, str) else item.text, None if isinstance(item, str) else item.target, f"annotation:{i}")
+             for i, item in enumerate(annotations)]
     if details and details.callout:
-        notes.append((details.callout, None))
+        notes.append((details.callout, None, "callout"))
+    if recipe in {"exhibit_callouts", "exhibit_milestones"}:
+        notes.extend((value, target, f"summary:{identity}") for value, target, identity in exhibit_callouts(visual))
     sources = [source.title for source in document.sources if source.id in slide.source_ids]
     citation = ", ".join(shorten(title, width=55, placeholder="…") for title in sources[:2])
     if len(sources) > 2:
@@ -706,40 +858,53 @@ def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned
         kicker_x = 0
         if details.kicker and details.icon in ICON_NAMES:
             icon = slide_icon(document, details.icon, x, y + h * .023, min(.026, h * .070), slide.background)
+            icon.element_key = "exhibit:decoration:icon"
             slide.elements.append(icon)
             kicker_x = icon.w / w + .008
-        frame.label(details.kicker, kicker_x, 0, .30 - kicker_x, .12, 12, color=frame.muted, bold=True, centered=True)
-        frame.label(details.key_metric, .32, 0, .29, .12, 23, color=frame.accent, bold=True)
-        frame.label(details.delta, .62, 0, .13, .12, 15, color=frame.accent, bold=True)
+        frame.label(details.kicker, kicker_x, 0, .30 - kicker_x, .12, 12, color=frame.muted, bold=True,
+                    centered=True, element_key="exhibit:decoration:kicker")
+        frame.label(details.key_metric, .32, 0, .29, .12, 23, color=frame.accent, bold=True,
+                    element_key="exhibit:decoration:metric")
+        frame.label(details.delta, .62, 0, .13, .12, 15, color=frame.accent, bold=True,
+                    element_key="exhibit:decoration:delta")
         if details.status is not None:
-            frame.label(f"{'○◔◑◕●'[details.status]}  {details.status_label}", .77, 0, .23, .12, 13, bold=True)
-        frame.line((0, .125), (1, .125), color=frame.rule)
+            frame.label(f"{'○◔◑◕●'[details.status]}  {details.status_label}", .77, 0, .23, .12, 13,
+                        bold=True, element_key="exhibit:decoration:status")
+        frame.line((0, .125), (1, .125), color=frame.rule, element_key="exhibit:decoration:rule")
         y, h = y + h * .15, h * .85
     unit = visual.unit
     if isinstance(visual, ScatterVisual) and visual.size_label:
-        unit = "  ·  ".join(filter(None, (unit, f"Bubble area: {visual.size_label}")))
+        unit = "  ·  ".join(filter(None, (unit, f"Bubble area: {unit_label(visual.size_label, visual.size_unit)}")))
     if isinstance(visual, QuantitativeVisual):
         if visual.type == "mekko":
             unit = "  ·  ".join(filter(None, ("Height: share of category", f"Width: {unit or 'category size'}")))
         elif visual.type == "pareto":
             unit = "  ·  ".join(filter(None, (unit, "Line: cumulative share")))
-    lower = .09 if footer else 0
+    imbalances = flow_imbalances(visual) if visual.type == "sankey" else {}
+    if imbalances:
+        names = ", ".join(node.label for node in visual.nodes if node.id in imbalances)
+        slide.warnings.append(f"Sankey flow does not balance at {names}.")
+        frame.label("Unbalanced flows", 0, .83 if footer else .92, 1, .08, 11, bold=True,
+                    element_key="sankey:balance")
+    lower = (.09 if footer else 0) + (.09 if imbalances else 0)
     upper = .08 if unit else 0
     if unit:
-        frame.label(unit, 0, (y - frame.y) / frame.h, 1, .075, 11, color=frame.muted)
+        frame.label(unit, 0, (y - frame.y) / frame.h, 1, .075, 11, color=frame.muted, element_key="exhibit:unit")
     if footer:
-        frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted)
+        frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted, element_key="exhibit:footer")
     width = w * .72 if notes else w
     body = ExhibitCanvas(document, slide, (x, y + h * upper, width, h * (1 - lower - upper)),
-                         highlight_band=details.highlight_band if details else None)
+                         highlight_band=details.highlight_band if details else None, recipe=recipe)
     DRAW[type(visual)](body, visual)
     if notes:
         rail = ExhibitCanvas(document, slide, (x, body.y, w, body.h))
         step = min(.29, .98 / len(notes))
-        for i, (value, target) in enumerate(notes):
+        for i, (value, target, identity) in enumerate(notes):
             top = i * step + .012
-            rail.shape(.773, top, .227, step * .91, rail.surface, border=rail.rule)
-            rail.label(value, .788, top + .009, .197, step * .84, 13, emphasis=details.emphasis if details else ())
+            rail.shape(.773, top, .227, step * .91, rail.surface, border=rail.rule, element_key=f"exhibit:{identity}:panel")
+            rail.label(value, .788, top + .009, .197, step * .84, 13, emphasis=details.emphasis if details else (),
+                       element_key=f"exhibit:{identity}:text")
             if target in body.marks:
                 mx, my = body.marks[target]
-                rail.line((.773, top + step * .46), (.72 * mx, my), color=rail.muted, arrow=True)
+                rail.line((.773, top + step * .46), (.72 * mx, my), color=rail.muted, arrow=True,
+                          element_key=f"exhibit:{identity}:leader")

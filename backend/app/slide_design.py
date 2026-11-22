@@ -11,6 +11,7 @@ from app.composition import OutlineItem, SlideContent, compose
 from app.consulting import consulting_rules
 from app.design import readable
 from app.domain import Chart, Contract, Image, Line, Shape, SlideSpec, Table, Text, TextSpan
+from app.exhibit_evidence import STATUS_KEY, evidence_label, exhibit_bindings, with_badge
 from app.rendering import fit_image, preview, validate_slide
 from app.storage import Storage
 
@@ -21,7 +22,17 @@ NON_FEATURE_BRIEF = re.compile(r"\b(steps?|sequence|workflow|risks?|phases?|use 
 
 def recipe_options(part, content, document):
     if content.visual:
-        return ["standard"]
+        visual = content.visual
+        if visual.type == "decision-matrix" and not visual.recommended:
+            return ["standard"]
+        if visual.type == "roadmap" and not any(item.kind in {"milestone", "gate"} for item in visual.items):
+            return ["standard"]
+        alternate = {
+            "ranked-bar": "exhibit_callouts", "waterfall": "exhibit_callouts",
+            "decision-matrix": "exhibit_callouts", "sankey": "exhibit_callouts",
+            "architecture": "exhibit_horizontal", "roadmap": "exhibit_milestones",
+        }.get(visual.type)
+        return ["standard", alternate] if alternate else ["standard"]
     theme = document.theme
     rules = theme.design or (consulting_rules(theme) if theme.profile == "consulting" else None)
     if not rules:
@@ -116,11 +127,17 @@ def build_slide(part, content, document, index, images, brand=None, *, image_rat
     options = recipe_options(part, content, document) if not brand else ["standard"]
     preferred = recipe or part.recipe
     selected = preferred if preferred in options else options[0]
+    if content.visual and not content.annotations and part.annotations:
+        content = content.model_copy(update={"annotations": part.annotations})
     slide = compose(part, content, document, index, images, brand, data_driven=data_driven,
                     image_ratio=image_ratio, web_image_ratio=web_image_ratio, recipe=selected)
     slide.warnings.extend(content.evidence_warnings)
     if slide_id:
         slide.id = slide_id
+    chart = next((element for element in slide.elements if isinstance(element, Chart)), None)
+    bindings = exhibit_bindings(content, document.sources, slide.source_ids, chart)
+    if chart and bindings:
+        slide = with_badge(document, slide, evidence_label(bindings))
     if not brand and (kit := document.theme.brand_kit) and kit.logo_asset_id and len(slide.elements) < 100:
         logo = Image(x=.939, y=.942, w=.049, h=.044, asset_id=kit.logo_asset_id,
                      alt="Brand logo", element_key="brand:logo")
@@ -151,7 +168,8 @@ def build_slide(part, content, document, index, images, brand=None, *, image_rat
                            recipe=selected, visual_priority=part.visual_priority or part.key_message,
                            image_ratio=image_ratio, web_image_ratio=web_image_ratio, data_driven=data_driven,
                            id_namespace=id_namespace, generated_ids=[e.id for e in slide.elements], generated_background=slide.background,
-                           generated_notes=slide.notes, identity_version=2)
+                           generated_notes=slide.notes, identity_version=2, available_recipes=options,
+                           value_bindings=[binding.model_dump(mode="json") for binding in bindings])
     snapshot_generated(slide)
     return slide
 
@@ -259,13 +277,14 @@ def review_layouts(document, slide, index, images, get_asset, *, artwork=None, e
     return max(finalists, key=lambda item: design_score(item[0], part, document.theme))
 
 
-def recompose_slide(slide, document, index, *, keep_recipe):
+def recompose_slide(slide, document, index, *, keep_recipe, replacement_content=None, selected_recipe=None, brand=None):
     spec = slide.spec
-    if not spec or slide.brand_layout_index is not None:
+    if not spec or (slide.brand_layout_index is not None and brand is None):
         return None
     try:
         part = OutlineItem.model_validate(spec.plan)
-        content = SlideContent.model_validate(spec.content)
+        content = replacement_content or SlideContent.model_validate(spec.content)
+        content.source_ids = slide.source_ids[:12]
         generated = set(spec.generated_ids)
         old = {e.id: e for e in slide.elements}
         removed = set(spec.deleted_ids) | (generated - old.keys())
@@ -274,9 +293,9 @@ def recompose_slide(slide, document, index, *, keep_recipe):
         images = {e.asset_id for e in slide.elements if isinstance(e, Image)}
         if content.image_asset_id:
             images.add(content.image_asset_id)
-        recipe = spec.recipe if keep_recipe else recipe_options(part, content, document)[0]
+        recipe = selected_recipe or (spec.recipe if keep_recipe else recipe_options(part, content, document)[0])
         deck_so_far = document.model_copy(update={"slides": document.slides[:index]})
-        result = build_slide(part, content, deck_so_far, index, images, recipe=recipe,
+        result = build_slide(part, content, deck_so_far, index, images, brand, recipe=recipe,
                              data_driven=spec.data_driven, image_ratio=spec.image_ratio,
                              web_image_ratio=spec.web_image_ratio, slide_id=slide.id, id_namespace=spec.id_namespace)
         if result.spec is None:
@@ -289,6 +308,9 @@ def recompose_slide(slide, document, index, *, keep_recipe):
         snapshot_generated(result)
         new_elements = []
         for element in result.elements:
+            if element.element_key == STATUS_KEY:
+                new_elements.append(element)
+                continue
             if element.id in removed:
                 continue
             previous = old.get(element.id)
@@ -296,6 +318,10 @@ def recompose_slide(slide, document, index, *, keep_recipe):
             if previous and previous.edited and baseline is not None:
                 changes = {field: value for field, value in generated_state(previous).items()
                            if value != baseline.get(field) and (not layout_changed or field not in GEOMETRY_FIELDS)}
+                if replacement_content:
+                    new = generated_state(element)
+                    changes = {field: value for field, value in changes.items()
+                               if field not in {"text", "spans", "rows"} or new.get(field) == baseline.get(field)}
                 if changes:
                     candidate = {**element.model_dump(mode="json"), **changes, "edited": True}
                     try:
@@ -306,7 +332,8 @@ def recompose_slide(slide, document, index, *, keep_recipe):
                                      "edited": True}
                         element = type(element).model_validate(candidate)
             new_elements.append(element)
-        new_elements.extend(element.model_copy(deep=True) for element in slide.elements if element.id not in generated)
+        new_elements.extend(element.model_copy(deep=True) for element in slide.elements
+                            if element.id not in generated and element.element_key != STATUS_KEY)
         result.elements = new_elements
         if len(result.elements) > 100:
             return None

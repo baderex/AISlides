@@ -1,7 +1,7 @@
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
-import { Answer, Asset, CreatePresentation, Deck, EditPreview, ExportReview, GenerationCapabilities, LibrarySkill, Presentation, PresentationSummary, QuestionBatch, Skill, Slide, Version } from './models';
+import { Answer, Asset, CreatePresentation, Deck, EditPreview, ExhibitRecipe, ExhibitVisual, ExportReview, GenerationCapabilities, LibrarySkill, Presentation, PresentationSummary, QuestionBatch, Skill, Slide, Version } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class Api {
@@ -35,6 +35,10 @@ export class Api {
   answer(id: string, answers: Answer[]) { return firstValueFrom(this.http.post(this.url(id, '/answers'), { answers })); }
   save(id: string, revision: number, document: Deck, label: string) {
     return firstValueFrom(this.http.patch<Presentation>(this.url(id), { revision, document, label }));
+  }
+  editExhibit(id: string, revision: number, slide: Slide, visual: ExhibitVisual, recipe: ExhibitRecipe, illustrative: boolean) {
+    return firstValueFrom(this.http.post<Slide>(this.url(id, '/slides/' + slide.id + '/exhibit'),
+      { revision, slide, visual, recipe, illustrative }));
   }
   upload(file: File) {
     const data = new FormData();

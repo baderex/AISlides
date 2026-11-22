@@ -482,6 +482,9 @@ def connector_points(line, x, y, width, height, nodes):
 
 
 def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, artwork=None) -> bytes:
+    from app.exhibit_evidence import display_evidence
+
+    slide = display_evidence(document, slide)
     ptw, pth = physical(document)
     scale = pixel_width / ptw
     bounds = pixel_width, round(pth * scale)
@@ -512,7 +515,9 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                 draw_raster_text(ink, layout, el.color)
             layer = text_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Shape):
-            if el.shape == "triangle":
+            if el.polygon:
+                draw.polygon([(px * (w - 1), py * (h - 1)) for px, py in el.polygon], fill=el.fill, outline=el.border)
+            elif el.shape == "triangle":
                 draw.polygon([(w/2, 0), (w-1, h-1), (0, h-1)], fill=el.fill, outline=el.border)
             elif el.shape == "diamond":
                 draw.polygon([(w/2, 0), (w-1, h/2), (w/2, h-1), (0, h/2)], fill=el.fill, outline=el.border)
@@ -630,11 +635,14 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
 
 
 def to_pdf(document: Document, get_asset) -> bytes:
+    from app.exhibit_evidence import display_evidence, evidence_notes
+
     buffer = io.BytesIO()
     width, height = physical(document)
     pdf = canvas.Canvas(buffer, pagesize=(width, height))
     pdf.setTitle(document.title)
     for slide in document.slides:
+        slide = display_evidence(document, slide)
         pdf.setFillColor(HexColor(slide.background))
         pdf.rect(0, 0, width, height, stroke=0, fill=1)
         elements = list(flattened(slide.elements))
@@ -671,7 +679,15 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 pdf.setFillColor(HexColor(el.fill))
                 if el.border:
                     pdf.setStrokeColor(HexColor(el.border))
-                if el.shape == "ellipse":
+                if el.polygon:
+                    path = pdf.beginPath()
+                    first, *rest = el.polygon
+                    path.moveTo(first[0] * w, (1 - first[1]) * h)
+                    for px, py in rest:
+                        path.lineTo(px * w, (1 - py) * h)
+                    path.close()
+                    pdf.drawPath(path, stroke=int(bool(el.border)), fill=1)
+                elif el.shape == "ellipse":
                     pdf.ellipse(0, 0, w, h, stroke=int(bool(el.border)), fill=1)
                 elif el.shape == "round":
                     pdf.roundRect(0, 0, w, h, min(w,h)*.12, stroke=int(bool(el.border)), fill=1)
@@ -804,6 +820,8 @@ def to_pdf(document: Document, get_asset) -> bytes:
                     for i, category in enumerate(el.category_labels()):
                         pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])
             pdf.restoreState()
+        if lineage := evidence_notes(document, slide):
+            pdf.textAnnotation(lineage, Rect=(.015 * width, .01 * height, .048 * width, .043 * height))
         pdf.showPage()
     pdf.save()
     return buffer.getvalue()

@@ -24,4 +24,17 @@ describe('Editor commands', () => {
     expect(editor.dirty()).toBe(true);
     expect(deck.slides[0].elements).toHaveLength(0);
   });
+
+  it('downgrades the visible evidence status immediately when a value label is edited', () => {
+    TestBed.configureTestingModule({providers: [Editor]});
+    const editor = TestBed.inject(Editor);
+    editor.accept(structuredClone(deck), true);
+    const value = editor.addText();
+    const badge = editor.addText();
+    editor.updateElement(badge.id, {element_key: 'exhibit:evidence', text: 'Exhibit data: source verified'});
+    editor.updateElement(value.id, {text: '12'});
+    expect(editor.selectedText()?.text).toBe('Exhibit data: unverified');
+    editor.undo();
+    expect(editor.selectedText()?.text).toBe('Exhibit data: source verified');
+  });
 });

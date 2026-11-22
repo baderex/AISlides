@@ -3,17 +3,19 @@ import io
 from fastapi.testclient import TestClient
 from PIL import Image
 from pptx import Presentation
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 from pytest import mark, raises
 
 from app.branding import inspect_template
 from app.composition import Intent, Outline, OutlineItem, SlideContent
 from app.domain import Document, Line, Shape, Source, Table, Text, Theme
+from app.export_review import add_pdf_evidence
 from app.powerpoint import to_pptx
 from app.main import app
 from app.providers import Intelligence, exhibit_response_schema, strict_response_schema
 from app.rendering import preview, to_pdf, validate_slide
-from app.slide_design import build_slide, recompose_slide
+from app.exhibit_evidence import DERIVED, ILLUSTRATIVE, STATUS_KEY, UNVERIFIED
+from app.slide_design import LayoutReview, build_slide, recipe_options, recompose_slide, review_layouts
 from app.storage import Storage
 from app.visuals import VISUAL_LAYOUTS
 from test_workflow import create, work
@@ -229,3 +231,211 @@ def test_qualitative_two_by_two_uses_quadrants_without_source_scores():
     assert not slide.warnings
     assert labels["Quick win"].x < labels["Defer"].x
     assert labels["Quick win"].y < labels["Defer"].y
+
+
+def sourced_waterfall():
+    part = OutlineItem(title="Operating profit bridge", layout="chart")
+    source = Source(id="ledger", title="Profit ledger", excerpt=(
+        "Operating profit Opening: $120m. Operating profit Pricing: −$15m. Operating profit Volume: $8m."
+    ))
+    deck = Document(title=part.title, sources=[source])
+    content = SlideContent(title=part.title, source_ids=[source.id], visual={
+        "type": "waterfall", "metric": "Operating profit", "unit": "$m", "baseline": 120,
+        "start_label": "Opening", "end_label": "Closing", "rows": rows([("Pricing", [-15]), ("Volume", [8])]),
+    }, exhibit_observations=[
+        {"source_id": source.id, "metric": "Operating profit", "period": label,
+         "amount": amount, "currency": "$", "unit": "m", "quote": quote}
+        for label, amount, quote in zip(("Opening", "Pricing", "Volume"), (120, -15, 8), source.excerpt.split(". "))
+    ])
+    return part, content, deck
+
+
+def evidence_status(slide):
+    return next(el.text for el in slide.elements if el.element_key == STATUS_KEY)
+
+
+def test_value_bindings_are_exported_and_a_citation_does_not_verify_an_invented_adjustment():
+    part, content, deck = sourced_waterfall()
+    slide = build_slide(part, content, deck, 0, set())
+    deck.slides = [slide]
+    assert evidence_status(slide) == DERIVED
+    bindings = {row["path"]: row for row in slide.spec.value_bindings}
+    assert bindings["baseline"]["source_observation_id"].startswith("obs-")
+    assert bindings["ending-total"]["status"] == "derived"
+    assert bindings["ending-total"]["inputs"] == ["baseline", "rows/0/values/0", "rows/1/values/0"]
+    assert bindings["ending-total"]["value"] == "113.0"
+
+    powerpoint = Presentation(io.BytesIO(to_pptx(deck, None)))
+    notes = powerpoint.slides[0].notes_slide.notes_text_frame.text
+    assert "Operating profit Pricing:" in notes
+    assert "ending-total" in notes
+    pdf = PdfReader(io.BytesIO(to_pdf(deck, None)))
+    page = pdf.pages[0]
+    assert DERIVED in page.extract_text()
+    assert "ending-total" in page["/Annots"][0].get_object()["/Contents"]
+
+    content.visual.rows[0].values[0] = 12
+    unsupported = build_slide(part, content, deck, 0, set())
+    assert evidence_status(unsupported) == UNVERIFIED
+    assert unsupported.spec.value_bindings[1]["status"] == "unverified"
+    content.illustrative_exhibit = True
+    assert evidence_status(build_slide(part, content, deck, 0, set())) == ILLUSTRATIVE
+
+    value_label = next(el for el in slide.elements if el.element_key == "waterfall:driver:Pricing:value-label")
+    value_label.text = "$12m"
+    downgraded = Presentation(io.BytesIO(to_pptx(deck, None)))
+    labels = [shape.text for shape in downgraded.slides[0].shapes if shape.has_text_frame]
+    assert UNVERIFIED in labels and DERIVED not in labels
+
+
+def test_research_quote_must_match_the_figures_currency_scale_and_meaning():
+    part, content, deck = sourced_waterfall()
+    for text, currency, unit in (
+        ("Operating profit Pricing fell from −$15m.", "$", "m"),
+        ("Operating profit Pricing: −15m. Other values in $m.", "$", "m"),
+        ("Operating profit Pricing: −$15bn. Other values in m.", "$", "m"),
+    ):
+        observation = content.exhibit_observations[1]
+        observation.quote = text
+        observation.currency = currency
+        observation.unit = unit
+        deck.sources[0].excerpt = text
+        assert build_slide(part, content, deck, 0, set()).spec.value_bindings[1]["status"] == "unverified"
+
+
+def test_free_form_numeric_callout_does_not_inherit_chart_verification():
+    part, content, deck = sourced_waterfall()
+    part.annotations = ["Pricing headwind will cost $12m next year"]
+    slide = build_slide(part, content, deck, 0, set())
+    assert evidence_status(slide) == UNVERIFIED
+    assert any(row["path"] == "annotations/0" and row["status"] == "unverified" for row in slide.spec.value_bindings)
+
+
+def test_bubble_geometry_can_bind_metrics_with_different_units():
+    part = OutlineItem(title="North performance", layout="chart")
+    entries = [("Share", 10, "", "%", "Share North: 10%."),
+               ("Growth", 3, "", "%", "Growth North: 3%."),
+               ("Sales", 12, "$", "m", "Sales North: $12m.")]
+    deck = Document(title=part.title, sources=[Source(
+        id="ledger", title="Performance ledger", excerpt=" ".join(row[4] for row in entries))])
+    content = SlideContent(title=part.title, source_ids=["ledger"], visual={
+        "type": "bubble-chart", "horizontal_label": "Share", "vertical_label": "Growth", "size_label": "Sales",
+        "horizontal_unit": "%", "vertical_unit": "%", "size_unit": "$m",
+        "points": [{"label": "North", "horizontal": 10, "vertical": 3, "size": 12}],
+    }, exhibit_observations=[
+        {"source_id": "ledger", "metric": metric, "period": "North", "amount": amount,
+         "currency": currency, "unit": unit, "quote": quote}
+        for metric, amount, currency, unit, quote in entries
+    ])
+    slide = build_slide(part, content, deck, 0, set())
+    assert evidence_status(slide) == DERIVED
+    assert {row["path"] for row in slide.spec.value_bindings if row["status"] == "verified"} == {
+        "points/0/horizontal", "points/0/vertical", "points/0/size",
+    }
+
+
+def test_native_pdf_conversion_can_preserve_the_exhibit_evidence_annotation():
+    part, content, deck = sourced_waterfall()
+    deck.slides = [build_slide(part, content, deck, 0, set())]
+    native_pdf = PdfWriter()
+    native_pdf.add_blank_page(960, 540)
+    raw = io.BytesIO()
+    native_pdf.write(raw)
+    reader = PdfReader(io.BytesIO(add_pdf_evidence(raw.getvalue(), deck)))
+    assert "ending-total" in reader.pages[0]["/Annots"][0].get_object()["/Contents"]
+
+
+@mark.parametrize("kind", ["ranked-bar", "waterfall", "decision-matrix", "architecture", "roadmap", "sankey"])
+def test_semantic_recipe_candidates_change_layout_and_share_element_ids(kind):
+    part = OutlineItem(title="Compare the exhibit layouts", layout=VISUAL_LAYOUTS[kind])
+    content = SlideContent(title=part.title, visual={"type": kind, **CASES[kind]}, source_ids=["brief"])
+    deck = Document(title=part.title, sources=[Source(id="brief", title="Inputs")])
+    standard, alternate = recipe_options(part, content, deck)
+    original = build_slide(part, content, deck, 0, set(), recipe=standard)
+    second = build_slide(part, content, deck, 0, set(), recipe=alternate, slide_id=original.id)
+    assert not validate_slide(deck, second, set())
+    original_keys = {el.id: el for el in original.elements if (el.element_key or "").startswith(kind + ":")}
+    moved = [el for el in second.elements if el.id in original_keys and
+             (el.x, el.y, el.w, el.h) != (original_keys[el.id].x, original_keys[el.id].y,
+                                          original_keys[el.id].w, original_keys[el.id].h)]
+    assert moved
+
+
+def test_visual_review_receives_both_ranked_bar_candidates():
+    part = OutlineItem(title="Rank the regions", layout="chart")
+    content = SlideContent(title=part.title, visual={"type": "ranked-bar", **CASES["ranked-bar"]},
+                           source_ids=["brief"])
+    deck = Document(title=part.title, sources=[Source(id="brief", title="Inputs")])
+    slide = build_slide(part, content, deck, 0, set())
+
+    def evaluate(_part, recipes, _png):
+        assert recipes == ["standard", "exhibit_callouts"]
+        return LayoutReview(ratings=[{"candidate": i, **dict.fromkeys(
+            ("hierarchy", "emphasis", "balance", "imagery", "style_match"), i)
+        } for i in (1, 2)])
+
+    winner, _ = review_layouts(deck, slide, 0, set(), lambda _: None, evaluate=evaluate)
+    assert winner.spec.recipe == "exhibit_callouts"
+
+
+def test_sankey_uses_proportional_editable_ribbons_and_flags_a_nonconserving_node():
+    part = OutlineItem(title="Track the flow", layout="process")
+    content = SlideContent(title=part.title, visual={"type": "sankey", **CASES["sankey"]},
+                           source_ids=["brief"])
+    deck = Document(title=part.title, sources=[Source(id="brief", title="Inputs")])
+    slide = build_slide(part, content, deck, 0, set())
+    deck.slides = [slide]
+    ribbons = [element for element in slide.elements if isinstance(element, Shape) and element.polygon]
+    assert len(ribbons) == 2
+    thicknesses = [el.h * (el.polygon[-1][1] - el.polygon[0][1]) for el in ribbons]
+    assert abs(thicknesses[1] - 2 * thicknesses[0]) < 1e-12
+    assert any("does not balance at API" in warning for warning in slide.warnings)
+    assert any(row["path"] == "nodes/b/balance" and row["value"] == "-1.0" for row in slide.spec.value_bindings)
+    powerpoint = Presentation(io.BytesIO(to_pptx(deck, None)))
+    assert sum(shape._element.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}custGeom") is not None
+               for shape in powerpoint.slides[0].shapes) == 2
+
+
+def test_dense_architecture_uses_hierarchical_geometry_and_keeps_its_semantic_edges():
+    part = OutlineItem(title="Service architecture", layout="process")
+    nodes = [{"id": f"service-{i}", "label": f"Service {i}"} for i in range(8)]
+    edges = [{"source": nodes[a]["id"], "target": nodes[b]["id"]}
+             for a, b in [(0, 3), (0, 4), (1, 2), (1, 4), (2, 5), (3, 6), (4, 6), (2, 7), (3, 7), (7, 1)]]
+    content = SlideContent(title=part.title, visual={"type": "architecture", "nodes": nodes, "edges": edges})
+    deck = Document(title=part.title)
+    slide = build_slide(part, content, deck, 0, set())
+    connectors = [el for el in slide.elements if isinstance(el, Line)]
+    generated_nodes = {el.id for el in slide.elements if (el.element_key or "").endswith(":node")}
+    assert len(generated_nodes) == len(nodes)
+    assert len([el for el in connectors if el.start_anchor and el.end_anchor]) == len(edges)
+    assert all(el.start_anchor.shape_id in generated_nodes for el in connectors if el.start_anchor)
+    assert slide.spec.content["visual"]["edges"] == [e.model_dump(mode="json") for e in content.visual.edges]
+    assert not validate_slide(deck, slide, set())
+
+
+def test_exhibit_editor_rebuilds_and_preserves_visual_edits_through_recipe_switch():
+    part, content, deck = sourced_waterfall()
+    slide = build_slide(part, content, deck, 0, set())
+    deck.slides = [slide]
+    client = TestClient(app)
+    path = create(client, generate=False)
+    version = client.get(path).json()
+    saved = client.patch(path, json={"revision": version["revision"], "document": deck.model_dump(mode="json")})
+    assert saved.status_code == 200, saved.text
+    current = saved.json()
+    draft = current["document"]["slides"][0]
+    bar = next(el for el in draft["elements"] if el["element_key"] == "waterfall:driver:Pricing:bar")
+    bar.update(fill="#395366", edited=True)
+    visual = content.visual.model_dump(mode="json")
+    visual["rows"][0]["values"][0] = -18
+    result = client.post(f'{path}/slides/{slide.id}/exhibit', json={
+        "revision": current["revision"], "slide": draft, "visual": visual, "recipe": "exhibit_callouts",
+    })
+    assert result.status_code == 200, result.text
+    edited = result.json()
+    assert edited["spec"]["recipe"] == "exhibit_callouts"
+    assert edited["spec"]["content"]["visual"]["rows"][0]["values"] == [-18]
+    assert any(el["id"] == bar["id"] and el["fill"] == "#395366" for el in edited["elements"])
+    assert any(el.get("text") == UNVERIFIED for el in edited["elements"])
+    assert any(el.get("text") == "110" for el in edited["elements"])
+    assert client.get(path).json()["revision"] == current["revision"]

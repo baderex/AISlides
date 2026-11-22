@@ -59,6 +59,8 @@ def chart_number_format(element, decimals):
 
 
 def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -> bytes:
+    from app.exhibit_evidence import display_evidence, evidence_notes
+
     presentation = Presentation(io.BytesIO(get_asset(brand.asset_id))) if brand else Presentation()
     if brand:
         layouts = native_layouts(presentation)
@@ -115,7 +117,13 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 style = {"rect": MSO_AUTO_SHAPE_TYPE.RECTANGLE, "round": MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
                          "ellipse": MSO_AUTO_SHAPE_TYPE.OVAL, "triangle": MSO_AUTO_SHAPE_TYPE.ISOSCELES_TRIANGLE,
                          "diamond": MSO_AUTO_SHAPE_TYPE.DIAMOND}[el.shape]
-                obj = shapes.add_shape(style, x, y, w, h)
+                if el.polygon:
+                    first, *rest = [(round(px * w), round(py * h)) for px, py in el.polygon]
+                    builder = shapes.build_freeform(*first)
+                    builder.add_line_segments(rest, close=True)
+                    obj = builder.convert_to_shape(x, y)
+                else:
+                    obj = shapes.add_shape(style, x, y, w, h)
                 obj.fill.solid()
                 obj.fill.fore_color.rgb = color(el.fill)
                 alpha(obj._element.spPr.solidFill, el.opacity)
@@ -223,6 +231,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
 
     sources = {source.id: source for source in document.sources}
     for item in document.slides:
+        item = display_evidence(document, item)
         placeholders = None
         if brand:
             selected = layout_for_slide(brand, item)
@@ -237,10 +246,11 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
         if brand:
             for placeholder in placeholders.values():
                 placeholder._element.getparent().remove(placeholder._element)
-        if item.notes or item.source_ids:
+        lineage = evidence_notes(document, item)
+        if item.notes or item.source_ids or lineage:
             references = [f"{source.title} — {source.url}" if source.url else source.title
                           for source in (sources[key] for key in item.source_ids)]
-            slide.notes_slide.notes_text_frame.text = "\n\n".join(filter(None, [item.notes, "\n".join(references)]))
+            slide.notes_slide.notes_text_frame.text = "\n\n".join(filter(None, [item.notes, "\n".join(references), lineage]))
     output = io.BytesIO()
     presentation.save(output)
     return output.getvalue()

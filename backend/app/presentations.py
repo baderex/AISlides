@@ -18,6 +18,11 @@ def latest_job(db, item_id):
 
 
 def persist(db, item, document: Document, label: str | None = None):
+    from app.exhibit_evidence import display_evidence
+
+    checked = [display_evidence(document, slide) for slide in document.slides]
+    document = document.model_copy(update={"slides": [slide if len(slide.elements) <= 100 else previous
+                                                      for slide, previous in zip(checked, document.slides)]})
     item.document = document.model_dump(mode="json")
     item.title = document.title
     item.revision += 1
