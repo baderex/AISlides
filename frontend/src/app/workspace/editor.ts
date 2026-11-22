@@ -71,7 +71,12 @@ export class Editor {
   }
 
   updateElement(id: string, change: ElementUpdate) {
-    this.updateSlide(slide => { const element = slide.elements.find(el => el.id === id); if (element) Object.assign(element, change, {edited: true}); });
+    this.updateSlide(slide => {
+      const element = slide.elements.find(el => el.id === id);
+      if (!element) return;
+      if (element.type === 'text' && change.text !== undefined && change.text !== element.text) element.spans = [];
+      Object.assign(element, change, {edited: true});
+    });
   }
 
   removeElement() {
@@ -103,7 +108,9 @@ export class Editor {
       const index = items.findIndex(el => el.id === id);
       if (index < 0 || index + direction < 0 || index + direction >= items.length) return;
       [items[index], items[index+direction]] = [items[index+direction], items[index]];
-      items.forEach((el, layer) => el.z = layer);
+      items.forEach((el, layer) => {
+        if (el.z !== layer) Object.assign(el, {z: layer, edited: true});
+      });
       slide.elements = items;
     });
   }

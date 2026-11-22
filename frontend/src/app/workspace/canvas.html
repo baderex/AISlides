@@ -7,7 +7,8 @@
   @if (aligned('y')) { <span class="alignment-guide horizontal"></span> }
   <ng-template #parts let-elements let-root="root" let-frameWidth="frameWidth" let-frameHeight="frameHeight">
     @for (el of elements; track el.id) {
-      @let g = geometry(el);
+      @let link = root && el.type === 'line' ? connectedLine(el) : null;
+      @let g = link?.geometry ?? geometry(el);
       <div class="slide-element" [class.selected-element]="root && editable() && selected() === el.id"
         [style.left.%]="g.x * 100" [style.top.%]="g.y * 100" [style.width.%]="g.w * 100" [style.height.%]="g.h * 100"
         [style.z-index]="el.z + 1000" [style.transform]="'rotate(' + el.rotation + 'deg)'"
@@ -18,16 +19,18 @@
           @switch (el.type) {
             @case ('text') {
               <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="el.font" [style.color]="el.color"
-                [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">{{ el.text }}</div>
+                [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">@for (run of textRuns(el); track $index) {<span [style.color]="run.color" [style.font-weight]="run.bold ? 700 : 400">{{ run.text }}</span>}</div>
             }
             @case ('shape') { <div class="slide-shape" [class]="el.shape" [style.background]="el.fill" [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div> }
             @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
             @case ('line') {
               <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-connector" aria-hidden="true">
-                <svg:path [attr.d]="linePath(el.direction)" fill="none" [attr.stroke]="el.color"
+                <svg:path [attr.d]="link?.path ?? linePath(el.direction)" fill="none" [attr.stroke]="el.color"
                   [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" />
+                @if (link?.startTip) { <svg:polygon [attr.points]="link?.startTip" [attr.fill]="el.color" /> }
+                @if (link?.endTip) { <svg:polygon [attr.points]="link?.endTip" [attr.fill]="el.color" /> }
               </svg>
-              @if (el.arrows === 'end' || el.arrows === 'both') {
+              @if (!link && (el.arrows === 'end' || el.arrows === 'both')) {
                 <span class="connector-tip" [attr.data-direction]="el.direction || 'diagonal'" [style.background]="el.color"></span>
                 @if (el.arrows === 'both') {
                   <span class="connector-tip start" [attr.data-direction]="el.direction || 'diagonal'" [style.background]="el.color"></span>

@@ -28,6 +28,13 @@ def contains(text: str, phrase: str) -> bool:
     return bool(normalized and f" {normalized} " in f" {key(text)} ")
 
 
+def exact_numeric_claim(text: str, claim: str) -> bool:
+    # A minus sign, currency symbol, decimal point or percent mark can change the claim.
+    normalized = " ".join(text.casefold().replace("−", "-").split())
+    quoted = " ".join(claim.casefold().replace("−", "-").split())
+    return bool(re.search(rf"(?<![\w+\-]){re.escape(quoted)}(?![\w%])", normalized))
+
+
 @dataclass
 class Metric:
     label: str
@@ -131,7 +138,10 @@ def comparison_headline(data, sources: list[str]) -> str:
         smaller, larger = (first, second) if low == 0 else (second, first)
         percent = ((larger.total - smaller.total) / larger.total * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP)
         if percent:
-            return f"{data.categories[low]} running costs are {percent}% lower"
+            category = data.categories[low]
+            if category[-1:].casefold() == "s":
+                return f"{category[0].upper()}{category[1:]} cost {percent}% less to run"
+            return f"{category[0].upper()}{category[1:]} operating costs are {percent}% lower"
     return ""
 
 
@@ -167,6 +177,22 @@ def reconcile_table(rows, metrics: list[Metric]) -> None:
                     row[index] = display_value(metric.observations[category])
 
 
+def selection_headline(content, sources: list[str]) -> str:
+    rows = {key(row[0]): row[0] for row in content.table[1:] if row and row[0].strip()}
+    for source in sources:
+        options = re.finditer(
+            r"\b(?:plan|deploy|allocate|assign|pilot)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+            r"([A-Za-z][A-Za-z -]{0,26}?)\s+each\s+(?:at|to)\s+([^;,!?.\n]+?)\s+and\s+([^;,!?.\n]+)",
+            source, re.I,
+        )
+        for match in options:
+            selected = [rows.get(key(match[i])) for i in (3, 4)]
+            if all(selected) and selected[0] != selected[1]:
+                content.table_focus = selected
+                return f"{selected[0]} and {selected[1]} each get {match[1].lower()} {match[2]}"
+    return ""
+
+
 def reconcile_readout(readout, metrics: list[Metric]) -> str:
     results = {}
     for point in readout.metrics:
@@ -198,6 +224,53 @@ def reconcile_readout(readout, metrics: list[Metric]) -> str:
     return ""
 
 
+def reconcile_diagram(diagram, sources: list[str]) -> None:
+    """Preserve explicit participants and conditions in an editable flow."""
+    source = "\n".join(sources)
+    status = re.search(
+        r"\bmay\s+(?:return|reply with|respond with)\s+(\d{3}\s+[A-Za-z]+(?:\s+[A-Za-z]+){0,3}?)"
+        r"(?=\s+(?:during|when|if|to|in|for)\b|[.,;!?]|$)", source, re.I,
+    )
+    if status:
+        exact = status[1]
+        for lane in diagram.lanes:
+            for node in lane.nodes:
+                if contains(node.label, exact) and not re.search(r"\b(?:may|if|when)\b", node.label, re.I):
+                    node.label = f"May return {exact}"[:46]
+    if len(diagram.lanes) == 1:
+        lane = diagram.lanes[0]
+        actor = re.search(r"\b(browser|client|application|app|device)\s+requests?\s+(?:a|an|the)\s+(\w+)", source, re.I)
+        service = re.search(r"\b(server|origin|API|backend|service)\s+(?:may\s+)?(?:return|repl|respond)", source, re.I)
+        if actor and service and lane.kind == "flow" and len(lane.nodes) == 3:
+            first, second, third = lane.nodes
+            if (re.search(r"\brequest\w*\b", f"{first.label} {first.detail}", re.I) and
+                    re.search(r"\bresponse\b|\breceive\w*\b", f"{second.label} {second.detail}", re.I) and
+                    re.search(r"\b(?:stor|sav|cach)\w*\b", f"{third.label} {third.detail}", re.I)):
+                if not contains(first.label, service[1]) and not contains(second.label, service[1]):
+                    first.label, first.detail, first.role = actor[1].capitalize(), f"Requests the {actor[2]}", "actor"
+                    second.detail = second.detail or second.label
+                    second.label, second.role = service[1].upper() if service[1].casefold() == "api" else service[1].capitalize(), "service"
+                second.incoming = second.incoming or "Request / response"
+                second.two_way = True
+    # Drop an unfinished tail from responses that run into the schema limit.
+    recap = diagram.recap.strip()
+    if recap and not recap.endswith((".", "!", "?")):
+        if end := re.search(r"^(.+[.!?])\s+[^.!?]+$", recap):
+            recap = end[1]
+    diagram.recap = recap
+
+
+def requested_closing_action(prompt: str) -> str:
+    match = re.search(
+        r"\b(?:close|end|finish)\s+with\s+(?:a request|an invitation|a call)\s+to\s+([^.!?;\n]{3,75})",
+        prompt, re.I,
+    )
+    if not match:
+        return ""
+    action = match[1].strip().strip('"“”')
+    return action[0].upper() + action[1:] if action else ""
+
+
 def resolve_headline(part, content, prompt: str, sources, *, strict_copy: bool = False):
     """Reconcile supported observations and choose a grounded display headline."""
     evidence = [prompt, *(source.excerpt for source in sources if source.id in content.source_ids and source.excerpt != prompt)]
@@ -213,27 +286,48 @@ def resolve_headline(part, content, prompt: str, sources, *, strict_copy: bool =
             content.subtitle = "Illustrative figures" if contains(prompt, "illustrative") else ""
     if content.table:
         reconcile_table(content.table, metrics)
+        if selection := selection_headline(content, evidence):
+            derived = selection
+            content.subtitle = "Illustrative figures" if contains(prompt, "illustrative") else ""
     if content.readout:
         derived = reconcile_readout(content.readout, metrics) or derived
         if derived and contains(prompt, "illustrative"):
             content.subtitle = "Illustrative figures"
+    if content.diagram:
+        reconcile_diagram(content.diagram, evidence)
+    if content.decision:
+        if any(contains(source, "pause expansion") and re.search(r"\bif any gate\b", source, re.I)
+               for source in evidence):
+            derived = "Pause expansion if any gate is missed"
+    elif part.layout == "closing" and (action := requested_closing_action(prompt)):
+        derived = action
+        content.next_step = ""
+        content.subtitle = ""
     if strict_copy:
-        # Brief-only decks cannot claim a feature applies universally without a source saying so.
+        unsupported = {
+            "universal compatibility": r"\s+(?:for|with) universal compatibility[^.]*",
+            "widely available": r"\bwidely available\s+",
+            "fast charging": r"\bfast\s+(?=charg(?:e|ing)\b)",
+        }
         for point in content.points:
-            if not any(contains(source, "universal compatibility") for source in evidence):
-                point.body = re.sub(r"\s+(?:for|with) universal compatibility.*?(?=\.|$)", "", point.body, flags=re.I)
+            for claim, pattern in unsupported.items():
+                if not any(contains(source, claim) for source in evidence):
+                    point.body = re.sub(pattern, "", point.body, flags=re.I).strip()
     explicit = part.layout in {"cover", "section", "quote"} or (part.lock_title and contains(prompt, part.title)) or any(
         key(part.title) == key(match[1]) for match in SCOPED_TITLE.finditer(prompt)
     )
     headline = part.title
     if not explicit:
         for proposal in (derived, part.key_message, part.title):
-            if proposal and (proposal == derived or not NUMERIC_CLAIM.search(proposal) or
-                             any(contains(source, proposal) for source in evidence)):
+            if not proposal or len(proposal) > 96:
+                continue
+            if proposal == derived or not NUMERIC_CLAIM.search(proposal) or any(
+                    exact_numeric_claim(source, proposal) for source in evidence):
                 headline = proposal
                 break
         else:
             neutral = part.topic or re.sub(r"\s+\d+\s*$", "", part.title).strip()
             headline = neutral if not NUMERIC_CLAIM.search(neutral) else "Evidence and findings"
     content.title = headline
-    return part.model_copy(update={"title": headline, "key_message": "" if explicit else headline})
+    return part.model_copy(update={"title": headline, "topic": part.topic or part.title[:180],
+                                   "key_message": "" if explicit else headline[:140]})

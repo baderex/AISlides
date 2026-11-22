@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, JsonValue, model_validator
 
 from app.db import uid
 
@@ -83,6 +83,13 @@ class ElementBase(Contract):
         return self
 
 
+class TextSpan(Contract):
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    color: Color | None = None
+    bold: bool | None = None
+
+
 class Text(ElementBase):
     type: Literal["text"] = "text"
     text: str = Field(max_length=5000)
@@ -91,6 +98,31 @@ class Text(ElementBase):
     font: str = Field(default="Arial", max_length=60)
     bold: bool = False
     align: Literal["left", "center", "right"] = "left"
+    spans: list[TextSpan] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def valid_spans(self):
+        previous = 0
+        for span in self.spans:
+            if not previous <= span.start < span.end <= len(self.text):
+                raise ValueError("Text spans must be ordered, within the text, and non-overlapping")
+            previous = span.end
+        return self
+
+    def text_style(self, start: int, end: int):
+        cursor = start
+        for span in self.spans:
+            if span.end <= start:
+                continue
+            if span.start >= end:
+                break
+            if span.start > cursor:
+                yield self.text[cursor:span.start], self.bold, self.color
+            yield (self.text[max(start, span.start):min(end, span.end)],
+                   self.bold if span.bold is None else span.bold, span.color or self.color)
+            cursor = min(end, span.end)
+        if cursor < end:
+            yield self.text[cursor:end], self.bold, self.color
 
 
 class Shape(ElementBase):
@@ -105,12 +137,19 @@ class Image(ElementBase):
     alt: str = Field(default="", max_length=220)
 
 
+class ConnectorAnchor(Contract):
+    shape_id: Identifier
+    side: Literal["top", "left", "bottom", "right"]
+
+
 class Line(ElementBase):
     type: Literal["line"] = "line"
     color: Color = "#4C52D9"
     weight: float = Field(default=2, ge=0.5, le=20)
     direction: Literal["diagonal", "right", "left", "down", "up"] = "diagonal"
     arrows: Literal["none", "end", "both"] = "none"
+    start_anchor: ConnectorAnchor | None = None
+    end_anchor: ConnectorAnchor | None = None
 
     def endpoints(self, width, height):
         return {
@@ -231,6 +270,28 @@ Element = Annotated[Text | Shape | Image | Line | Table | Chart | Group, Field(d
 Group.model_rebuild()
 
 
+Recipe = Literal[
+    "standard", "editorial_cover", "photo_cover", "decision_cover", "closing_display", "closing_centered",
+    "feature_panels", "feature_rows", "diagram_flow", "diagram_paths", "diagram_vertical",
+    "dense_table", "dense_table_full", "chart", "readout", "allocation", "rollout", "decision",
+]
+
+
+class SlideSpec(Contract):
+    plan: dict[str, JsonValue]
+    content: dict[str, JsonValue]
+    recipe: Recipe = "standard"
+    visual_priority: str = Field(default="", max_length=180)
+    image_ratio: float | None = Field(default=None, gt=0)
+    web_image_ratio: float | None = Field(default=None, gt=0)
+    data_driven: bool = False
+    id_namespace: Identifier | None = None
+    generated_ids: list[Identifier] = Field(default_factory=list, max_length=100)
+    deleted_ids: list[Identifier] = Field(default_factory=list, max_length=1000)
+    generated_background: Color | None = None
+    generated_notes: str = Field(default="", max_length=7000)
+
+
 class Slide(Contract):
     id: Identifier = Field(default_factory=uid)
     title: ShortText
@@ -240,6 +301,7 @@ class Slide(Contract):
     notes: str = Field(default="", max_length=7000)
     source_ids: list[Identifier] = Field(default_factory=list, max_length=20)
     warnings: list[str] = Field(default_factory=list, max_length=30)
+    spec: SlideSpec | None = None
 
     @model_validator(mode="after")
     def unique_elements(self):
