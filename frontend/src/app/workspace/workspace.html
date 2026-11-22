@@ -89,7 +89,7 @@
               <button class="thumbnail" type="button" [class.active]="slide.id === editor.current()?.id" [attr.aria-pressed]="slide.id === editor.current()?.id"
                 [attr.aria-label]="'Slide ' + (index + 1) + ': ' + slide.title" [attr.draggable]="canEdit() && !preview()"
                 (click)="editor.activate(slide.id)" (dragstart)="setDragSlide(slide.id)" (dragover)="$event.preventDefault()" (drop)="dropSlide($event, index)">
-                <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" />
+                <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" [artwork]="artwork(slide)" />
                 <span><b>{{ index + 1 }}</b>{{ slide.title }}</span>
               </button>
             }
@@ -115,7 +115,7 @@
                     <button type="button" class="icon-button bold-button" aria-label="Bold" [attr.aria-pressed]="element.bold" [class.toggled]="element.bold" (click)="editor.updateElement(element.id, {bold: !element.bold})">B</button>
                     <select aria-label="Text alignment" [value]="element.align" (change)="editor.updateElement(element.id, {align: $any($event.target).value})"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select>
                   } @else if (element.type === 'shape') {
-                    <select aria-label="Shape type" [value]="element.shape" (change)="editor.updateElement(element.id, {shape: $any($event.target).value})"><option value="rect">Rectangle</option><option value="round">Rounded</option><option value="ellipse">Ellipse</option><option value="triangle">Triangle</option></select>
+                    <select aria-label="Shape type" [value]="element.shape" (change)="editor.updateElement(element.id, {shape: $any($event.target).value})"><option value="rect">Rectangle</option><option value="round">Rounded</option><option value="ellipse">Ellipse</option><option value="triangle">Triangle</option><option value="diamond">Diamond</option></select>
                     <input aria-label="Shape fill" type="color" [value]="element.fill" (change)="editor.updateElement(element.id, {fill: $any($event.target).value})" />
                   }
                   <button type="button" class="icon-button" title="Send backward" aria-label="Send backward" (click)="editor.reorderElement(-1)"><lucide-icon [img]="i.ArrowDown" [size]="15" /></button>
@@ -127,7 +127,7 @@
             <div class="canvas-stage">
               @if (displayedSlide(); as slide) {
                 <div class="canvas-frame" [style.--zoom]="zoom() / 100" [class.portrait]="presentation.aspect_ratio === '1:1'">
-                  <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio"
+                  <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" [artwork]="artwork(slide)"
                     [editable]="canEdit() && !preview()" [selected]="editor.selected()" [snap]="snap()"
                     (selection)="editor.selected.set($event)" (textEdit)="openText($event)"
                     (transform)="editor.updateElement($event.id, $event.change)" />
@@ -157,7 +157,7 @@
   @if (presenting() && editor.current(); as slide) {
     <div class="presenter" role="dialog" aria-modal="true" aria-label="Presentation mode">
       <button type="button" class="icon-button present-close" aria-label="Exit presentation mode" (click)="presenting.set(false)"><lucide-icon [img]="i.X" [size]="24" /></button>
-      <div class="present-slide" [class.square]="presentation.aspect_ratio === '1:1'" [class.standard]="presentation.aspect_ratio === '4:3'"><studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" /></div>
+      <div class="present-slide" [class.square]="presentation.aspect_ratio === '1:1'" [class.standard]="presentation.aspect_ratio === '4:3'"><studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" [artwork]="artwork(slide)" /></div>
       <div class="present-nav">
         <button type="button" class="icon-button" aria-label="Previous slide" [disabled]="activeIndex() < 1" (click)="stepSlide(-1)"><lucide-icon [img]="i.ChevronLeft" [size]="22" /></button>
         {{ activeIndex() + 1 }} / {{ editor.document()?.slides?.length ?? 0 }}

@@ -124,6 +124,18 @@ def enforce_constraints(theme: Theme, constraints: DesignConstraints | None) -> 
     return theme
 
 
+def apply_brand_kit(theme: Theme, baseline: Theme) -> Theme:
+    kit = baseline.brand_kit
+    if kit is None:
+        return theme.model_copy(update={"brand_kit": None})
+    theme = theme.model_copy(deep=True, update={"brand_kit": kit})
+    for role in kit.protected:
+        if role in {"heading_font", "cover_background", "dense_surface", "chart_colors"}:
+            if baseline.design and theme.design:
+                setattr(theme.design, role, getattr(baseline.design, role))
+        else:
+            setattr(theme, role, getattr(baseline, role))
+    return theme
 def reference_sheet(assets):
     images = [asset for asset in assets if asset.media_type.startswith("image/")][:4]
     if not images:
@@ -158,6 +170,7 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
     background = background or theme.background
     if not preserve_palette:
         dense = len(table.rows) >= 5 or len(table.rows[0]) >= 4
+        cell_focus = bool(table.focus_rows and table.focus_columns)
         table.fill = rules.dense_surface if rules and dense else theme.surface
         if contrast(table.fill, background) < 3:
             table.fill = blend(background, table.fill, .55)
@@ -166,11 +179,21 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
         table.header_color = readable(theme.ink, table.header_fill, table.color, background)
         table.font = theme.font
         if rules:
-            table.focus_fill = blend(table.fill, theme.accent, .16) if table.focus_rows else None
+            table.focus_fill = blend(table.fill, theme.accent, .10 if cell_focus else .16) if table.focus_rows else None
             if table.focus_fill and contrast(table.color, table.focus_fill) < 4.5:
                 table.focus_fill = blend(table.fill, theme.accent, .07)
+            table.focus_cell_fill = None
+            table.focus_ink = None
+            if cell_focus:
+                cell_fill = blend(table.fill, theme.accent, .28)
+                table.focus_cell_fill = cell_fill if contrast(table.color, cell_fill) >= 4.5 else table.focus_fill
+                candidates = (theme.accent, blend(table.color, theme.accent, .35), table.color)
+                table.focus_ink = next((ink for ink in candidates if all(
+                    contrast(ink, fill) >= 4.5 for fill in (table.focus_fill, table.focus_cell_fill)
+                )), table.color)
+            fills = [fill for fill in (table.fill, table.focus_fill, table.focus_cell_fill) if fill]
             table.negative_ink = "#8B3533" if contrast("#8B3533", table.focus_fill or table.fill) >= 4.5 else "#FFBBB4"
-            if any(contrast(table.negative_ink, fill) < 4.5 for fill in (table.fill, table.focus_fill or table.fill)):
+            if any(contrast(table.negative_ink, fill) < 4.5 for fill in fills):
                 table.negative_ink = table.color
         if table.w >= .65:
             table.size = max(table.size, 15 if dense else 18)
@@ -198,4 +221,6 @@ def style_chart(chart, theme, background):
     chart.palette = palette
     chart.color = chart.palette[0]
     chart.label_color = readable(theme.muted, background, theme.ink)
+    if chart.highlight is not None:
+        chart.context_color = readable(blend(background, theme.ink, .50), background, chart.label_color, minimum=3)
     chart.font = theme.font

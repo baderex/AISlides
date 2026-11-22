@@ -5,7 +5,7 @@ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Api, errorMessage } from '../api';
 import { Dialog } from '../dialog';
 import { icons, StudioIcon } from '../icons';
-import { Answer, EditPreview, ExportReview, Presentation, Question, StudioEvent, Version } from '../models';
+import { Answer, EditPreview, ExportReview, Presentation, Question, Slide, StudioEvent, Version } from '../models';
 import { SlideCanvas } from './canvas';
 import { Editor, baseGeometry } from './editor';
 import { GenerationPlan } from './generation-plan';
@@ -68,6 +68,11 @@ export class Workspace implements OnDestroy {
   chatScope: 'slide' | 'deck' = 'slide';
   textDraft = '';
   private routeSubscription = this.route.paramMap.subscribe(params => { const id = params.get('id'); if (id) void this.open(id); });
+
+  artwork(slide: Slide) {
+    const item = this.item();
+    return item?.request.skill_id ? this.api.artwork(item.id, slide) : null;
+  }
 
   ngOnDestroy() {
     this.routeSubscription.unsubscribe();

@@ -20,7 +20,7 @@ type DeleteTarget = { kind: 'presentation' | 'skill'; id: string; name: string }
   templateUrl: './dashboard.html',
 })
 export class Dashboard {
-  private api = inject(Api);
+  readonly api = inject(Api);
   private router = inject(Router);
   private injector = inject(Injector);
   private routeUrl = toSignal(inject(ActivatedRoute).url, { requireSync: true });

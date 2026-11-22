@@ -11,6 +11,7 @@ export interface Theme { design?: DesignRules | null; background: string; ink: s
 export interface Source { id: string; title: string; url: string | null; excerpt: string; asset_id: string | null }
 export interface Geometry {
   id: string; x: number; y: number; w: number; h: number; rotation: number; z: number;
+  element_key?: string | null;
   opacity: number; border: string | null; edited: boolean;
   placeholder_idx?: number | null;
 }
@@ -19,29 +20,34 @@ export interface TextElement extends Geometry {
   spans?: TextSpan[];
   type: 'text'; text: string; size: number; color: string; font: string; bold: boolean; align: 'left' | 'center' | 'right';
 }
-export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle'; fill: string }
+export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle' | 'diamond'; fill: string }
 export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
 export interface ConnectorAnchor { shape_id: string; side: 'top' | 'left' | 'bottom' | 'right' }
 export interface LineElement extends Geometry {
   type: 'line'; color: string; weight: number;
-  direction?: 'diagonal' | 'right' | 'left' | 'down' | 'up';
+  direction?: 'diagonal' | 'diagonal-up' | 'diagonal-down-left' | 'diagonal-up-left' | 'right' | 'left' | 'down' | 'up';
   arrows?: 'none' | 'end' | 'both';
   start_anchor?: ConnectorAnchor | null;
   end_anchor?: ConnectorAnchor | null;
+  route?: 'straight' | 'elbow';
+  dashed?: boolean;
 }
 export interface TableElement extends Geometry {
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
   header_fill?: string | null; header_color?: string | null; row_rule?: string | null;
   header_rule?: string | null; numeric_columns?: number[];
   focus_rows?: number[]; focus_fill?: string | null; negative_ink?: string | null;
+  focus_columns?: number[]; focus_cell_fill?: string | null; focus_ink?: string | null;
+  cell_fills?: (string | null)[][]; cell_inks?: (string | null)[][];
 }
 export interface ChartElement extends Geometry {
-  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; show_values?: boolean;
+  type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; value_suffix?: string; show_values?: boolean;
+  highlight?: number | null; context_color?: string | null;
   chart: 'bar' | 'column' | 'line' | 'pie' | 'stacked_column'; categories: string[]; series: {name: string; values: number[]}[]; color: string;
 }
 export interface GroupElement extends Geometry { type: 'group'; elements: SlideElement[] }
 export type SlideElement = TextElement | ShapeElement | ImageElement | LineElement | TableElement | ChartElement | GroupElement;
-export interface Slide { id: string; title: string; layout: Layout; background: string; elements: SlideElement[]; notes: string; source_ids: string[]; warnings: string[] }
+export interface Slide { id: string; title: string; layout: Layout; background: string; elements: SlideElement[]; notes: string; source_ids: string[]; warnings: string[]; brand_layout_index?: number | null }
 export interface Deck { schema_version: 1; title: string; aspect_ratio: Aspect; theme: Theme; sources: Source[]; slides: Slide[] }
 export interface PresentationSummary {
   id: string; title: string; status: Status; revision: number; created: string; updated: string; slide_count: number;

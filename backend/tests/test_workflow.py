@@ -114,6 +114,7 @@ def test_explicit_consulting_style_changes_the_generated_exhibits():
     assert generated["status"] == "COMPLETED"
     doc = generated["document"]
     assert doc["theme"]["profile"] == "consulting"
+    assert all(slide["spec"]["identity_version"] == 2 for slide in doc["slides"])
     assert all(slide["background"] == "#FFFFFF" for slide in doc["slides"])
     exhibit = next(el for el in doc["slides"][1]["elements"] if el["type"] == "table")
     assert exhibit["rows"][0] == ["Observation", "Implication"]
@@ -122,6 +123,40 @@ def test_explicit_consulting_style_changes_the_generated_exhibits():
     table = next(shape.table for shape in pptx.slides[1].shapes if shape.has_table)
     assert str(table.cell(0, 0).fill.fore_color.rgb) == "006841"
     assert table.cell(0, 0).text == "Observation"
+
+
+def test_explicit_style_overrides_unlocked_preset_defaults():
+    client = TestClient(app)
+    path = create(client, "One slide about planning for executives in dark luxury style. Background #222222. "
+                  "Accent #CAAE78. Headings font: Georgia. Body font: Verdana.", skill_id="strategy", research=False)
+    work()
+    generated = client.get(path).json()
+    assert generated["status"] == "COMPLETED"
+    theme = generated["document"]["theme"]
+    assert (theme["background"], theme["accent"], theme["design"]["heading_font"], theme["font"]) == (
+        "#222222", "#CAAE78", "Georgia", "Verdana")
+
+
+def test_brand_kit_keeps_owned_logo_and_only_protected_theme_roles():
+    client = TestClient(app)
+    image = io.BytesIO()
+    Image.new("RGB", (120, 60), "#006841").save(image, format="PNG")
+    logo = client.post("/api/v1/assets", files={"file": ("identity.png", image.getvalue(), "image/png")}).json()["id"]
+    response = client.post("/api/v1/skills", json={
+        "name": "Brand kit", "description": "Green logo and accent.", "category": "Brand",
+        "theme": {"accent": "#006841", "brand_kit": {"protected": ["accent"], "logo_asset_id": logo}},
+    })
+    assert response.status_code == 201
+    path = create(client, "One slide about planning for executives in dark luxury style. Background #222222. Accent #CAAE78.",
+                  skill_id=response.json()["id"], research=False)
+    work()
+    generated = client.get(path).json()
+    assert generated["status"] == "COMPLETED"
+    doc = generated["document"]
+    assert doc["theme"]["background"] == "#222222" and doc["theme"]["accent"] == "#006841"
+    assert any(element.get("asset_id") == logo for element in doc["slides"][0]["elements"])
+    assert not any("Missing image" in warning for warning in doc["slides"][0]["warnings"])
+    assert client.post(f"{path}/export?format=pptx").status_code == 200
 
 
 def test_cancel_retry_and_expired_worker_fencing():

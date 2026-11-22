@@ -1,13 +1,18 @@
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
-import { Answer, Asset, CreatePresentation, Deck, EditPreview, ExportReview, GenerationCapabilities, LibrarySkill, Presentation, PresentationSummary, QuestionBatch, Skill, Version } from './models';
+import { Answer, Asset, CreatePresentation, Deck, EditPreview, ExportReview, GenerationCapabilities, LibrarySkill, Presentation, PresentationSummary, QuestionBatch, Skill, Slide, Version } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class Api {
   private http = inject(HttpClient);
   private root = '/api/v1';
   url(id: string, segment = '') { return this.root + '/presentations/' + id + segment; }
+  artwork(id: string, slide: Slide) {
+    const query = new URLSearchParams({layout: slide.layout, background: slide.background});
+    if (slide.brand_layout_index != null) query.set('index', String(slide.brand_layout_index));
+    return this.url(id, '/master-artwork?' + query);
+  }
   session() { return firstValueFrom(this.http.get<{email: string; local: boolean}>(this.root + '/session')); }
   authConfig() { return firstValueFrom(this.http.get<{allow_signup: boolean}>(this.root + '/auth/config')); }
   auth(action: 'login' | 'register', email: string, password: string) {

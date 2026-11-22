@@ -1,7 +1,7 @@
 import { computed, Injectable, signal } from '@angular/core';
-import { Deck, Geometry, Slide, SlideElement, TextElement } from '../models';
+import { Deck, Geometry, ShapeElement, Slide, SlideElement, TextElement } from '../models';
 
-type ElementUpdate = Partial<Geometry> & {text?: string; size?: number; color?: string; bold?: boolean; align?: 'left' | 'center' | 'right'; fill?: string; shape?: 'rect' | 'round' | 'ellipse' | 'triangle'};
+type ElementUpdate = Partial<Geometry> & {text?: string; size?: number; color?: string; bold?: boolean; align?: 'left' | 'center' | 'right'; fill?: string; shape?: ShapeElement['shape']};
 
 export function slideId() { return crypto.randomUUID(); }
 export function baseGeometry(z = 0): Geometry {

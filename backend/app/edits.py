@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.design import ArtDirection, enforce_constraints, explicit_constraints, style_chart, style_table
+from app.design import ArtDirection, apply_brand_kit, enforce_constraints, explicit_constraints, style_chart, style_table
 from app.domain import Chart, Contract, Group, Identifier, Slide, Table, Text, Theme
 from app.providers import Intelligence, ProviderError
 from app.slide_design import recompose_slide
@@ -85,7 +85,8 @@ def propose(item, document, request):
         "reflect the requested style. The studio rebuilds eligible slide layouts from the original content. "
         "Preserve edited elements when replacing a slide. Keep existing source and asset references grounded in this deck.", {
         "instruction": request.instruction, "current_theme": document.theme.model_dump(),
-        "slides": [s.model_dump(mode="json") for s in slides[:12]], "sources": [s.model_dump(mode="json") for s in document.sources]
+        "slides": [s.model_dump(mode="json", exclude={"spec"}) for s in slides[:12]],
+        "sources": [s.model_dump(mode="json") for s in document.sources]
     }, "slide")
     if request.slide_id and any(isinstance(op, Restyle) or op.slide_id != request.slide_id for op in proposal.operations):
         raise ProviderError("The model proposed changes outside the selected slide. Try a more specific edit.")
@@ -104,12 +105,14 @@ def inherited_elements(elements):
             yield from inherited_elements(element.elements)
 
 
-def apply(document, proposal):
+def apply(document, proposal, *, locked_theme=False):
     from app.domain import read_document
 
     slides = {slide.id: slide for slide in document.slides}
     for operation in proposal.operations:
         if isinstance(operation, Restyle):
+            if locked_theme:
+                raise ValueError("The PowerPoint master controls this deck's theme.")
             keys = ("background", "ink", "accent", "muted", "surface")
             old_theme = document.theme
             theme = enforce_constraints(operation.theme, operation.theme.constraints or old_theme.constraints)
@@ -124,6 +127,7 @@ def apply(document, proposal):
                 updates["chart_colors"] = [colors.get(shade, shade) for shade in previous.chart_colors]
                 theme = theme.model_copy(update={"design": previous.model_copy(update=updates)})
             theme = enforce_constraints(theme, theme.constraints)
+            theme = apply_brand_kit(theme, old_theme)
             rules = theme.design
             style_roles = {"mood", "spacing", "cover_style", "card_shape"}
             keep_recipe = bool(previous and rules and

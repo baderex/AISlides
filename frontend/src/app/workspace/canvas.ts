@@ -17,6 +17,7 @@ function bounded(value: number, min: number, max: number) { return Math.min(max,
 export class SlideCanvas {
   slide = input.required<Slide>();
   aspect = input<Aspect>('16:9');
+  artwork = input<string | null>(null);
   editable = input(false);
   selected = input<string | null>(null);
   snap = input(true);
@@ -44,16 +45,23 @@ export class SlideCanvas {
     };
     const anchoredStart = anchorPoint(element.start_anchor);
     const anchoredEnd = anchorPoint(element.end_anchor);
-    if (!anchoredStart && !anchoredEnd) return null;
+    if (!anchoredStart && !anchoredEnd && element.route !== 'elbow' &&
+        (!element.arrows || element.arrows === 'none') && element.weight <= 2) return null;
     const {x, y, w, h} = this.geometry(element);
     const [from, to] = {
       diagonal: [[x, y], [x + w, y + h]],
+      'diagonal-up': [[x, y + h], [x + w, y]],
+      'diagonal-down-left': [[x + w, y], [x, y + h]],
+      'diagonal-up-left': [[x + w, y + h], [x, y]],
       right: [[x, y + h / 2], [x + w, y + h / 2]],
       left: [[x + w, y + h / 2], [x, y + h / 2]],
       down: [[x + w / 2, y], [x + w / 2, y + h]],
       up: [[x + w / 2, y + h], [x + w / 2, y]],
     }[element.direction ?? 'diagonal'] as [Point, Point];
     const a = anchoredStart ?? from, b = anchoredEnd ?? to;
+    const middleX = (a[0] + b[0]) / 2;
+    const points: Point[] = element.route === 'elbow' && a[0] !== b[0] && a[1] !== b[1]
+      ? [a, [middleX, a[1]], [middleX, b[1]], b] : [a, b];
     const left = Math.max(0, Math.min(a[0], b[0]) - .015);
     const top = Math.max(0, Math.min(a[1], b[1]) - .022);
     const width = Math.min(1, Math.max(a[0], b[0]) + .015) - left;
@@ -74,9 +82,9 @@ export class SlideCanvas {
     };
     return {
       geometry: {x: left, y: top, w: width, h: height},
-      path: `M ${coords(a).join(' ')} L ${coords(b).join(' ')}`,
-      startTip: element.arrows === 'both' ? arrow(b, a) : '',
-      endTip: element.arrows === 'both' || element.arrows === 'end' ? arrow(a, b) : '',
+      path: 'M ' + points.map(point => coords(point).join(' ')).join(' L '),
+      startTip: element.arrows === 'both' ? arrow(points[1], a) : '',
+      endTip: element.arrows === 'both' || element.arrows === 'end' ? arrow(points[points.length - 2], b) : '',
     };
   }
 
@@ -108,6 +116,9 @@ export class SlideCanvas {
     return ({
       right: 'M 0 50 H 100', left: 'M 100 50 H 0',
       down: 'M 50 0 V 100', up: 'M 50 100 V 0',
+      'diagonal-up': 'M 0 100 L 100 0',
+      'diagonal-down-left': 'M 100 0 L 0 100',
+      'diagonal-up-left': 'M 100 100 L 0 0',
     } as Record<string, string>)[direction ?? ''] || 'M 0 0 L 100 100';
   }
 
@@ -181,24 +192,42 @@ export class SlideCanvas {
 
   chart(el: ChartElement) {
     const values = el.series.flatMap(series => series.values);
-    const high = Math.max(0, ...values), low = Math.min(0, ...values), span = high - low || 1;
+    const min = Math.min(...values), max = Math.max(...values);
+    let low = Math.min(0, min), high = Math.max(0, max);
+    const labeledBars = el.show_values && (el.chart === 'bar' || el.chart === 'column');
+    const focusedLine = el.chart === 'line' && el.highlight != null;
+    if (focusedLine) {
+      const span = max - min || Math.abs(max) * .1 || 1;
+      const magnitude = 10 ** Math.floor(Math.log10(span / 2));
+      const factor = [1, 2, 5, 10].find(value => value * magnitude >= span / 2) ?? 10;
+      const step = factor * magnitude;
+      low = Math.floor((min - .45 * span) / step) * step;
+      high = Math.ceil((max + .65 * span) / step) * step;
+    } else if (labeledBars) {
+      const padding = .22 * (high - low || 1);
+      if (high > 0 || low === 0) high += padding;
+      if (low < 0) low -= padding;
+    }
+    const span = high - low || 1;
     const band = 100 / el.categories.length;
-    const plotHeight = el.chart === 'line' && el.show_values ? 87 : 85;
+    const plotHeight = el.show_values ? (el.chart === 'bar' ? 96 : 87) : 85;
     const baseline = plotHeight * high / span;
     return el.series.map(series => series.values.map((value, index) => {
       const current = plotHeight * (high - value) / span;
-      const lineY = el.chart === 'line' && el.show_values ? plotHeight * .13 + current * .82 : current;
+      const lineY = el.chart === 'line' && el.show_values && el.highlight == null ? plotHeight * .13 + current * .82 : current;
       const thickness = .76 * band / el.series.length;
-      const horizontal = 85 / el.categories.length * .72 / el.series.length;
+      const horizontal = plotHeight / el.categories.length * .72 / el.series.length;
+      const inset = el.chart === 'bar' && labeledBars ? 24 : 0;
       return { x: band*(index+.12), y: Math.min(current, baseline), w: thickness*.85, h: Math.abs(current-baseline),
-        cx: band*(index+.5), cy: lineY, horizontal, bx: 100 * (Math.min(0, value)-low)/span,
-        by: index * 85 / el.categories.length, bw: Math.abs(value)*100/span };
+        cx: band*(index+.5), cy: lineY, horizontal, bx: inset + (100 - inset) * (Math.min(0, value)-low)/span,
+        by: index * plotHeight / el.categories.length, bw: Math.abs(value)*(100 - inset)/span, negative: value < 0 };
     }));
   }
 
   chartPointValue(el: ChartElement, index: number, series = 0) {
     const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
-    return (el.value_prefix ?? '') + number.format(el.series[series].values[index]);
+    const value = el.series[series].values[index];
+    return (value < 0 ? '−' : '') + (el.value_prefix ?? '') + number.format(Math.abs(value)) + (el.value_suffix ?? '');
   }
 
   segmentInk(color: string) {
@@ -224,7 +253,7 @@ export class SlideCanvas {
   chartLabels(el: ChartElement) {
     if (el.chart !== 'stacked_column') return el.categories;
     const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
-    return this.chartTotals(el).map((total, i) => `${el.categories[i]}  ${el.value_prefix ?? ''}${number.format(total)}`);
+    return this.chartTotals(el).map((total, i) => `${el.categories[i]}  ${el.value_prefix ?? ''}${number.format(total)}${el.value_suffix ?? ''}`);
   }
 
   private chartTotals(el: ChartElement) {
@@ -234,6 +263,11 @@ export class SlideCanvas {
   chartColor(el: ChartElement, index: number) {
     const palette = el.palette?.length ? el.palette : [el.color, ...this.shades.slice(1)];
     return palette[index % palette.length];
+  }
+
+  chartMarkColor(el: ChartElement, index: number, series: number) {
+    return el.highlight != null && el.highlight !== index && el.context_color
+      ? el.context_color : this.chartColor(el, series);
   }
 
   pie(el: ChartElement) {

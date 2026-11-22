@@ -384,7 +384,7 @@ input[type=color]:disabled { cursor: default; opacity: .5; }
 .present-nav .icon-button { color: #eee; }
 
 studio-canvas { display: block; width: 100%; }
-.slide-canvas { position: relative; width: 100%; overflow: hidden; container-type: inline-size; isolation: isolate; }
+.slide-canvas { position: relative; width: 100%; overflow: hidden; container-type: inline-size; isolation: isolate; background-size: 100% 100%; background-repeat: no-repeat; }
 .slide-canvas.editable { touch-action: none; }
 .slide-element { position: absolute; width: 0; height: 0; }
 .editable .slide-element { cursor: grab; }
@@ -407,7 +407,7 @@ studio-canvas { display: block; width: 100%; }
 .slide-shape.ellipse, .slide-pie { border-radius: 50%; }
 .slide-shape.triangle { clip-path: polygon(50% 0,100% 100%,0 100%); }
 .slide-content .slide-chart { height: 90%; }
-.slide-content .negative-value { font-weight: 700; }
+.slide-content :is(.negative-value, .focus-value) { font-weight: 700; }
 .connector-tip { position: absolute; width: .85cqw; height: .85cqw; clip-path: polygon(0 0,100% 50%,0 100%); }
 .connector-tip[data-direction="right"], .connector-tip.start[data-direction="left"] { right: 0; top: 50%; transform: translateY(-50%); }
 .connector-tip[data-direction="left"], .connector-tip.start[data-direction="right"] { left: 0; right: auto; top: 50%; transform: translateY(-50%) rotate(180deg); }
@@ -417,9 +417,14 @@ studio-canvas { display: block; width: 100%; }
 .connector-tip.start[data-direction="up"] { top: auto; bottom: 0; transform: translateX(-50%) rotate(90deg); }
 .connector-tip[data-direction="diagonal"] { bottom: 0; right: 0; transform: rotate(45deg); }
 .connector-tip.start[data-direction="diagonal"] { top: 0; left: 0; transform: rotate(225deg); }
-.slide-content .slide-chart.labeled-line { height: 100%; }
-.chart-labels.labeled-line { position: absolute; inset: 89% 0 auto; }
+.slide-content .slide-chart.direct-chart { height: 100%; }
+.chart-labels.direct-chart { position: absolute; inset: 89% 0 auto; }
 .chart-point-value { position: absolute; translate: -50% calc(-100% - 4px); font-weight: 700; white-space: nowrap; }
+.chart-point-value.chart-value-negative { translate: -50% 3px; }
+.chart-point-value.chart-value-side { translate: 4px -50%; }
+.chart-point-value.chart-value-side.chart-value-negative { translate: calc(-100% - 4px) -50%; }
+.chart-bar-category { position: absolute; width: 22%; text-align: right; translate: 0 -50%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stacked-point-value { position: absolute; translate: -50% -50%; font-weight: 700; white-space: nowrap; }
 .slide-pie { width: auto; height: 90%; aspect-ratio: 1; margin: 2% auto; max-width: 100%; }
 .chart-labels { display: flex; justify-content: space-around; white-space: nowrap; }

@@ -6,6 +6,29 @@ Angular 21 serves a zoneless client with lazy dashboard and workspace routes. Fa
 - The API owns sessions, validates workspace access and revisions, and queues generation. The worker claims jobs from SQL and commits one checkpoint at a time. Optional Redis dispatch provides job IDs to prioritize, and SQL polling recovers missed dispatches.
 - The worker plans content and design with the configured model and composes slides into a typed intermediate representation (IR). The Angular canvas, PNG renderer, PDF writer and PowerPoint writer consume that representation. Optional export review renders the actual PPTX through LibreOffice Impress.
 
+## Semantic exhibits
+
+An outline slide can declare `slideIntent`, `mainMessage`, a `visual` type and optional variant, and short `annotations`. The content pass fills in the selected exhibit's data and relationships. The composer fits them to the slide, applying the current theme and available template space. Models supply chart values, node IDs, role names, or time periods. The composer derives slide geometry.
+
+| Intent | Exhibit choices |
+| --- | --- |
+| Compare, reconcile, or analyze values | Ranked bar, waterfall, funnel, slope, tornado, Pareto |
+| Show composition or weighted flows | Stacked bar, Mekko, Sankey |
+| Score, prioritize, or assign responsibility | Heatmap, decision and scoring matrices, two-by-two, bubble, RACI, capability map |
+| Explain causes, relationships, or organization | Issue and driver trees, value chain, Venn, organization chart, architecture, ER, network topology, layered stack |
+| Explain processes, dependencies, and interactions | Flowchart, data flow, state machine, pipeline/DAG, sequence, swimlane, timing diagram, flow diagram with a two-scenario comparison |
+| Show rollout plans or implementation details | Roadmap, Gantt, annotated code |
+
+Series and marks use editable PowerPoint shapes and labels. Matrix exhibits use native tables with cell colors, weights and recommendation markers where applicable. The composer also supports annotation arrows, callout panels, kickers, key metrics, deltas, status markers, rich-text emphasis, highlight bands, source notes, footnotes, and legends. Quantitative exhibits require a cited source. For a qualitative heatmap, ordered categories define color meaning directly.
+
+Consulting uses the shared composer and slide specifications. Its profile supplies defaults for density, typography, headlines, and exhibits. Style presets supply defaults that prompts can override. A skill manifest may also define a `theme.brand_kit` with protected theme roles and the ID of an uploaded logo. A corporate PowerPoint template retains its master, placeholders, and aspect ratio.
+
+Semantic keys identify editable objects across recipes. Restyling applies field-level content and style edits to matching objects. It also carries through geometry edits to those objects when the recipe and slide layout stay the same. Older slides with manual edits use the existing style-only update when their element identities cannot be matched reliably.
+
+Layout review first checks technical fit and exhibit completeness. It then evaluates hierarchy, emphasis, balance, imagery, and fit to the requested style. When vision is enabled, important slides can compare eligible renders using that rubric. The local rubric remains available without vision.
+
+Evidence extraction records source IDs, quoted observations, periods, scales, and scope. Reconciliation checks observations against their cited excerpts before using them and retains the original text parser for supported text-only patterns. Conflicting values or scopes produce visible review notes.
+
 See the [agent workflow](agent-workflow.md), [data model](data-model.md) and [production deployment guide](production-deployment.md).
 
 ## Reference review

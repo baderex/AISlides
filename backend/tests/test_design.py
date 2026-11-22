@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageColor
 from pptx import Presentation
 from pptx.enum.chart import XL_CHART_TYPE
-from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_SHAPE_TYPE
 from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.oxml.ns import qn
 from pypdf import PdfReader
@@ -255,3 +255,52 @@ def test_explicit_diagram_style_routes_comparison_to_native_branch(monkeypatch):
     assert {"Accepted", "Rework"} <= {shape.text for shape in native.slides[0].shapes if shape.has_text_frame}
     pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
     assert "Distribute the result" in pdf.pages[0].extract_text()
+
+
+def test_swimlane_request_routes_to_editable_anchored_export(monkeypatch):
+    structured = Intelligence.structured
+
+    def respond(self, schema, task, data, stage="planning", image=None):
+        if schema is Intent:
+            return Intent(subject="Browser cache", audience="Developers", visual_direction="Light", slide_count=1)
+        if schema is Outline:
+            return Outline(title="Browser cache", slides=[{"title": "Cache hit vs. revalidation", "layout": "process"}])
+        if schema is SlideContent:
+            assert data["required_exhibit"] == "swimlane"
+            return SlideContent(title="Cache hit vs. revalidation", swimlane={
+                "lanes": ["Browser", "Server"],
+                "nodes": [
+                    {"id": "fresh", "label": "Cache fresh?", "lane": 0, "column": 0, "decision": True},
+                    {"id": "reuse", "label": "Reuse response", "lane": 0, "column": 1},
+                    {"id": "validate", "label": "Check validator", "lane": 1, "column": 0},
+                ],
+                "edges": [
+                    {"source": "fresh", "target": "reuse", "label": "Cache hit"},
+                    {"source": "fresh", "target": "validate", "label": "Revalidation"},
+                    {"source": "validate", "target": "reuse", "label": "304 Not Modified"},
+                ],
+            })
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", respond)
+    client = TestClient(app)
+    path = create(client, "Create one slide with a swimlane diagram for developers.", aspect_ratio="1:1")
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    assert result["document"]["slides"][0]["spec"]["recipe"] == "diagram_swimlane"
+    native = Presentation(io.BytesIO(client.post(path + "/export?format=pptx").content))
+    shapes = list(native.slides[0].shapes)
+    assert any(shape.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE and shape.auto_shape_type == MSO_AUTO_SHAPE_TYPE.DIAMOND
+               for shape in shapes)
+    connectors = [shape for shape in shapes if shape.shape_type == MSO_SHAPE_TYPE.LINE]
+    assert len(connectors) == 3
+    assert any(shape._element.spPr.prstGeom.get("prst") == "bentConnector3" for shape in connectors)
+    for connector in connectors:
+        properties = connector._element.nvCxnSpPr.cNvCxnSpPr
+        assert properties.find(qn("a:stCxn")) is not None and properties.find(qn("a:endCxn")) is not None
+    labels = {"Browser", "Server", "Cache hit", "Revalidation", "304 Not Modified"}
+    assert labels <= {shape.text for shape in shapes if shape.has_text_frame}
+    pdf = PdfReader(io.BytesIO(client.post(path + "/export?format=pdf").content))
+    pdf_text = " ".join(pdf.pages[0].extract_text().split())
+    assert all(label in pdf_text for label in labels), pdf_text

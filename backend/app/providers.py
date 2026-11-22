@@ -31,6 +31,7 @@ VALIDATION_HINTS = {
     "model_type": "use an object",
     "decision_scope": "keep the future gate condition in if_missed",
     "phase_quantities": "use dates in period only; describe milestones without inventing quantities",
+    "visual_choice": "use the planned visual type and variant",
 }
 
 
@@ -108,12 +109,31 @@ def strict_response_schema(contract: dict) -> dict:
     return schema
 
 
-def exhibit_response_schema(schema: type[BaseModel], exhibit: str) -> dict:
+def response_fields(schema, keys):
+    return {key: (schema.model_fields[key].annotation, deepcopy(schema.model_fields[key])) for key in keys}
+
+
+def exhibit_response_schema(schema: type[BaseModel], exhibit: str, visual_choice: dict | None = None) -> dict:
     keys = ("title", "subtitle", "notes", "source_ids")
-    fields = {key: (schema.model_fields[key].annotation, deepcopy(schema.model_fields[key])) for key in keys}
-    kind = next(variant for variant in get_args(schema.model_fields[exhibit].annotation) if variant is not NoneType)
+    if exhibit == "visual":
+        keys += ("annotations", "decorations")
+    fields = response_fields(schema, keys)
+    if exhibit == "visual" and visual_choice:
+        from app.visuals import VISUAL_MODELS
+        kind = VISUAL_MODELS[visual_choice["type"]]
+    else:
+        kind = schema.model_fields[exhibit].annotation
+        variants = tuple(variant for variant in get_args(kind) if variant is not NoneType)
+        if len(variants) == 1:
+            kind = variants[0]
     fields[exhibit] = (kind, ...)
-    return create_model(schema.__name__, __config__=schema.model_config, **fields).model_json_schema()
+    contract = create_model(schema.__name__, __config__=schema.model_config, **fields).model_json_schema()
+    if exhibit == "visual" and visual_choice:
+        properties = contract["$defs"][kind.__name__]["properties"]
+        properties["type"] = {"type": "string", "const": visual_choice["type"]}
+        variant = visual_choice.get("variant")
+        properties["variant"] = {"type": "string", "const": variant} if variant else {"type": "null"}
+    return contract
 
 
 class Intelligence:
@@ -127,8 +147,10 @@ class Intelligence:
     def structured(self, schema: type[BaseModel], task: str, data: dict, stage: str = "planning", image: str | None = None):
         validation_context = {"slide_count": data["slide_count"]} if stage == "outline" else None
         required_exhibit = data.get("required_exhibit") if stage == "slide" else None
+        visual_choice = data.get("visual_choice") if required_exhibit == "visual" else None
         if required_exhibit:
             validation_context = {"required_exhibit": required_exhibit,
+                                  "visual_choice": visual_choice,
                                   "omit_phase_quantities": data.get("omit_phase_quantities", False)}
         elif stage == "slide" and data.get("point_count"):
             validation_context = {"point_count": data["point_count"]}
@@ -136,7 +158,14 @@ class Intelligence:
             from app.demo import demo_response
             return schema.model_validate(demo_response(schema.__name__, data), context=validation_context)
         s = settings()
-        contract = exhibit_response_schema(schema, required_exhibit) if required_exhibit else schema.model_json_schema()
+        if required_exhibit:
+            contract = exhibit_response_schema(schema, required_exhibit, visual_choice)
+        elif stage == "slide" and "visual" in schema.model_fields:
+            keys = schema.model_fields.keys() - {"visual", "annotations", "decorations", "evidence_warnings"}
+            fields = response_fields(schema, (key for key in schema.model_fields if key in keys))
+            contract = create_model(schema.__name__, __config__=schema.model_config, **fields).model_json_schema()
+        else:
+            contract = schema.model_json_schema()
         response_schema = None
         if stage == "outline":
             count = validation_context["slide_count"]

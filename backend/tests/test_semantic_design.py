@@ -3,17 +3,17 @@ import io
 from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader
-from pytest import raises
+from pytest import mark, raises
 
 from app.composition import OutlineItem, SlideContent
 from app.design import enforce_constraints, explicit_constraints
-from app.domain import DesignRules, Document, Shape, Source, Text, TextSpan, Theme
+from app.domain import BrandKit, Chart, DesignRules, Document, Shape, Source, Table, Text, TextSpan, Theme
 from app.edits import ChangeText, ChatRequest, EditProposal, Restyle, RestyleDirection, apply, propose
-from app.evidence import resolve_headline
+from app.evidence import EvidenceObservation, resolve_headline, verified_observations
 from app.powerpoint import to_pptx
 from app.providers import Intelligence
-from app.rendering import preview, to_pdf
-from app.slide_design import build_slide, review_layouts
+from app.rendering import contrast, preview, to_pdf
+from app.slide_design import LayoutReview, build_slide, review_layouts
 
 
 def themed_document(**kwargs):
@@ -51,8 +51,24 @@ def test_quarterly_chart_and_signed_recovery_use_supplied_evidence():
     revenue = SlideContent(title=plan.title, chart={
         "label": "Revenue", "chart": "line", "categories": ["Q1", "Q2", "Q3", "Q4"], "values": [30, 34, 31, 83],
     })
-    assert resolve_headline(plan, revenue, evidence, []).title == "Revenue rebounds to $38m in Q4"
+    source = Source(id="brief", title="Brief", excerpt=evidence)
+    revenue.source_ids = [source.id]
+    plan = resolve_headline(plan, revenue, evidence, [source])
+    assert plan.title == "Revenue rebounds to $38m in Q4"
     assert revenue.chart.values == [30, 34, 31, 38]
+    deck = themed_document(sources=[source])
+    slide = build_slide(plan, revenue, deck, 0, set(), data_driven=True)
+    chart = next(element for element in slide.elements if isinstance(element, Chart))
+    assert chart.highlight == 3
+    assert chart.mark_color(3) != chart.mark_color(2)
+    deck.slides = [slide]
+    ppt = Presentation(io.BytesIO(to_pptx(deck, lambda _: None)))
+    native = next(shape.chart for shape in ppt.slides[0].shapes if shape.has_chart)
+    assert list(native.series[0].values) == [30, 34, 31, 38]
+    assert native.plots[0].data_labels.show_value
+    assert native.series[0].points[3].marker.size > native.series[0].points[2].marker.size
+    assert any(shape.has_text_frame and shape.text == "+$7m vs Q3" for shape in ppt.slides[0].shapes)
+    assert "+$7m vs Q3" in PdfReader(io.BytesIO(to_pdf(deck, lambda _: None))).pages[0].extract_text()
     plan = OutlineItem(title="Financial readout", layout="metrics")
     results = SlideContent(title=plan.title, readout={"metrics": [
         {"title": "Q3 Operating Profit", "value": "$1m"},
@@ -62,6 +78,57 @@ def test_quarterly_chart_and_signed_recovery_use_supplied_evidence():
     assert resolve_headline(plan, results, evidence, []).title == "Operating profit rebounds from −$1m to $4m"
     assert results.readout.metrics[0].value == "−$1m"
     assert results.readout.metrics[2].body == "Up from $18m in Q3."
+
+
+@mark.parametrize("kind", ["bar", "column"])
+def test_sparse_comparison_charts_export_native_labels_and_highlight(kind):
+    source = Source(id="brief", title="Brief")
+    plan = OutlineItem(title="Compare operating results", layout="chart")
+    content = SlideContent(title=plan.title, source_ids=[source.id], chart={
+        "label": "Operating results", "chart": kind, "categories": ["North", "South"], "values": [4, -2],
+        "highlight": 1, "compare_to": 0,
+    })
+    deck = themed_document(sources=[source])
+    deck.slides = [build_slide(plan, content, deck, 0, set(), data_driven=True)]
+    chart = next(element for element in deck.slides[0].elements if isinstance(element, Chart))
+    ppt = Presentation(io.BytesIO(to_pptx(deck, lambda _: None)))
+    native = next(shape.chart for shape in ppt.slides[0].shapes if shape.has_chart)
+    assert native.plots[0].data_labels.show_value
+    assert list(native.series[0].values) == [4, -2]
+    assert str(native.series[0].points[1].format.fill.fore_color.rgb) == chart.color[1:]
+    assert str(native.series[0].points[0].format.fill.fore_color.rgb) == chart.context_color[1:]
+    assert any(shape.has_text_frame and shape.text == "−6 vs North" for shape in ppt.slides[0].shapes)
+
+
+def test_site_selection_emphasizes_only_the_selected_rows_and_criteria():
+    source = Source(id="brief", title="Pilot brief", excerpt="Plan six vans each at North and Central.")
+    rows = [
+        ["Site", "Daily route miles", "Eligible vans", "Spare charging ports"],
+        ["North", "72", "8", "4"],
+        ["Central", "86", "6", "3"],
+        ["South", "118", "2", "0"],
+    ]
+    plan = OutlineItem(title="Compare depots", layout="research")
+    content = SlideContent(title=plan.title, source_ids=[source.id], table=rows,
+                           table_focus_columns=["Eligible vans", "Spare charging ports"])
+    plan = resolve_headline(plan, content, source.excerpt, [source])
+    deck = themed_document(sources=[source])
+    deck.slides = [build_slide(plan, content, deck, 0, set(), data_driven=True)]
+    table = next(element for element in deck.slides[0].elements if isinstance(element, Table))
+    assert table.rows == rows
+    assert table.focus_rows == [1, 2] and table.focus_columns == [2, 3]
+    assert table.focus_cell_fill != table.focus_fill != table.fill
+    assert contrast(table.focus_ink, table.focus_cell_fill) >= 4.5
+
+    ppt = Presentation(io.BytesIO(to_pptx(deck, lambda _: None)))
+    native = next(shape.table for shape in ppt.slides[0].shapes if shape.has_table)
+    assert [[native.cell(i, j).text for j in range(4)] for i in range(4)] == rows
+    for i in range(1, 4):
+        for j in range(1, 4):
+            cell = native.cell(i, j)
+            highlighted = i in (1, 2) and j in (2, 3)
+            assert cell.text_frame.paragraphs[0].font.bold == highlighted
+            assert (str(cell.fill.fore_color.rgb) == table.focus_cell_fill[1:]) == highlighted
 
 
 def test_unsupported_numerical_headline_falls_back_and_explicit_title_is_preserved():
@@ -86,7 +153,7 @@ def test_explicit_theme_constraints_apply_to_both_backgrounds_and_fonts():
     assert updated.constraints.background_mode == "light"
 
 
-def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
+def test_recipe_changes_preserve_text_and_deletion_with_new_geometry():
     deck = themed_document()
     part = OutlineItem(title="Three product features", topic="Features", layout="editorial")
     content = SlideContent(title=part.title, points=[
@@ -99,6 +166,8 @@ def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
     changed = next(e for e in slide.elements if isinstance(e, Text) and e.text == "USB-C.")
     removed = next(e for e in slide.elements if isinstance(e, Text) and e.text == "A fold-flat loop.")
     slide.elements.remove(removed)
+    card = next(e for e in slide.elements if e.element_key == "feature:charging:background")
+    card.fill, card.edited = "#704010", True
     changed.x -= .01
     original_pos = changed.x
     deck = apply(deck, EditProposal(summary="Edit", operations=[
@@ -113,7 +182,68 @@ def test_restylings_preserve_text_and_geometry_edits_and_manual_deletion():
     assert result.id == slide.id
     assert removed.id not in {e.id for e in result.elements}
     edited = next(e for e in result.elements if e.id == changed.id)
-    assert edited.edited and edited.text == "USB-C charging." and edited.x == original_pos
+    assert edited.edited and edited.text == "USB-C charging." and edited.x != original_pos
+    rebuilt_card = next(e for e in result.elements if e.id == card.id)
+    assert rebuilt_card.fill == "#704010" and rebuilt_card.w > card.w
+    assert next(e for e in result.elements if e.element_key == "feature:handle:background").fill != card.fill
+
+
+def test_equal_fit_candidates_use_the_visual_rubric():
+    deck = themed_document()
+    part = OutlineItem(title="Product capabilities", layout="editorial", visual_priority="Charging")
+    content = SlideContent(title=part.title, points=[
+        {"title": "Charging", "body": "A USB-C port."}, {"title": "Lighting", "body": "Adjustable brightness."},
+    ])
+    initial = build_slide(part, content, deck, 0, set())
+    calls = []
+
+    def evaluate(plan, recipes, image):
+        assert plan.visual_priority == "Charging" and image.startswith(b"\x89PNG")
+        calls.append(recipes)
+        return LayoutReview(ratings=[{"candidate": i + 1, **dict.fromkeys(
+            ("hierarchy", "emphasis", "balance", "imagery", "style_match"), 5 if name == "feature_rows" else 1)}
+            for i, name in enumerate(recipes)])
+
+    selected, _ = review_layouts(deck, initial, 0, set(), None, evaluate=evaluate)
+    assert calls and selected.spec.recipe == "feature_rows"
+
+
+def test_structured_source_facts_reconcile_annual_values_and_flag_conflicts():
+    plan = OutlineItem(title="Revenue by year", topic="Revenue", layout="chart")
+    content = SlideContent(title=plan.title, chart={"label": "Revenue", "categories": ["FY2024", "FY2025"],
+                                                   "values": [15, 23], "chart": "line"})
+    source = Source(id="ledger", title="Ledger", excerpt="Revenue FY2024: 12.5. Revenue FY2025: 15.25. USD millions.")
+    reported = Source(id="report", title="Operating report", excerpt="Revenue FY2025: 17.25. USD millions.")
+    facts = [EvidenceObservation(source_id=source.id, metric="Revenue", period=period, amount=amount,
+                                 quote=quote, currency="$", unit="m") for period, amount, quote in [
+        ("FY2024", "12.5", "Revenue FY2024: 12.5."), ("FY2025", "15.25", "Revenue FY2025: 15.25."),
+    ]]
+    invalid = facts[0].model_copy(update={"period": "FY2025", "quote": source.excerpt})
+    assert list(verified_observations([invalid], [source])) == []
+    resolve_headline(plan, content, "Show reported revenue.", [source], observations=facts)
+    assert content.chart.values == [12.5, 15.25]
+    assert (content.chart.value_prefix, content.chart.value_suffix, content.source_ids) == ("$", "m", ["ledger"])
+    conflict = facts[1].model_copy(update={"source_id": reported.id, "amount": facts[1].amount + 2, "quote": reported.excerpt})
+    resolve_headline(plan, content, "Show reported revenue.", [source, reported], observations=[*facts, conflict])
+    assert content.chart.values == [12.5, 15.25]
+    assert "Conflicting source values" in content.subtitle
+    assert content.evidence_warnings
+    assert content.source_ids == ["ledger", "report"]
+
+
+def test_brand_kit_protects_selected_roles_during_restyle():
+    deck = themed_document()
+    deck.theme.brand_kit = BrandKit(protected=["accent", "heading_font"])
+    previous = deck.theme.model_copy(deep=True)
+    revised = previous.model_copy(deep=True)
+    revised.accent, revised.background = "#444444", "#222222"
+    revised.design.heading_font, revised.font = "Verdana", "Calibri"
+    proposal = EditProposal(summary="Refresh", operations=[Restyle(op="restyle", theme=revised)])
+    result = apply(deck, proposal).theme
+    assert result.accent == previous.accent and result.design.heading_font == previous.design.heading_font
+    assert result.background == "#222222" and result.font == "Calibri"
+    with raises(ValueError, match="PowerPoint master"):
+        apply(deck, proposal, locked_theme=True)
 
 
 def test_candidate_review_prefers_connected_diagram_to_plain_text_grid():
@@ -182,7 +312,7 @@ def test_deck_design_request_is_routed_to_a_theme_only_proposal(monkeypatch):
     deck = themed_document()
     part = OutlineItem(title="Product demo", layout="closing")
     deck.slides = [build_slide(part, SlideContent(title=part.title), deck, 0, set())]
-    theme = deck.theme.model_dump(exclude={"profile", "constraints"})
+    theme = deck.theme.model_dump(exclude={"profile", "constraints", "brand_kit"})
     theme["design"]["mood"] = "Luxury editorial"
 
     def redesign(self, schema, task, data, stage):
