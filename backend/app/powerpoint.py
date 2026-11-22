@@ -5,6 +5,7 @@ from pptx import Presentation
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
 from pptx.enum.chart import XL_CHART_TYPE, XL_DATA_LABEL_POSITION, XL_LEGEND_POSITION, XL_MARKER_STYLE
+from pptx.enum.dml import MSO_LINE_DASH_STYLE
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
 from pptx.enum.text import MSO_AUTO_SIZE, MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -123,6 +124,8 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 connectors.append((obj, el.start_anchor, el.end_anchor))
                 obj.line.width = Pt(el.weight)
                 obj.line.color.rgb = color(el.color)
+                if el.dashed:
+                    obj.line.dash_style = MSO_LINE_DASH_STYLE.DASH
                 alpha(obj._element.spPr.ln.solidFill, el.opacity)
                 if el.arrows != "none":
                     for side in ("headEnd", "tailEnd") if el.arrows == "both" else ("tailEnd",):

@@ -10,9 +10,12 @@ from app.design import blend, readable, style_chart, style_slide_tables
 from app.diagrams import Diagram, Swimlane, draw_diagram, draw_swimlane
 from app.domain import (BrandTemplate, Chart, Contract, Document, Image, Layout, Recipe, Series, Shape, ShortText,
                         Slide, Table, Text, Theme, display_value)
+from app.exhibit_layout import ExhibitCanvas, compose_exhibit
 from app.lucide import ICON_NAMES
 from app.questions import Question
 from app.rendering import contrast, fit_image, longest_word_width, physical, slide_icon, text_height
+from app.visuals import (Annotation, Copy, Decorations, QuantitativeVisual, ScatterVisual, VISUAL_LAYOUTS, Visual,
+                         VisualChoice)
 
 
 class Intent(Contract):
@@ -36,10 +39,11 @@ class PlanningResponse(Contract):
     model_config = ConfigDict(extra="ignore", json_schema_extra={"additionalProperties": False})
 
 
-Exhibit = Literal["cover_callout", "stacked_comparison", "allocation", "rollout", "decision", "diagram", "swimlane", "readout"]
+Exhibit = Literal["cover_callout", "stacked_comparison", "allocation", "rollout", "decision", "diagram", "swimlane", "readout", "visual"]
 EXHIBIT_LAYOUTS: dict[Exhibit, Layout] = {
     "cover_callout": "cover", "stacked_comparison": "chart", "allocation": "metrics",
     "rollout": "timeline", "decision": "closing", "diagram": "process", "swimlane": "process", "readout": "metrics",
+    "visual": "process",
 }
 
 
@@ -47,6 +51,10 @@ class OutlineItem(PlanningResponse):
     title: ShortText
     topic: str = Field(default="", max_length=180, description="A neutral label for the subject.")
     key_message: str = Field(default="", max_length=140, description="The concise supported takeaway or recommendation.")
+    slideIntent: str = Field(default="", max_length=100)
+    mainMessage: str = Field(default="", max_length=140)
+    visual: VisualChoice | None = None
+    annotations: list[Copy] = Field(default_factory=list, max_length=3)
     lock_title: bool = Field(default=False, description="True only if the user supplies the exact slide title.")
     recipe: Recipe | None = Field(default=None, description="Optional preferred composition for the actual slide content.")
     visual_priority: str = Field(default="", max_length=180, description="The exhibit or takeaway the design should emphasize.")
@@ -65,6 +73,20 @@ class OutlineItem(PlanningResponse):
         "ordered steps, or alternative paths. Use readout for a closing with two or three exact, sourced result figures. "
         "Leave null for other slides."
     ))
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_semantic_plan(cls, value):
+        if not isinstance(value, dict) or not value.get("mainMessage"):
+            return value
+        result = dict(value)
+        result.setdefault("title", result["mainMessage"])
+        if not result.get("key_message") and not result.get("lock_title"):
+            result["key_message"] = result["mainMessage"]
+        visual = result.get("visual")
+        if isinstance(visual, dict) and isinstance(visual.get("type"), str):
+            result.setdefault("layout", VISUAL_LAYOUTS.get(visual.get("type"), "summary"))
+        return result
 
     @field_validator("layout", mode="before")
     @classmethod
@@ -105,7 +127,7 @@ def planned_exhibit(item: OutlineItem, has_evidence: bool, *, prefer_diagrams: b
         and re.search(r"\bswim[ -]?lanes?\b", description)
     ):
         return "swimlane"
-    if item.exhibit and item.exhibit != "diagram":
+    if item.exhibit and item.exhibit not in {"diagram", "visual"}:
         approval = r"\b(approve|approval|authorize|authorization|endorse|endorsement|funding request|request for funding)\b"
         if item.exhibit == "cover_callout" and not re.search(approval, f"{item.title} {item.purpose}", re.I):
             return None
@@ -287,6 +309,9 @@ class SlideContent(Contract):
     diagram: Diagram | None = None
     swimlane: Swimlane | None = None
     readout: Readout | None = None
+    visual: Visual | None = None
+    annotations: list[Copy | Annotation] = Field(default_factory=list, max_length=3)
+    decorations: Decorations | None = None
     table_focus: list[ShortText] = Field(default_factory=list, max_length=4,
                                        description="Exact first-column labels for the selected or key data rows.")
     table_focus_columns: list[ShortText] = Field(default_factory=list, max_length=3,
@@ -302,6 +327,11 @@ class SlideContent(Contract):
         exhibit = context.get("required_exhibit")
         if exhibit and getattr(self, exhibit) is None:
             raise PydanticCustomError("required_exhibit", "populate the {exhibit} object for this slide", {"exhibit": exhibit})
+        choice = context.get("visual_choice")
+        if self.visual and choice and (self.visual.type != choice["type"] or self.visual.variant != choice.get("variant")):
+            raise PydanticCustomError("visual_choice", "use the planned visual type and variant", {})
+        if self.visual and self.visual.variant and self.visual.type != "flow-diagram":
+            raise ValueError("two-scenario-comparison is a flow-diagram variant")
         if self.rollout and context.get("omit_phase_quantities") and any(
             PHASE_NUMBER.search(PHASE_PERIOD.sub("", phase.milestone)) for phase in self.rollout.phases
         ):
@@ -349,7 +379,7 @@ def supports_point_icons(layout: Layout, theme: Theme, brand: BrandTemplate | No
 
 
 def accepts_web_image(item: OutlineItem, content: SlideContent, brand: BrandTemplate | None) -> bool:
-    if item.layout not in IMAGE_LAYOUTS or content.chart or content.table or content.stacked_comparison:
+    if item.layout not in IMAGE_LAYOUTS or content.chart or content.table or content.stacked_comparison or content.visual:
         return False
     if brand:
         return any(slot.kind == "picture" for slot in choose_layout(brand.layouts, item.layout).slots)
@@ -417,6 +447,8 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             image_ratio: float | None = None, data_driven: bool = False, recipe: Recipe = "standard") -> Slide:
     source_ids = {source.id for source in document.sources}
     rules = document.theme.design
+    if content.visual:
+        return compose_visual_slide(item, content, document, brand, image_ids, source_ids)
     layout = select_layout(item, content, document, image_ids, data_driven=data_driven,
                            allow_variants=bool(rules and not brand and document.theme.profile == "standard"))
     item = item.model_copy(update={"layout": layout})
@@ -851,3 +883,52 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]
     return style_slide_tables(slide, t)
+
+
+def compose_visual_slide(item, content, document, brand, image_ids, source_ids):
+    role = VISUAL_LAYOUTS[content.visual.type]
+    heading = item.title.strip() or content.title.strip() or "Untitled slide"
+    source_ids = list(dict.fromkeys(key for key in content.source_ids if key in source_ids))
+    slide = Slide(title=heading, layout=role, background=document.theme.background,
+                  notes=content.notes, source_ids=source_ids)
+    frame = ExhibitCanvas(document, slide, (.06, .055, .88, .89))
+    if brand:
+        header = content.model_copy(update={"points": [], "subtitle": "", "chart": None, "table": None,
+                                            "image_asset_id": None})
+        slide = compose_branded(item.model_copy(update={"layout": role, "title": heading}), header, document,
+                                image_ids, brand)
+        layout = next(layout for layout in brand.layouts if layout.index == slide.brand_layout_index)
+        slot = max((slot for slot in layout.slots if slot.kind in {"body", "chart", "table"}),
+                   key=lambda slot: slot.w * slot.h, default=None)
+        top = max([.23, *(element.y + element.h + .02 for element in slide.elements)])
+        slot_top = max(top, slot.y) if slot else top
+        if slot and slot.w >= .45 and slot.y + slot.h - slot_top >= .36:
+            x, top, w, bottom = slot.x, slot_top, slot.w, slot.y + slot.h
+        else:
+            before_heading = min((element.y for element in slide.elements), default=0) - .025
+            top, bottom = (.055, before_heading) if before_heading - .055 > .945 - top else (min(top, .90), .945)
+            x, w = .06, .88
+        frame = ExhibitCanvas(document, slide, (x, top, w, bottom - top))
+    else:
+        frame.label(heading, 0, 0, 1, .184, 35, bold=True, emphasis=content.decorations.emphasis if content.decorations else ())
+        heading_box = slide.elements[-1]
+        top = max(.17, heading_box.y + heading_box.h + .042)
+        frame = ExhibitCanvas(document, slide, (.06, top, .88, .945 - top))
+    if content.subtitle:
+        frame.label(content.subtitle, 0, 0, 1, .115, 15, color=frame.muted)
+    start = .13 if content.subtitle else 0
+    frame.line((0, start), (1, start), color=frame.rule)
+    bounds = (frame.x, frame.y + frame.h * (start + .025), frame.w, frame.h * (1 - start - .025))
+    visual = content.visual
+    numerical = (isinstance(visual, QuantitativeVisual) or
+                 (isinstance(visual, ScatterVisual) and not visual.points[0].quadrant) or
+                 visual.type == "sankey" or
+                 (visual.type in {"heatmap", "scoring-matrix", "decision-matrix"} and
+                  any(isinstance(cell, (int, float)) for row in visual.rows for cell in row.cells)))
+    if numerical and not slide.source_ids:
+        slide.warnings.append("Quantitative exhibit omitted because no source was cited.")
+        frame.label("Source data needed", 0, start + .18, 1, .18, 20, color=frame.muted)
+        return slide
+    compose_exhibit(document, slide, content, bounds, annotations=content.annotations,
+                    planned_annotations=item.annotations)
+    return slide

@@ -45,10 +45,14 @@ export class SlideCanvas {
     };
     const anchoredStart = anchorPoint(element.start_anchor);
     const anchoredEnd = anchorPoint(element.end_anchor);
-    if (!anchoredStart && !anchoredEnd && element.route !== 'elbow') return null;
+    if (!anchoredStart && !anchoredEnd && element.route !== 'elbow' &&
+        (!element.arrows || element.arrows === 'none') && element.weight <= 2) return null;
     const {x, y, w, h} = this.geometry(element);
     const [from, to] = {
       diagonal: [[x, y], [x + w, y + h]],
+      'diagonal-up': [[x, y + h], [x + w, y]],
+      'diagonal-down-left': [[x + w, y], [x, y + h]],
+      'diagonal-up-left': [[x + w, y + h], [x, y]],
       right: [[x, y + h / 2], [x + w, y + h / 2]],
       left: [[x + w, y + h / 2], [x, y + h / 2]],
       down: [[x + w / 2, y], [x + w / 2, y + h]],
@@ -112,6 +116,9 @@ export class SlideCanvas {
     return ({
       right: 'M 0 50 H 100', left: 'M 100 50 H 0',
       down: 'M 50 0 V 100', up: 'M 50 100 V 0',
+      'diagonal-up': 'M 0 100 L 100 0',
+      'diagonal-down-left': 'M 100 0 L 0 100',
+      'diagonal-up-left': 'M 100 100 L 0 0',
     } as Record<string, string>)[direction ?? ''] || 'M 0 0 L 100 100';
   }
 

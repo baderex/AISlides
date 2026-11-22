@@ -30,6 +30,7 @@ from app.rendering import flattened
 from app.research import collect
 from app.slide_design import build_slide, review_layouts
 from app.storage import Storage
+from app.visuals import CONTENT_GUIDANCE, SELECTION_GUIDANCE, VISUAL_LAYOUTS, named_visual
 
 log = logging.getLogger(__name__)
 POINT_ICON_GUIDANCE = (
@@ -605,7 +606,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         outline = ai.structured(Outline,
             f"Plan exactly {count} slides. Honor the requested slide allocation and give every slide a distinct purpose. "
             "If the user requests a cover, use the cover layout and their supplied deck title as its headline. "
-            "Use chart layouts only when grounded data is available." + style_guidance + period_guidance + research_guidance + image_guidance,
+            "Use chart layouts only when grounded data is available." + SELECTION_GUIDANCE + style_guidance
+            + period_guidance + research_guidance + image_guidance,
             {**planning_inputs, "slide_count": count, "design": theme.model_dump(),
              "uploaded_images": [asset.name for asset in assets if asset.media_type.startswith("image/")]}, "outline")
         use_exhibits = theme.design and theme.profile == "standard" and not brand
@@ -614,15 +616,21 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                         prompt, re.I) and not re.search(r"\b(no|omit|avoid|without)\s+(?:any\s+)?diagrams?\b", prompt, re.I))
         supplied_breakdown = len(re.findall(r"\([^()\n]*[$€£¥]\s*\d[^()\n]*[$€£¥]\s*\d[^()\n]*\)", prompt)) >= 2
         for part in outline.slides:
+            if not part.visual and ai.provider != "demo" and part.layout not in {"cover", "section", "quote"}:
+                part.visual = named_visual(f"{part.title} {part.topic} {part.purpose}")
+            if part.visual:
+                part.exhibit, part.layout = "visual", VISUAL_LAYOUTS[part.visual.type]
+                part.point_count = None
+                continue
             part.exhibit = (planned_exhibit(part, bool(context["sources"]), prefer_diagrams=prefer_diagrams,
                                             supplied_breakdown=supplied_breakdown) if use_exhibits else None)
             if part.exhibit:
                 part.layout = EXHIBIT_LAYOUTS[part.exhibit]
         if use_exhibits and re.search(r"\b(?:use|include|draw|show|make|as|with)\b[^.\n]{0,42}\bswim[ -]?lanes?\b", prompt, re.I):
             if not any(part.exhibit == "swimlane" for part in outline.slides):
-                processes = [part for part in outline.slides if part.layout == "process"]
+                processes = [part for part in outline.slides if part.layout == "process" and not part.visual]
                 candidates = processes or (outline.slides if len(outline.slides) == 1 else [])
-                if len(candidates) == 1:
+                if len(candidates) == 1 and not candidates[0].visual:
                     candidates[0].exhibit, candidates[0].layout = "swimlane", "process"
         context["outline"] = outline.model_dump(mode="json")
         document.title = outline.title
@@ -657,15 +665,25 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             images.difference_update(used)
         can_illustrate = (
             item.request.get("generate_images") and ai.provider != "demo" and image_configured() and
+            not part.visual and
             ai.usage.get("images", 0) < settings().image_limit_per_job and
             (part.layout in IMAGE_LAYOUTS or (part.layout == "cover" and not part.exhibit)) and
             (settings().ai_job_cost_budget <= 0 or ai.usage["estimated_cost"] + settings().image_cost_usd <= settings().ai_job_cost_budget)
         )
-        style_guidance = " " + SLIDE_GUIDANCE if document.theme.profile == "consulting" else ""
-        if data_driven:
-            style_guidance += DATA_SLIDE_GUIDANCE
-        if document.theme.design and document.theme.profile == "standard" and not brand:
-            style_guidance += COMPOSITION_GUIDANCE.get(part.layout, "")
+        style_guidance = ""
+        if part.visual:
+            if data_driven:
+                style_guidance = (
+                    " Match every plotted figure to its source category, unit, and reporting period. "
+                    "Use the requested ranking basis and as-of date, and call out any material evidence gaps."
+                )
+        else:
+            if document.theme.profile == "consulting":
+                style_guidance += " " + SLIDE_GUIDANCE
+            if data_driven:
+                style_guidance += DATA_SLIDE_GUIDANCE
+            if document.theme.design and document.theme.profile == "standard" and not brand:
+                style_guidance += COMPOSITION_GUIDANCE.get(part.layout, "")
         if context.get("brief_source_id"):
             style_guidance += (
                 " The user-provided brief is a valid source for the exact figures it supplies. Cite its source ID "
@@ -682,7 +700,9 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             f"The selected composition is {part.exhibit}. Populate that top-level object. "
             if part.exhibit else ""
         )
-        if part.exhibit == "swimlane":
+        if part.exhibit == "visual":
+            exhibit_instruction += CONTENT_GUIDANCE
+        elif part.exhibit == "swimlane":
             exhibit_instruction += (
                 "Use the lane names for distinct owners, actors or systems. Put nodes in the lane of the actor performing "
                 "the action, and use column to order the work from left to right. Assign unique IDs and cells. "
@@ -749,6 +769,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
               "imagery_direction": document.theme.design.imagery if document.theme.design else "",
               "brief_source_id": context.get("brief_source_id"),
               "required_exhibit": part.exhibit,
+              "visual_choice": part.visual.model_dump(mode="json") if part.visual else None,
               "point_count": point_count,
               "omit_phase_quantities": phases_without_quantities,
               "earlier_exhibits": context.get("earlier_exhibits", []),
@@ -885,6 +906,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             + point_icon_guidance(part, document, brand), {
             **slide_inputs(item, context, part if data_driven else None), "item": part.model_dump(), "topic": document.title,
             "previous": context["slide_content"], "issues": context["review_issues"], "required_exhibit": part.exhibit,
+            "visual_choice": part.visual.model_dump(mode="json") if part.visual else None,
             "point_count": part.point_count if context["slide_content"].get("points") else None,
             "omit_phase_quantities": omit_phase_quantities(part, inferred_intent),
         }, "slide")

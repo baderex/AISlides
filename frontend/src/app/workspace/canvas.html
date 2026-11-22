@@ -38,7 +38,7 @@
             @case ('line') {
               <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-connector" aria-hidden="true">
                 <svg:path [attr.d]="link?.path ?? linePath(el.direction)" fill="none" [attr.stroke]="el.color"
-                  [attr.stroke-width]="el.weight" vector-effect="non-scaling-stroke" />
+                  [style.stroke-width]="font(el.weight)" [attr.stroke-dasharray]="el.dashed ? '5 3' : null" vector-effect="non-scaling-stroke" />
                 @if (link?.startTip) { <svg:polygon [attr.points]="link?.startTip" [attr.fill]="el.color" /> }
                 @if (link?.endTip) { <svg:polygon [attr.points]="link?.endTip" [attr.fill]="el.color" /> }
               </svg>
@@ -68,6 +68,7 @@
                     <tr [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">
                       @for (cell of row; track $index) {
                         <th scope="col" [class.numeric-cell]="el.numeric_columns?.includes($index)"
+                          [style.background]="el.cell_fills?.[rowIndex]?.[$index]" [style.color]="el.cell_inks?.[rowIndex]?.[$index]"
                           [style.--cell-inset-x]="format.columns[$index].insetX">{{ cell }}</th>
                       }
                     </tr>
@@ -80,8 +81,8 @@
                         <td [class.numeric-cell]="el.numeric_columns?.includes($index)"
                           [class.row-label]="$first && !el.numeric_columns?.includes($index)"
                           [class.negative-value]="negative" [class.focus-value]="focusCell"
-                          [style.background]="focusCell ? el.focus_cell_fill : null"
-                          [style.color]="negative ? el.negative_ink : focusCell || (focusRow && $first) ? el.focus_ink : null"
+                          [style.background]="el.cell_fills?.[rowIndex]?.[$index] ?? (focusCell ? el.focus_cell_fill : null)"
+                          [style.color]="negative ? el.negative_ink : el.cell_inks?.[rowIndex]?.[$index] ?? (focusCell || (focusRow && $first) ? el.focus_ink : null)"
                           [style.--cell-inset-x]="format.columns[$index].insetX">{{ cell }}</td>
                       }
                     </tr>

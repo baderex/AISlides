@@ -147,15 +147,20 @@ class Line(ElementBase):
     type: Literal["line"] = "line"
     color: Color = "#4C52D9"
     weight: float = Field(default=2, ge=0.5, le=20)
-    direction: Literal["diagonal", "right", "left", "down", "up"] = "diagonal"
+    direction: Literal["diagonal", "diagonal-up", "diagonal-down-left", "diagonal-up-left",
+                       "right", "left", "down", "up"] = "diagonal"
     arrows: Literal["none", "end", "both"] = "none"
     start_anchor: ConnectorAnchor | None = None
     end_anchor: ConnectorAnchor | None = None
     route: Literal["straight", "elbow"] = "straight"
+    dashed: bool = False
 
     def endpoints(self, width, height):
         return {
             "diagonal": ((0, 0), (width, height)),
+            "diagonal-up": ((0, height), (width, 0)),
+            "diagonal-down-left": ((width, 0), (0, height)),
+            "diagonal-up-left": ((width, height), (0, 0)),
             "right": ((0, height / 2), (width, height / 2)),
             "left": ((width, height / 2), (0, height / 2)),
             "down": ((width / 2, 0), (width / 2, height)),
@@ -181,6 +186,8 @@ class Table(ElementBase):
     focus_cell_fill: Color | None = None
     focus_ink: Color | None = None
     negative_ink: Color | None = None
+    cell_fills: list[list[Color | None]] = Field(default_factory=list, max_length=12)
+    cell_inks: list[list[Color | None]] = Field(default_factory=list, max_length=12)
 
     def row_style(self, index: int) -> tuple[str, str, bool]:
         if index == 0 and self.header_fill:
@@ -201,6 +208,10 @@ class Table(ElementBase):
                 fill, ink = self.focus_cell_fill or fill, self.focus_ink or ink
             elif column == 0:
                 ink = self.focus_ink or ink
+        if self.cell_fills:
+            fill = self.cell_fills[row][column] or fill
+        if self.cell_inks:
+            ink = self.cell_inks[row][column] or ink
         return fill, self.negative_ink if self.negative_cell(row, column) else ink
 
     def cell_align(self, column: int) -> Literal["left", "right"]:
@@ -225,6 +236,9 @@ class Table(ElementBase):
         count = len(self.rows[0])
         if not 1 <= count <= 8 or any(len(row) != count for row in self.rows):
             raise ValueError("Table rows must have an equal width of 1 to 8 cells")
+        for styles in (self.cell_fills, self.cell_inks):
+            if styles and (len(styles) != len(self.rows) or any(len(row) != count for row in styles)):
+                raise ValueError("Cell style grids must match the table dimensions")
         return self
 
 

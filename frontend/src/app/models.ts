@@ -24,11 +24,12 @@ export interface ImageElement extends Geometry { type: 'image'; asset_id: string
 export interface ConnectorAnchor { shape_id: string; side: 'top' | 'left' | 'bottom' | 'right' }
 export interface LineElement extends Geometry {
   type: 'line'; color: string; weight: number;
-  direction?: 'diagonal' | 'right' | 'left' | 'down' | 'up';
+  direction?: 'diagonal' | 'diagonal-up' | 'diagonal-down-left' | 'diagonal-up-left' | 'right' | 'left' | 'down' | 'up';
   arrows?: 'none' | 'end' | 'both';
   start_anchor?: ConnectorAnchor | null;
   end_anchor?: ConnectorAnchor | null;
   route?: 'straight' | 'elbow';
+  dashed?: boolean;
 }
 export interface TableElement extends Geometry {
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
@@ -36,6 +37,7 @@ export interface TableElement extends Geometry {
   header_rule?: string | null; numeric_columns?: number[];
   focus_rows?: number[]; focus_fill?: string | null; negative_ink?: string | null;
   focus_columns?: number[]; focus_cell_fill?: string | null; focus_ink?: string | null;
+  cell_fills?: (string | null)[][]; cell_inks?: (string | null)[][];
 }
 export interface ChartElement extends Geometry {
   type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; show_values?: boolean;

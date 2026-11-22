@@ -174,7 +174,7 @@ def draw_swimlane(elements, diagram, body_top, theme, background, label):
 
 def draw_diagram(elements, diagram, body_top, theme, background, label, *, compact, vertical_flow=False):
     """Compose the diagram from independently editable shapes, text and connectors."""
-    shades = (theme.design.chart_colors + [theme.ink, theme.accent])[:3]
+    shades = [*(theme.design.chart_colors if theme.design else []), theme.ink, theme.accent, theme.muted][:3]
     role_colors = {"actor": theme.accent, "service": shades[1], "store": shades[2],
                    "decision": shades[0], "step": theme.accent}
     ink = readable(theme.ink, background)

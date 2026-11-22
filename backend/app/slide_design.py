@@ -17,6 +17,8 @@ NON_FEATURE_BRIEF = re.compile(r"\b(steps?|sequence|workflow|risks?|phases?|use 
 
 
 def recipe_options(part, content, document):
+    if content.visual:
+        return ["standard"]
     theme = document.theme
     if not theme.design or theme.profile != "standard":
         return ["standard"]
@@ -96,13 +98,17 @@ def build_slide(part, content, document, index, images, brand=None, *, image_rat
                     image_ratio=image_ratio, web_image_ratio=web_image_ratio, recipe=selected)
     if slide_id:
         slide.id = slide_id
-    if not brand and document.theme.profile == "standard":
+    if not brand and (document.theme.profile == "standard" or content.visual):
         if part.key_message and document.theme.design:
             heading = next((e for e in slide.elements if isinstance(e, Text) and e.text == slide.title), None)
             if heading:
                 accent = readable(document.theme.accent, slide.background, heading.color)
                 matches = re.finditer(r"(?:[−-]?[$€£¥]\d[\d,.]*[kmb]?|\b\d+(?:\.\d+)?%)", heading.text, re.I)
-                heading.spans = [TextSpan(start=m.start(), end=m.end(), color=accent, bold=True) for m in matches]
+                spans = list(heading.spans)
+                for match in matches:
+                    if all(match.end() <= span.start or match.start() >= span.end for span in spans):
+                        spans.append(TextSpan(start=match.start(), end=match.end(), color=accent, bold=True))
+                heading.spans = sorted(spans, key=lambda span: span.start)
         id_namespace = id_namespace or slide.id
         stable_ids(slide, id_namespace)
         slide.spec = SlideSpec(plan=part.model_dump(mode="json"), content=content.model_dump(mode="json"),

@@ -454,6 +454,17 @@ def arrowheads(line, points, size):
                (base_x + uy * depth * .45, base_y - ux * depth * .45))
 
 
+def dashed_segments(points, scale):
+    for (x, y), (ex, ey) in zip(points, points[1:]):
+        dx, dy = ex - x, ey - y
+        length = hypot(dx, dy)
+        start = 0
+        while start < length:
+            end = min(start + 5 * scale, length)
+            yield [(x + dx * offset / length, y + dy * offset / length) for offset in (start, end)]
+            start += 8 * scale
+
+
 def connector_points(line, x, y, width, height, nodes):
     start, end = line.endpoints(width, height)
     points = [(x + start[0], y + start[1]), (x + end[0], y + end[1])]
@@ -512,7 +523,7 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
             else:
                 draw.rectangle((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
         elif isinstance(el, Line):
-            if el.start_anchor or el.end_anchor or el.route == "elbow":
+            if el.start_anchor or el.end_anchor or el.route == "elbow" or el.arrows != "none" or el.weight > 2:
                 points = connector_points(el, nx, ny, nw, nh, nodes)
                 pixels = [(round(px * bounds[0]), round(py * bounds[1])) for px, py in points]
                 margin = max(1, round(max(6, el.weight * 3.5) * scale))
@@ -525,7 +536,8 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                 line_points = [(px - x, py - y) for px, py in pixels]
             else:
                 line_points = el.endpoints(w - 1, h - 1)
-            draw.line(line_points, fill=el.color, width=max(1, round(el.weight * scale)))
+            for segment in dashed_segments(line_points, scale) if el.dashed else [line_points]:
+                draw.line(segment, fill=el.color, width=max(1, round(el.weight * scale)))
             for tip in arrowheads(el, line_points, max(6, el.weight * 3.5) * scale):
                 draw.polygon(tip, fill=el.color)
         elif isinstance(el, Image):
@@ -682,6 +694,8 @@ def to_pdf(document: Document, get_asset) -> bytes:
             elif isinstance(el, Line):
                 pdf.setStrokeColor(HexColor(el.color))
                 pdf.setLineWidth(el.weight)
+                if el.dashed:
+                    pdf.setDash(5, 3)
                 if el.start_anchor or el.end_anchor or el.route == "elbow":
                     points = connector_points(el, nx, ny, nw, nh, nodes)
                     line_points = [((px - nx) * width, (py - ny) * height) for px, py in points]
