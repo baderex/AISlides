@@ -34,6 +34,15 @@ MATRIX = """<page><text font="display" size="70">FORM</text><row grow="1" align=
   </matrix></row></col></row></page>"""
 
 
+def test_divider_in_end_aligned_column_uses_available_width():
+    markup = ('<page><col w="400" align="end"><rule h="1"/><rule w="36" h="2"/></col></page>')
+    slide, _ = compose(markup, "Dividers", PALETTE, "16:9")
+    full, short = slide.elements
+    assert full.w == pytest.approx(400 / 1280)
+    assert short.w == pytest.approx(36 / 1280)
+    assert full.x + full.w == pytest.approx(short.x + short.w)
+
+
 def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     item = SimpleNamespace(request={"prompt": "Compare error correction methods"})
     sources = [{"id": key, "excerpt": key * 200} for key in ("brief", "history", "hardware")]
