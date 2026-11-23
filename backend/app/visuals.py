@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 from typing import Annotated, Generic, Literal, TypeVar, get_args
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationInfo, model_validator
 from pydantic_core import PydanticCustomError
 
 from app.diagrams import Diagram, Swimlane
@@ -16,7 +16,8 @@ Number = Annotated[float, Field(ge=-1e15, le=1e15)]
 Positive = Annotated[Number, Field(gt=0)]
 Index = Annotated[int, Field(ge=0, le=11)]
 
-QuantitativeType = Literal["ranked-bar", "waterfall", "stacked-bar", "mekko", "funnel", "slope", "tornado", "pareto"]
+MultiRowChartType = Literal["ranked-bar", "waterfall", "stacked-bar", "mekko", "funnel", "tornado", "pareto"]
+QuantitativeType = Literal[MultiRowChartType, "slope"]
 MatrixType = Literal["heatmap", "decision-matrix", "scoring-matrix", "raci", "capability-map"]
 ScatterType = Literal["two-by-two", "bubble-chart"]
 GraphType = Literal["architecture", "data-flow", "flowchart", "state-machine", "pipeline", "er-diagram",
@@ -109,18 +110,18 @@ class MetricRow(Contract):
 
 
 class QuantitativeVisual(VisualBase):
-    type: QuantitativeType
+    type: MultiRowChartType
     metric: str = Field(default="", max_length=80, description="Source metric name for a single-value series.")
     segment_unit: str = Field(default="", max_length=22, description="Unit of the inputs used to calculate Mekko shares.")
     rows: list[MetricRow] = Field(min_length=2, max_length=8)
     series: list[Label] = Field(default_factory=list, max_length=4)
-    highlight: Label | None = None
+    highlight: Label | None = Field(default=None, description="Exact label of the row to emphasize, or null.")
     start_label: Label = "Start"
     end_label: Label = "End"
     baseline: Number | None = Field(default=None, description="Waterfall opening total or tornado reference value.")
 
     @model_validator(mode="after")
-    def valid_data(self):
+    def valid_data(self, info: ValidationInfo):
         kind = self.type
         width = len(self.rows[0].values)
         expected = 2 if kind in {"slope", "tornado"} else len(self.series) if kind in {"stacked-bar", "mekko"} else 1
@@ -143,8 +144,26 @@ class QuantitativeVisual(VisualBase):
             if kind == "funnel" and values != sorted(values, reverse=True):
                 raise ValueError("funnel stages must follow the process in descending order")
         if self.highlight and self.highlight not in {row.label for row in self.rows}:
-            raise ValueError("highlight must match a category label")
+            # There is no other line to de-emphasize on a generated single-row slope.
+            if kind == "slope" and len(self.rows) == 1 and (info.context or {}).get("required_exhibit") == "visual":
+                self.highlight = None
+            else:
+                raise PydanticCustomError("row_highlight", "set highlight to an exact row label or null")
         return self
+
+
+class SlopeRow(MetricRow):
+    values: list[Number] = Field(min_length=2, max_length=2, description="Start and end values in period order.")
+
+
+class SlopeVisual(QuantitativeVisual):
+    """Compare two periods. Each row tracks one index, company, or metric across both periods."""
+
+    type: Literal["slope"]
+    rows: list[SlopeRow] = Field(min_length=1, max_length=8)
+    series: Annotated[list[Label], Field(min_length=2, max_length=2)] | Annotated[list[Label], Field(max_length=0)] = Field(
+        default_factory=list, description="Start and end period labels in order. An empty array uses start_label and end_label."
+    )
 
 
 Cell = TypeVar("Cell")
@@ -410,7 +429,7 @@ class SwimlaneVisual(VisualBase):
     swimlane: Swimlane
 
 
-VisualUnion = (QuantitativeVisual | MatrixVisual | ScatterVisual | GraphVisual | ScheduleVisual |
+VisualUnion = (QuantitativeVisual | SlopeVisual | MatrixVisual | ScatterVisual | GraphVisual | ScheduleVisual |
                SequenceVisual | VennVisual | CodeVisual | FlowVisual | SwimlaneVisual)
 Visual = Annotated[VisualUnion, Field(discriminator="type")]
 VISUAL_MODELS = {key: model for model in get_args(VisualUnion)

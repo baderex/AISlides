@@ -53,6 +53,7 @@ VALIDATION_HINTS = {
     "decision_scope": "keep the future gate condition in if_missed",
     "phase_quantities": "use dates in period only; describe milestones without inventing quantities",
     "visual_choice": "use the planned visual type and variant",
+    "row_highlight": "set highlight to an exact row label or null",
 }
 
 

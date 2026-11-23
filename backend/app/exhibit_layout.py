@@ -14,7 +14,7 @@ from app.domain import ConnectorAnchor, Line, Shape, Table, Text, TextSpan, disp
 from app.lucide import ICON_NAMES
 from app.rendering import longest_word_width, physical, slide_icon, text_height
 from app.visuals import (CodeVisual, FlowVisual, GraphVisual, MatrixVisual, QuantitativeVisual,
-                         ScatterVisual, ScheduleVisual, SequenceVisual, SwimlaneVisual, VennVisual, weighted_average)
+                         ScatterVisual, ScheduleVisual, SequenceVisual, SlopeVisual, SwimlaneVisual, VennVisual, weighted_average)
 
 
 class ExhibitCanvas:
@@ -833,7 +833,7 @@ def legacy_diagram(c, v):
             c.slide.elements.append(element.model_copy(update=c.box(x, y, w, h)))
 
 
-DRAW = {QuantitativeVisual: quantitative, MatrixVisual: matrix, ScatterVisual: scatter, GraphVisual: graph,
+DRAW = {QuantitativeVisual: quantitative, SlopeVisual: quantitative, MatrixVisual: matrix, ScatterVisual: scatter, GraphVisual: graph,
         ScheduleVisual: schedule, SequenceVisual: sequence, VennVisual: venn, CodeVisual: code,
         FlowVisual: legacy_diagram, SwimlaneVisual: legacy_diagram}
 
