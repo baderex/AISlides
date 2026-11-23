@@ -6,6 +6,10 @@ The studio is at [localhost:4200](http://localhost:4200), the API docs at [local
 
 The Angular dev server reloads frontend changes. Restart the supervisor after changing backend code or configuration.
 
+Each generation job has a cumulative token budget (`AI_JOB_TOKEN_BUDGET`, default 90,000). Planning, slide generation, reviews and validation retries all draw from it. **Retry generation** preserves both completed slides and usage. To give a saved job more room, set a higher total in `backend/.env`, restart the worker and retry the presentation. The worker setting also applies to other jobs it processes.
+
+The worker limits each reply by stage and by the budget left after estimating the request input. Outline limits scale with the requested slide count. On OpenRouter, the worker requests non-thinking mode for DeepSeek V4 models. Inspect `usage.by_stage` at `GET /api/v1/jobs/{job_id}` for call counts, input and output tokens, validation failures, and truncations. Where reported, `reasoning` is included in output. Older checkpoints retain their original totals and accumulate stage details for new calls.
+
 ## Branded templates and export review
 
 Open **Skill library → New skill → Branded PPTX** and select a `.pptx` with title or body placeholders defined in Slide Master view. FrameCraft uses the template aspect ratio, theme and placeholder positions during generation. The browser canvas approximates the theme and slot positions. The PowerPoint export uses the native masters, backgrounds and layout artwork, including the original layout names. Ordinary slide artwork and text in the uploaded sample deck stay out of the generated slides. Move recurring brand artwork to the slide master or layouts before importing. Templates support 16:9, 4:3 and square slides.
@@ -24,9 +28,8 @@ Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env` and restar
 | OpenRouter | `https://openrouter.ai/api/v1` | OpenRouter key |
 | Ollama | `http://127.0.0.1:11434` | Optional |
 | OpenAI-compatible | Your API root | Optional, depending on the server |
-| Offline demo | `demo` | Leave blank |
 
-For OpenAI-compatible APIs, Anthropic and Ollama, you can also use the full endpoint URL. For native Ollama on a different port, use the full `/api/chat` URL and enter the installed model tag as `LLM_MODEL_ID`. Set `COMPATIBLE_STRUCTURED=true` when the compatible server supports the OpenAI JSON Schema response format. Leave `LLM_MODEL_ID` blank for the offline demo.
+For OpenAI-compatible APIs, Anthropic and Ollama, you can also use the full endpoint URL. For native Ollama on a different port, use the full `/api/chat` URL and enter the installed model tag as `LLM_MODEL_ID`. Set `COMPATIBLE_STRUCTURED=true` when the compatible server supports the OpenAI JSON Schema response format.
 
 Set `RESEARCH_API_KEY` in `.env` to make **Web research** checked by default in the studio. `RESEARCH_API_URL` defaults to `https://api.search.brave.com/res/v1/web/search` and also accepts `BRAVE_WEB_SEARCH` as an environment variable alias. If you override the URL, use a full endpoint that accepts Brave Search requests and returns the same response format. Optionally set `RESEARCH_CONTEXT_API_URL=https://api.search.brave.com/res/v1/llm/context` to try Brave Context first for detailed research and fall back to the Web Search endpoint if needed. Search uses snippets and titles, and references are linked to slides when selected by the model.
 
@@ -62,6 +65,6 @@ From a second backend terminal, start `python -m app.worker`. From `frontend`, r
 
 Run `python -m pytest` from `backend` with its virtual environment activated. From `frontend`, run `npm test` and `npm run build`. To run the browser suite after setup, run `npx playwright install chromium` and `npm run e2e`. For an installed Edge or Chrome browser, set `STUDIO_BROWSER_CHANNEL=msedge` or `chrome` and skip the Chromium install.
 
-Playwright starts the API, worker and Angular on ports 8000 and 4200 with temporary SQLite and file storage and the built-in demo provider. Free both ports before running it. `STUDIO_E2E_REUSE=1` allows Playwright to reuse an existing server at port 4200, and the suite writes to that server's workspace. To include the branded PowerPoint review browser test, set `POWERPOINT_RENDERER` in the shell that launches Playwright, even if the application already finds Impress.
+Playwright starts the API, worker and Angular on ports 8000 and 4200 with temporary SQLite and file storage and test-only model responses. Free both ports before running it. `STUDIO_E2E_REUSE=1` allows Playwright to reuse an existing server at port 4200, and the suite writes to that server's workspace. To include the branded PowerPoint review browser test, set `POWERPOINT_RENDERER` in the shell that launches Playwright, even if the application already finds Impress.
 
 With the default settings and backend working directory, SQLite uses `backend/data/app.db` and stored objects use `backend/data/uploads`. Stop both Python processes before copying `backend/data` for a consistent local backup.

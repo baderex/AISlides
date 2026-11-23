@@ -17,6 +17,7 @@ export interface Geometry {
 }
 export interface TextSpan { start: number; end: number; color?: string | null; bold?: boolean | null }
 export interface TextElement extends Geometry {
+  single_line?: boolean; line_spacing?: number | null;
   spans?: TextSpan[];
   type: 'text'; text: string; size: number; color: string; font: string; bold: boolean; align: 'left' | 'center' | 'right';
 }
@@ -33,6 +34,7 @@ export interface LineElement extends Geometry {
   dashed?: boolean;
 }
 export interface TableElement extends Geometry {
+  css?: {columns: number[]; rows: number[]; align: ('left' | 'right' | 'center')[][]; bold: boolean[][]} | null;
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
   header_fill?: string | null; header_color?: string | null; row_rule?: string | null;
   header_rule?: string | null; numeric_columns?: number[];

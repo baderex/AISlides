@@ -102,6 +102,8 @@ class TextSpan(Contract):
 
 class Text(ElementBase):
     type: Literal["text"] = "text"
+    single_line: bool = False
+    line_spacing: float | None = Field(default=None, ge=.5, le=4)
     text: str = Field(max_length=5000)
     size: float = Field(default=24, ge=8, le=100)
     color: Color = "#181D3B"
@@ -179,7 +181,15 @@ class Line(ElementBase):
         }[self.direction]
 
 
+class TableLayout(Contract):
+    columns: list[Annotated[float, Field(gt=0, le=1)]] = Field(min_length=1, max_length=8)
+    rows: list[Annotated[float, Field(gt=0, le=1)]] = Field(min_length=1, max_length=12)
+    align: list[list[Literal["left", "center", "right"]]] = Field(max_length=12)
+    bold: list[list[bool]] = Field(max_length=12)
+
+
 class Table(ElementBase):
+    css: TableLayout | None = None
     type: Literal["table"] = "table"
     rows: list[list[Annotated[str, Field(max_length=180)]]] = Field(min_length=1, max_length=12)
     color: Color = "#181D3B"
@@ -225,10 +235,14 @@ class Table(ElementBase):
             ink = self.cell_inks[row][column] or ink
         return fill, self.negative_ink if self.negative_cell(row, column) else ink
 
-    def cell_align(self, column: int) -> Literal["left", "right"]:
+    def cell_align(self, column: int, row: int = 0) -> Literal["left", "center", "right"]:
+        if self.css:
+            return self.css.align[row][column]
         return "right" if self.row_rule and column in self.numeric_columns else "left"
 
     def cell_bold(self, row: int, column: int) -> bool:
+        if self.css:
+            return self.css.bold[row][column]
         return (row == 0 and self.header_fill is not None) or self.negative_cell(row, column) or (
             row in self.focus_rows and column in self.focus_columns
         ) or bool(
@@ -250,6 +264,12 @@ class Table(ElementBase):
         for styles in (self.cell_fills, self.cell_inks):
             if styles and (len(styles) != len(self.rows) or any(len(row) != count for row in styles)):
                 raise ValueError("Cell style grids must match the table dimensions")
+        if self.css:
+            if (len(self.css.columns) != count or len(self.css.rows) != len(self.rows)
+                    or any(abs(sum(tracks)-1) > .005 for tracks in (self.css.rows, self.css.columns))
+                    or any(len(grid) != len(self.rows) or any(len(row) != count for row in grid)
+                           for grid in (self.css.align, self.css.bold))):
+                raise ValueError("Measured table tracks and cell styles must match its dimensions")
         return self
 
 
@@ -263,19 +283,25 @@ def display_value(value: float, prefix: str = "") -> str:
     return ("−" if value < 0 and magnitude != "0" else "") + prefix + magnitude
 
 
-class Chart(ElementBase):
-    type: Literal["chart"] = "chart"
-    chart: Literal["bar", "column", "line", "pie", "stacked_column"] = "column"
+ChartKind = Literal["bar", "column", "line", "pie", "stacked_column"]
+
+
+class WorkbookData(Contract):
+    chart: ChartKind
     categories: list[ShortText] = Field(min_length=1, max_length=16)
     series: list[Series] = Field(min_length=1, max_length=5)
-    color: Color = "#4C52D9"
-
-    palette: list[Color] = Field(default_factory=list, max_length=5)
-    label_color: Color = "#292C49"
-    font: str = Field(default="Arial", max_length=60)
     value_prefix: str = Field(default="", max_length=8)
     value_suffix: str = Field(default="", max_length=8)
     show_values: bool = False
+
+
+class Chart(ElementBase, WorkbookData):
+    type: Literal["chart"] = "chart"
+    chart: ChartKind = "column"
+    color: Color = "#4C52D9"
+    palette: list[Color] = Field(default_factory=list, max_length=5)
+    label_color: Color = "#292C49"
+    font: str = Field(default="Arial", max_length=60)
     highlight: int | None = Field(default=None, ge=0)
     context_color: Color | None = None
 
@@ -351,6 +377,12 @@ Recipe = Literal[
 ]
 
 
+class ExhibitRegion(ElementBase):
+    """Browser-measured slot and the generated objects that belong to it."""
+    background: Color | None = None
+    member_ids: list[Identifier] = Field(default_factory=list, max_length=100)
+
+
 class SlideSpec(Contract):
     plan: dict[str, JsonValue]
     content: dict[str, JsonValue]
@@ -368,6 +400,7 @@ class SlideSpec(Contract):
     generated_notes: str = Field(default="", max_length=7000)
     value_bindings: list[dict[str, JsonValue]] = Field(default_factory=list, max_length=150)
     available_recipes: list[Recipe] = Field(default_factory=list, max_length=3)
+    html_region: ExhibitRegion | None = None
 
 
 class Slide(Contract):

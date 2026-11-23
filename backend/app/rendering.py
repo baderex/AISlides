@@ -29,6 +29,7 @@ FONT_FILES = {
     "calibri": ("calibri.ttf", "calibrib.ttf"),
     "cambria": ("cambria.ttc", "cambriab.ttf"),
     "georgia": ("georgia.ttf", "georgiab.ttf"),
+    "consolas": ("consola.ttf", "consolab.ttf"),
     "times new roman": ("times.ttf", "timesbd.ttf"),
     "trebuchet ms": ("trebuc.ttf", "trebucbd.ttf"),
     "verdana": ("verdana.ttf", "verdanab.ttf"),
@@ -40,7 +41,8 @@ SERIF_FAMILIES = {"cambria", "georgia", "source serif 4", "times new roman", "se
 def font(size: int, bold: bool, family: str = "Arial"):
     family = family.strip().lower()
     serif = family in SERIF_FAMILIES
-    alternate = ("DejaVuSerif" if serif else "DejaVuSans") + ("-Bold" if bold else "") + ".ttf"
+    fallback = "DejaVuSansMono" if family == "consolas" else "DejaVuSerif" if serif else "DejaVuSans"
+    alternate = fallback + ("-Bold" if bold else "") + ".ttf"
     windows = FONT_FILES.get(family, FONT_FILES["georgia" if serif else "arial"])[int(bold)]
     for candidate in (str(Path("C:/Windows/Fonts") / windows), alternate):
         try:
@@ -79,15 +81,16 @@ class RasterText:
 
 
 @lru_cache(maxsize=1024)
-def raster_text(value, width, height, size, bold, family="Arial", align="left") -> RasterText:
+def raster_text(value, width, height, size, bold, family="Arial", align="left",
+                single_line=False, leading=TEXT_LEADING) -> RasterText:
     face = font(round(size * TEXT_SCALE), bold, family)
 
     def occupied(line):
         left, _, right, _ = face.getbbox(line, anchor="lt")
         return max(right, face.getlength(line)) - min(0, left)
 
-    lines = wrapped(value, width, occupied)
-    step = size * TEXT_SCALE * TEXT_LEADING
+    lines = value.split("\n") if single_line else wrapped(value, width, occupied)
+    step = size * TEXT_SCALE * leading
     runs = []
     fits = len(lines) * step <= height
     for i, line in enumerate(lines):
@@ -252,6 +255,8 @@ def fit_slide_text(document: Document, slide: Slide) -> list[str]:
     warnings = []
     elements = list(flattened(slide.elements))
     for index, (el, x, y, w, h) in enumerate(elements):
+        if not el.edited and ((isinstance(el, Text) and el.line_spacing) or (isinstance(el, Table) and el.css)):
+            continue  # Chromium already measured this frame at the authored font size.
         if isinstance(el, Text):
             def fits(frame_height):
                 if el.spans:
@@ -301,10 +306,11 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
         if isinstance(el, Image) and el.asset_id not in assets and not bundled_icon(el.asset_id):
             warnings.append(f"Missing image: {el.alt or el.asset_id}")
         if isinstance(el, Table):
-            for row in range(min(2, len(el.rows))):
-                fill, ink, header = el.row_style(row)
-                if contrast(ink, fill) < 4.5:
-                    warnings.append("Low table header contrast." if header else "Low table cell contrast.")
+            for row, cells in enumerate(el.rows):
+                if any(text.strip() and contrast(*el.cell_style(row, col)) < 4.5 for col, text in enumerate(cells)):
+                    warning = "Low table header contrast." if row == 0 and el.header_fill else "Low table cell contrast."
+                    if warning not in warnings:
+                        warnings.append(warning)
         if isinstance(el, Chart) and el.palette and contrast(el.label_color, slide.background) < 4.5:
             warnings.append("Low chart label contrast.")
         if isinstance(el, Text):
@@ -322,16 +328,28 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
 
 
 def table_columns(table: Table, width: float) -> list[tuple[float, float]]:
+    if table.css:
+        return tracks(table.css.columns, width)
     count = len(table.rows[0])
     compact = table.row_rule and width < 360
     mixed = table.row_rule and count >= 4 and 0 < len(table.numeric_columns) < count
     weights = [1.5 if (compact or mixed) and column not in table.numeric_columns else 1 for column in range(count)]
+    return tracks(weights, width)
+
+
+def tracks(weights, length):
     total = sum(weights)
-    widths = [width * weight / total for weight in weights]
-    return list(zip(accumulate(widths, initial=0), widths))
+    sizes = [length * weight / total for weight in weights]
+    return list(zip(accumulate(sizes, initial=0), sizes))
+
+
+def table_rows(table: Table, height: float):
+    return tracks(table.css.rows if table.css else [1] * len(table.rows), height)
 
 
 def table_insets(table: Table, cell_width: float, row_height: float) -> tuple[float, float]:
+    if table.css:
+        return 6, 3  # 8px horizontal and 4px vertical cell padding on a 96ppi canvas.
     if table.row_rule:
         return min(12, cell_width * .1), min(6, row_height * .15)
     return CELL_INSET_X, CELL_INSET_Y
@@ -339,13 +357,12 @@ def table_insets(table: Table, cell_width: float, row_height: float) -> tuple[fl
 
 def table_text_fits(table: Table, width: float, height: float) -> bool:
     columns = table_columns(table, width)
-    row_height = height / len(table.rows)
-    for index, row in enumerate(table.rows):
+    for index, (row, (_, row_height)) in enumerate(zip(table.rows, table_rows(table, height))):
         for column, (cell, (_, cell_width)) in enumerate(zip(row, columns)):
             inset_x, inset_y = table_insets(table, cell_width, row_height)
             if not text_fits(cell, cell_width - 2 * inset_x, row_height - 2 * inset_y,
                              table.size, table.cell_bold(index, column),
-                             table.font, table.cell_align(column)):
+                             table.font, table.cell_align(column, index)):
                 return False
     return True
 
@@ -511,7 +528,8 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                         ink.text((left, top), text, fill=shade, font=face, anchor="lt")
                         left += face.getlength(text)
             else:
-                layout = raster_text(el.text, width, height, el.size, el.bold, el.font, el.align)
+                layout = raster_text(el.text, width, height, el.size, el.bold, el.font, el.align,
+                                     el.single_line and not el.edited, el.line_spacing or TEXT_LEADING)
                 draw_raster_text(ink, layout, el.color)
             layer = text_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Shape):
@@ -556,11 +574,10 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
             table_layer = PILImage.new("RGBA", (max(1, width), max(1, height)))
             table_draw = ImageDraw.Draw(table_layer)
             columns = table_columns(el, nw * ptw)
-            rh = nh * pth / len(el.rows)
-            for row, cells in enumerate(el.rows):
+            rows = table_rows(el, nh * pth)
+            for row, (cells, (top, rh)) in enumerate(zip(el.rows, rows)):
                 for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
                     fill, ink = el.cell_style(row, col)
-                    top = row * rh
                     inset_x, inset_y = table_insets(el, cw, rh)
                     text_width = round((cw - 2 * inset_x) * TEXT_SCALE)
                     text_height = round((rh - 2 * inset_y) * TEXT_SCALE)
@@ -568,7 +585,7 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                                          fill=fill, outline=None if el.row_rule else "#FFFFFF")
                     if text_width > 0 and text_height > 0 and cell.strip():
                         layout = raster_text(cell, text_width, text_height, el.size, el.cell_bold(row, col), el.font,
-                                             el.cell_align(col))
+                                             el.cell_align(col, row))
                         tx, ty = round((left + inset_x) * TEXT_SCALE), round((top + inset_y) * TEXT_SCALE)
                         if el.row_rule:
                             extent = len(layout.lines) * el.size * TEXT_SCALE * TEXT_LEADING
@@ -579,11 +596,11 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                             cell_layer = PILImage.new("RGBA", (text_width, text_height))
                             draw_raster_text(ImageDraw.Draw(cell_layer), layout, ink)
                             table_layer.alpha_composite(cell_layer, (tx, ty))
-            for row in range(len(el.rows)):
+            for row, (top, rh) in enumerate(rows):
                 if rule := el.rule_after(row):
                     shade, weight = rule
                     stroke = max(1, round(weight * TEXT_SCALE))
-                    rule_y = min(round((row + 1) * rh * TEXT_SCALE), height - (stroke + 1) // 2)
+                    rule_y = min(round((top + rh) * TEXT_SCALE), height - (stroke + 1) // 2)
                     table_draw.line((0, rule_y, width, rule_y), fill=shade, width=stroke)
             layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
@@ -671,10 +688,11 @@ def to_pdf(document: Document, get_asset) -> bytes:
                             line.textOut(text)
                         pdf.drawText(line)
                 else:
-                    for i, line in enumerate(pdf_lines(el.text, w, name, el.size)):
+                    lines = el.text.split("\n") if el.single_line and not el.edited else pdf_lines(el.text, w, name, el.size)
+                    for i, line in enumerate(lines):
                         fn, px = {"left": (pdf.drawString, 0), "center": (pdf.drawCentredString, w/2),
                                   "right": (pdf.drawRightString, w)}[el.align]
-                        fn(px, h-el.size-i*el.size*TEXT_LEADING, line)
+                        fn(px, h-el.size-i*el.size*(el.line_spacing or TEXT_LEADING), line)
             elif isinstance(el, Shape):
                 pdf.setFillColor(HexColor(el.fill))
                 if el.border:
@@ -728,12 +746,12 @@ def to_pdf(document: Document, get_asset) -> bytes:
                     path.close()
                     pdf.drawPath(path, stroke=0, fill=1)
             elif isinstance(el, Table):
-                rh = h/len(el.rows)
+                rows = table_rows(el, h)
                 columns = table_columns(el, w)
-                for row, cells in enumerate(el.rows):
+                for row, (cells, (offset, rh)) in enumerate(zip(el.rows, rows)):
                     for col, (cell, (left, cw)) in enumerate(zip(cells, columns)):
                         fill, ink = el.cell_style(row, col)
-                        top = h-(row+1)*rh
+                        top = h-offset-rh
                         inset_x, inset_y = table_insets(el, cw, rh)
                         tw, th = cw - 2 * inset_x, rh - 2 * inset_y
                         pdf.setFillColor(HexColor(fill))
@@ -755,15 +773,17 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         pdf.setFillColor(HexColor(ink))
                         for j, line in enumerate(lines):
                             yy = top + rh - pad - el.size - j * el.size * TEXT_LEADING
-                            if el.cell_align(col) == "right":
+                            if el.cell_align(col, row) == "center":
+                                pdf.drawCentredString(left + cw / 2, yy, line)
+                            elif el.cell_align(col, row) == "right":
                                 pdf.drawRightString(left + cw - inset_x, yy, line)
                             else:
                                 pdf.drawString(left + inset_x, yy, line)
                         pdf.restoreState()
-                for row in range(len(el.rows)):
+                for row, (offset, rh) in enumerate(rows):
                     if rule := el.rule_after(row):
                         shade, weight = rule
-                        rule_y = max(weight / 2, h - (row + 1) * rh)
+                        rule_y = max(weight / 2, h - offset - rh)
                         pdf.setStrokeColor(HexColor(shade))
                         pdf.setLineWidth(weight)
                         pdf.line(0, rule_y, w, rule_y)

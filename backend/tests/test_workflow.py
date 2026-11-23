@@ -23,16 +23,21 @@ def work(steps=100):
         advance(*ticket)
 
 
-def create(client, prompt="Generate three slides about quantum computing.", **settings):
+def create(client, prompt="Generate three slides about quantum computing.", *, native=False, **settings):
     response = client.post("/api/v1/presentations", json={"prompt": prompt, **settings})
     assert response.status_code == 201, response.text
-    return f"/api/v1/presentations/{response.json()['id']}"
+    identifier = response.json()["id"]
+    if native:
+        with Session.begin() as db:
+            job = db.scalars(select(Job).where(Job.presentation_id == identifier)).one()
+            job.context = {**job.context, "layout_engine": "native"}
+    return f"/api/v1/presentations/{identifier}"
 
 
 def test_create_rejects_model_overrides():
     client = TestClient(app)
     response = client.post("/api/v1/presentations", json={
-        "prompt": "Generate three slides about quantum computing.", "provider": "demo", "model": "override",
+        "prompt": "Generate three slides about quantum computing.", "provider": "override", "model": "override",
     })
     assert response.status_code == 422
     assert {issue["loc"][-1] for issue in response.json()["detail"]} == {"provider", "model"}
@@ -40,7 +45,7 @@ def test_create_rejects_model_overrides():
 
 def test_guided_workflow_and_native_export():
     client = TestClient(app)
-    path = create(client)
+    path = create(client, native=True)
     with Session.begin() as db:
         item = db.get(PresentationRecord, path.rsplit("/", 1)[1])
         item.request = {**item.request, "provider": "unused-legacy-provider", "model": "unused-legacy-model"}
@@ -101,7 +106,7 @@ def test_guided_workflow_and_native_export():
 
 def test_explicit_consulting_style_changes_the_generated_exhibits():
     client = TestClient(app)
-    path = create(client, prompt="generate bcg style about ecommerce in the middle east")
+    path = create(client, prompt="generate bcg style about ecommerce in the middle east", native=True)
     work()
     waiting = client.get(path + "/questions").json()["questions"]
     assert [question["type"] for question in waiting] == ["audience"]
@@ -128,7 +133,7 @@ def test_explicit_consulting_style_changes_the_generated_exhibits():
 def test_explicit_style_overrides_unlocked_preset_defaults():
     client = TestClient(app)
     path = create(client, "One slide about planning for executives in dark luxury style. Background #222222. "
-                  "Accent #CAAE78. Headings font: Georgia. Body font: Verdana.", skill_id="strategy", research=False)
+                  "Accent #CAAE78. Headings font: Georgia. Body font: Verdana.", skill_id="strategy", research=False, native=True)
     work()
     generated = client.get(path).json()
     assert generated["status"] == "COMPLETED"
@@ -148,7 +153,7 @@ def test_brand_kit_keeps_owned_logo_and_only_protected_theme_roles():
     })
     assert response.status_code == 201
     path = create(client, "One slide about planning for executives in dark luxury style. Background #222222. Accent #CAAE78.",
-                  skill_id=response.json()["id"], research=False)
+                  skill_id=response.json()["id"], research=False, native=True)
     work()
     generated = client.get(path).json()
     assert generated["status"] == "COMPLETED"
@@ -161,7 +166,10 @@ def test_brand_kit_keeps_owned_logo_and_only_protected_theme_roles():
 
 def test_cancel_retry_and_expired_worker_fencing():
     client = TestClient(app)
-    path = create(client)
+    path = create(client, generate=False)
+    assert client.get(path).json()["request"]["generate"] is False
+    assert client.post(path + "/generate").status_code == 202
+    assert client.get(path).json()["request"]["generate"] is True
     with Session() as db:
         first = claim(db)
     assert first

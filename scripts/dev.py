@@ -56,9 +56,10 @@ def launch(test=False):
                        LOCAL_STORAGE_PATH=f"{root}/uploads", JOB_BACKEND="local", REDIS_ENABLED="false", LOCAL_SESSION="true")
             run([PYTHON, "-m", "alembic", "upgrade", "head"], BACKEND, env)
             run([PYTHON, "-m", "app.cli", "seed"], BACKEND, env)
+        python = [PYTHON, "tests/model_fixture.py"] if test else [PYTHON, "-m"]
         commands = [
-            ("api", [PYTHON, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"], BACKEND),
-            ("worker", [PYTHON, "-m", "app.worker"], BACKEND),
+            ("api", [*python, "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"], BACKEND),
+            ("worker", [*python, "app.worker"], BACKEND),
             ("web", [NODE, NG, "serve", "--host", "localhost"], FRONTEND),
         ]
         print("Studio  http://localhost:4200\nAPI docs  http://localhost:8000/docs", flush=True)
@@ -84,5 +85,5 @@ def launch(test=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test", action="store_true", help="Use an isolated database and the explicit test provider.")
+    parser.add_argument("--test", action="store_true", help="Start the isolated Playwright test environment.")
     launch(parser.parse_args().test)

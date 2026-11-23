@@ -138,10 +138,10 @@ def run(briefs, output, launch_image, scratch):
     from app.db import Base, Session, User, engine
     from app.main import app
     from app.config import settings
-    from app.providers import provider_for
+    from app.providers import provider_configured, provider_for
     from app.skills import seed
 
-    if provider_for(settings()) == "demo":
+    if not provider_configured(settings(), provider_for(settings())):
         raise RuntimeError("These briefs require a live generation provider")
     Base.metadata.create_all(engine)
     failed = []

@@ -13,6 +13,7 @@ def main():
         if not target.exists():
             shutil.copyfile(directory / ".env.example", target)
     run([PYTHON, "-m", "pip", "install", "-e", ".[dev]"], BACKEND)
+    run([PYTHON, "-m", "playwright", "install", "--only-shell", "chromium"], BACKEND)
     run([NPM, "ci"], FRONTEND)
     run([PYTHON, "-m", "alembic", "upgrade", "head"], BACKEND)
     run([PYTHON, "-m", "app.cli", "seed"], BACKEND)

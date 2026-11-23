@@ -51,14 +51,18 @@ export class Workspace implements OnDestroy {
   readonly splitWidth = signal(374);
   readonly showAgent = signal(true);
   readonly activeIndex = computed(() => this.editor.document()?.slides.findIndex(slide => slide.id === this.editor.current()?.id) ?? -1);
-  readonly statusLabel = computed(() => this.item() ? STATUS_LABEL[this.item()!.status] : 'Loading');
+  readonly statusLabel = computed(() => {
+    const item = this.item();
+    if (!item) return 'Loading';
+    return item.status === 'CREATED' && this.canEdit() ? 'Draft' : STATUS_LABEL[item.status];
+  });
   readonly canEdit = computed(() => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(this.item()?.status ?? '') || this.item()?.request.generate === false && this.item()?.status === 'CREATED');
   readonly showPlan = computed(() => this.item() !== null && (!this.canEdit() || this.events().some(event => event.job_id !== null)));
   readonly sourceLinks = computed(() => this.editor.document()?.sources.filter(source => this.editor.current()?.source_ids.includes(source.id)) ?? []);
   readonly exhibit = computed(() => {
     const spec = this.editor.current()?.spec;
     const visual = spec?.content.visual;
-    return visual && (visual.rows || visual.points || visual.nodes || visual.items) ? spec : null;
+    return visual ? spec : null;
   });
   readonly displayedSlide = computed(() => this.preview()?.document.slides.find(slide => slide.id === this.editor.current()?.id) ?? this.editor.current());
   readonly canvasArea = viewChild<ElementRef<HTMLElement>>('canvasArea');

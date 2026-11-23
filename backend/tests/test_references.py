@@ -1,6 +1,7 @@
 import base64
 import io
 from datetime import date
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -16,13 +17,27 @@ from app.composition import Intent, Outline, ResearchBrief, ResearchQueries, Sli
 from app.config import Settings, settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
 from app.domain import Source
+from app.html_layout.markup import HtmlPlan, PageMarkup
 from app.main import app
 from app.providers import Intelligence
 from app.questions import Clarification
 from app.queue import claim
 from app.research import collect
-from app.workflow import advance, align_query_period, requested_calendar_period
+from app.workflow import advance, align_query_period, outline_inputs, requested_calendar_period
 from test_workflow import create, work
+
+
+def test_outline_reuses_web_research_and_keeps_supplied_evidence():
+    item = SimpleNamespace(request={"prompt": "Five years of index performance and the top five companies"})
+    web = {"id": "exchange", "title": "Annual report", "url": "https://example.test/report", "excerpt": "Data " * 420}
+    upload = {"id": "ref", "title": "Company filing", "asset_id": "file", "excerpt": "Required filing details"}
+    context = {"sources": [web, upload]}
+    assert outline_inputs(item, context)["sources"][0]["excerpt"] == web["excerpt"][:1400]
+    context["research"] = {"summary": "The exchange provides annual returns.", "uncertainties": ["Ranking unavailable"]}
+    supplied = outline_inputs(item, context)
+    assert supplied["sources"] == [{"id": "exchange", "title": "Annual report"}, upload]
+    assert supplied["research"] == context["research"]
+    assert len(context["sources"][0]["excerpt"]) == 2100
 
 
 def test_powerpoint_upload_extracts_reference_text():
@@ -212,7 +227,7 @@ def test_data_driven_can_continue_without_web_research(monkeypatch):
     monkeypatch.setattr(Intelligence, "structured", plan)
     monkeypatch.setattr("app.workflow.collect", unexpected_search)
     client = TestClient(app)
-    path = create(client, "One slide about electricity generation", research=False)
+    path = create(client, "One slide about electricity generation", research=False, native=True)
     work()
     question, = client.get(path + "/questions").json()["questions"]
     answers = {"answers": [{"question_id": question["id"], "option_ids": ["continue"]}]}
@@ -273,7 +288,10 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     Image.new("RGB", (20, 20), "blue").save(image, image_format)
     encoded = base64.b64encode(image.getvalue()).decode()
 
+    image_requests = []
+
     def request(url, **kwargs):
+        image_requests.append(url)
         assert url == expected_url
         assert kwargs["headers"] == {"Authorization": f"Bearer {expected_key}"}
         payload = {
@@ -290,12 +308,16 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
         fixtures = {
             "Intent": {"subject": "Example", "slide_count": 1},
             "Clarification": {"questions": []},
-            "Outline": {"title": "Example", "slides": [{"title": "Example", "layout": "editorial"}]},
-            "SlideContent": {"title": "Example", "image_prompt": "An abstract blue shape"},
+            "HtmlPlan": {"title":"Example", "background":"#FFFFFF", "accent":"#234567", "ink":"#111111",
+                         "muted":"#334455", "surface":"#EEEEEE", "display":"Georgia", "slides":[{
+                             "title":"Example", "layout":"editorial", "direction":"Place the illustration",
+                             "image_prompt":"An abstract blue shape Deck imagery direction: Restrained editorial imagery coordinated with the deck palette."}]},
         }
-        if schema.__name__ == "ArtDirection":
-            from app.demo import demo_response
-            return schema.model_validate(demo_response("ArtDirection", data))
+        if schema is PageMarkup:
+            asset = data["required_picture"]
+            assert asset in data["available_pictures"]
+            markup = f'<page><picture asset="{asset}" alt="Blue shape"/></page>' if "correction" in data else "<page><text>Missing image</text></page>"
+            return schema(markup=markup)
         return schema.model_validate(fixtures[schema.__name__])
 
     monkeypatch.setattr(httpx, "post", request)
@@ -306,6 +328,7 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
+    assert image_requests == [expected_url]
     assert any(el["type"] == "image" for el in result["document"]["slides"][0]["elements"])
     response = client.post(path + "/export?format=pptx")
     assert response.status_code == 200
@@ -313,10 +336,11 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in deck.slides[0].shapes)
 
 
-@pytest.mark.parametrize(("direction", "requested"), [
-    ("Professional", True), ("Strategy consulting", True), ("Professional", False),
+@pytest.mark.parametrize(("direction", "requested", "html"), [
+    ("Professional", True, False), ("Strategy consulting", True, False), ("Professional", False, False),
+    ("Professional", True, True), ("Professional", False, True),
 ])
-def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, direction, requested):
+def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, direction, requested, html):
     client = TestClient(app)
     configuration = settings()
     monkeypatch.setattr(configuration, "research_api_key", "test-search-token")
@@ -354,6 +378,15 @@ def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, 
             return Intent(subject="Example", slide_count=1, visual_direction=direction, web_images_requested=requested)
         if schema is Clarification:
             return Clarification()
+        if schema is HtmlPlan:
+            assert data["web_images"] == requested
+            return schema(title="Example", background="#FFFFFF", accent="#234567", ink="#111111", muted="#334455",
+                          surface="#EEEEEE", display="Georgia", slides=[dict(title="Example", layout="editorial",
+                          direction="Introduce the subject", image_query="Example official portrait")])
+        if schema is PageMarkup:
+            asset = data["required_picture"]
+            return schema(markup=f'<page><picture asset="{asset}" alt="Portrait"/></page>' if asset else
+                          "<page><text>Example</text></page>")
         if schema is Outline:
             assert ("Web image search is enabled" in task) == requested
             return Outline.model_validate({"title": "Example", "slides": [
@@ -365,7 +398,7 @@ def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, 
     prompt = "Create one slide for students about Example."
     if requested:
         prompt += " Include an official portrait."
-    path = create(client, prompt, research=True)
+    path = create(client, prompt, research=True, native=not html)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -427,7 +460,7 @@ def test_image_queries_cannot_replace_planned_layouts_or_exhibits(monkeypatch, d
 
     monkeypatch.setattr(Intelligence, "structured", plan)
     client = TestClient(app)
-    path = create(client, "Build a quarterly results deck with web research and photos.", research=True)
+    path = create(client, "Build a quarterly results deck with web research and photos.", research=True, native=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -437,28 +470,3 @@ def test_image_queries_cannot_replace_planned_layouts_or_exhibits(monkeypatch, d
     assert any(element["type"] == "table" for element in slides[3]["elements"])
     assert all(element["type"] != "image" for slide in slides for element in slide["elements"])
     assert [item["id"] for item in result["document"]["sources"]] == [source.id]
-
-
-def test_resuming_an_older_image_draft_restores_the_planned_layout():
-    client = TestClient(app)
-    path = create(client, "Generate one slide in editorial style about accessibility for new hires.")
-    work(6)
-    identifier = path.rsplit("/", 1)[1]
-    source = Source(title="Old web photo", asset_id="old_asset")
-    with Session.begin() as db:
-        job = db.scalar(select(Job).where(Job.presentation_id == identifier))
-        assert job.checkpoint == "review"
-        job.context = {
-            **job.context,
-            "draft": {**job.context["draft"], "layout": "editorial", "source_ids": [source.id]},
-            "slide_content": {**job.context["slide_content"], "image_asset_id": source.asset_id,
-                              "source_ids": [source.id]},
-            "web_image": {"source": source.model_dump(mode="json"), "ratio": 1., "layout": "editorial"},
-        }
-
-    work()
-    final = client.get(path).json()
-    assert final["status"] == "COMPLETED"
-    slide, = final["document"]["slides"]
-    assert slide["layout"] == "cover"
-    assert not slide["source_ids"] and not final["document"]["sources"]

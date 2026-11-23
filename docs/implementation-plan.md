@@ -11,7 +11,7 @@
 - [ ] Run a staging deployment against PostgreSQL, Redis and an S3-compatible server.
 - [ ] Exercise credentialed hosted providers, web research and vision against live services.
 
-Earlier local acceptance testing used Edge and a Qwen model behind llama.cpp’s OpenAI-compatible endpoint. It covered generation, resuming after a restart and a structured edit proposal. Desktop Microsoft PowerPoint opened and rendered the reviewed three-slide deck with editable text. The current automated suites cover the browser workflow with the demo provider and reopen generated PowerPoint packages to check native text, shapes, connectors, chart data, tables, media and notes. The [design benchmark runner](agent-workflow.md#design-benchmarks) supports additional live-provider checks across four briefs.
+Earlier local acceptance testing used Edge and a Qwen model behind llama.cpp’s OpenAI-compatible endpoint. It covered generation, resuming after a restart and a structured edit proposal. Desktop Microsoft PowerPoint opened and rendered the reviewed three-slide deck with editable text. The current automated suites cover the browser workflow with test-only model responses and reopen generated PowerPoint packages to check native text, shapes, connectors, chart data, tables, media and notes. The [design benchmark runner](agent-workflow.md#design-benchmarks) supports additional live-provider checks across four briefs.
 
 ## Current format limits
 

@@ -1,9 +1,11 @@
 """Coordinate-free exhibit contracts shared by planning and slide generation."""
 
 import re
-from typing import Annotated, Literal, get_args
+from decimal import Decimal
+from typing import Annotated, Generic, Literal, TypeVar, get_args
 
 from pydantic import Field, model_validator
+from pydantic_core import PydanticCustomError
 
 from app.diagrams import Diagram, Swimlane
 from app.domain import Contract, Identifier, Layout
@@ -23,6 +25,8 @@ GraphType = Literal["architecture", "data-flow", "flowchart", "state-machine", "
 TimeType = Literal["roadmap", "gantt", "timing-diagram"]
 VisualType = QuantitativeType | MatrixType | ScatterType | GraphType | TimeType | Literal[
     "sequence-diagram", "venn", "annotated-code", "flow-diagram", "swimlane"]
+
+NUMERIC_VISUAL_TYPES = {*get_args(QuantitativeType), *get_args(MatrixType), *get_args(ScatterType), *get_args(TimeType), "sankey"}
 
 VISUAL_LAYOUTS: dict[VisualType, Layout] = {
     **dict.fromkeys(get_args(QuantitativeType) + get_args(ScatterType), "chart"),
@@ -143,42 +147,78 @@ class QuantitativeVisual(VisualBase):
         return self
 
 
-class MatrixRow(Contract):
+Cell = TypeVar("Cell")
+ScaleLabel = Annotated[str, Field(max_length=64)]
+
+
+class MatrixRow(Contract, Generic[Cell]):
     label: Label
-    cells: list[Label | Number] = Field(min_length=1, max_length=6)
+    cells: list[Cell] = Field(min_length=1, max_length=6, description="One value per column, in column order.")
 
 
-class MatrixVisual(VisualBase):
-    type: MatrixType
+class MatrixGrid(VisualBase, Generic[Cell]):
     columns: list[Label] = Field(min_length=1, max_length=6)
-    column_units: list[Annotated[str, Field(max_length=22)]] = Field(default_factory=list, max_length=6)
-    rows: list[MatrixRow] = Field(min_length=1, max_length=8)
-    weights: list[Positive] = Field(default_factory=list, max_length=6)
+    column_units: list[Annotated[str, Field(max_length=22)]] = Field(
+        default_factory=list, max_length=6, description="Leave empty or supply one unit per column.")
+    rows: list[MatrixRow[Cell]] = Field(min_length=1, max_length=8)
     recommended: Label | None = None
-    scale_low: str = Field(default="", max_length=64)
-    scale_high: str = Field(default="", max_length=64)
+
+
+class NumericHeatmap(MatrixGrid[Number]):
+    """Use for measured values or numeric ratings such as a 1–5 maturity score. Supply JSON numbers in cells."""
+
+    type: Literal["heatmap"]
+    variant: None = None
+    scale_low: ScaleLabel = ""
+    scale_high: ScaleLabel = ""
+
+
+class CategoricalHeatmap(MatrixGrid[Label]):
+    """Use for ordered text categories. Each cell must exactly match one of the supplied levels."""
+
+    type: Literal["heatmap"]
+    variant: None = None
+    levels: list[Label] = Field(min_length=2, max_length=6, description="Distinct categories from lowest to highest.")
+
+
+def weighted_average(scores, weights):
+    weights = [Decimal(str(w)) for w in weights]
+    return sum(Decimal(str(score)) * w for score, w in zip(scores, weights)) / sum(weights)
+
+
+class MatrixVisual(MatrixGrid[Label | Number]):
+    type: MatrixType
+    weights: list[Positive] = Field(default_factory=list, max_length=6)
+    scale_low: ScaleLabel = ""
+    scale_high: ScaleLabel = ""
     levels: list[Label] = Field(default_factory=list, max_length=6,
                                description="Heatmap categories from lowest to highest, when the scale is qualitative.")
 
     @model_validator(mode="after")
     def valid_matrix(self):
         if any(len(row.cells) != len(self.columns) for row in self.rows):
-            raise ValueError("every row must have a cell for each column")
+            raise PydanticCustomError("matrix_data", "give every row one cell per column in column order")
         if self.column_units and len(self.column_units) != len(self.columns):
-            raise ValueError("supply one unit per criterion, using an empty unit where appropriate")
+            raise PydanticCustomError("matrix_data", "leave column_units empty or supply one unit per column")
+        if self.weights and self.type not in {"decision-matrix", "scoring-matrix"}:
+            if self.type == "heatmap":
+                raise PydanticCustomError("matrix_data", "omit weights for a heatmap. Use numeric cells without levels "
+                                          "for scores, or text cells matching ordered levels for categories")
+            raise PydanticCustomError("matrix_data", "omit weights for this visual type")
         if self.weights and (len(self.weights) != len(self.columns) or len(self.columns) == 6):
-            raise ValueError("supply one weight per criterion and at most five weighted criteria")
+            raise PydanticCustomError("matrix_data", "supply one weight per criterion and at most five weighted criteria")
         cells = [cell for row in self.rows for cell in row.cells]
         if self.levels:
-            if (self.type != "heatmap" or len(set(self.levels)) < 2 or len(set(self.levels)) != len(self.levels)
+            if self.type != "heatmap":
+                raise PydanticCustomError("matrix_data", "omit levels for this visual type")
+            if (len(set(self.levels)) < 2 or len(set(self.levels)) != len(self.levels)
                     or any(cell not in self.levels for cell in cells)):
-                raise ValueError("categorical heatmaps need an ordered scale covering every cell")
+                raise PydanticCustomError("matrix_data", "for numeric scores use JSON numbers and omit levels. "
+                                          "for categorical heatmaps use distinct ordered levels covering every text cell")
         elif (self.type in {"heatmap", "scoring-matrix"} or self.weights) and any(isinstance(cell, str) for cell in cells):
-            raise ValueError("numeric heatmaps and weighted/scoring matrices need numeric values")
-        if self.weights and self.type not in {"decision-matrix", "scoring-matrix"}:
-            raise ValueError("only decision and scoring matrices use criteria weights")
+            raise PydanticCustomError("matrix_data", "use JSON numbers in cells for numeric scores")
         if self.recommended and self.recommended not in {row.label for row in self.rows}:
-            raise ValueError("recommended must match an alternative label")
+            raise PydanticCustomError("matrix_data", "set recommended to an exact row label or null")
         return self
 
 

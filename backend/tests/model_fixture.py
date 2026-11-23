@@ -1,9 +1,36 @@
-"""Explicit offline fixture provider for exercising the complete product workflow."""
+"""Deterministic model replies shared by worker and browser tests."""
 
+import json
 import re
+from contextlib import ExitStack, contextmanager
+from unittest.mock import patch
+from xml.sax.saxutils import escape
+
+from app.config import settings
+from app.providers import Intelligence, ModelReply
 
 
-def demo_response(schema: str, data: dict) -> dict:
+@contextmanager
+def model_fixture():
+    config = settings()
+    url = "http://model.invalid/v1"
+    original = Intelligence._request
+
+    def request(self, model, system, content, image, schema, **options):
+        if config.llm_api_url != url:
+            return original(self, model, system, content, image, schema, **options)
+        response = model_response(schema["title"], json.loads(content))
+        return ModelReply(json.dumps(response), input_tokens=10, output_tokens=10)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(config, llm_api_url=url, llm_api_key="", llm_model_id="fixture",
+                                           llm_vision_enabled=False, research_api_key="", image_provider="none",
+                                           image_gen_api_key="", image_openai_api_key=""))
+        stack.enter_context(patch.object(Intelligence, "_request", request))
+        yield
+
+
+def model_response(schema: str, data: dict) -> dict:
     if schema == "Intent":
         prompt = data["prompt"]
         match = re.search(r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*[- ]?slides?\b", prompt, re.I)
@@ -58,7 +85,7 @@ def demo_response(schema: str, data: dict) -> dict:
                                               for i, label, detail, swatch in options],
                                   "recommended_option_id": options[0][0]})
         return {"questions": questions}
-    if schema == "Outline":
+    if schema in {"HtmlPlan", "Outline"}:
         topic = data["intent"]["subject"]
         title = "Quantum Computing" if "quantum computing" in topic.lower() else topic[:100].strip().capitalize()
         count = data.get("slide_count") or 6
@@ -70,36 +97,29 @@ def demo_response(schema: str, data: dict) -> dict:
             if index >= len(steps):
                 label += f" · {index + 1}"
             slides.append({"title": label, "layout": layout, "purpose": f"Explain {label.lower()} in the context of {title}."})
+        if schema == "HtmlPlan":
+            return {"title": title, "background": "#FFFFFF", "ink": "#151923", "accent": "#126148",
+                    "muted": "#485564", "surface": "#EFF5F2", "display": "Georgia",
+                    "slides": [{"title": s["title"], "layout": s["layout"], "direction": s["purpose"]} for s in slides]}
         return {"title": title, "narrative": "Frame the opportunity, explain the mechanics, and highlight practical next steps.", "slides": slides}
+    if schema == "PageMarkup":
+        slide = data["slide"]
+        content = ('<matrix><tr><td>Classical bits</td><td>Quantum bits</td></tr>'
+                   '<tr><td>Binary values</td><td>Superposition</td></tr></matrix>'
+                   if slide["layout"] == "comparison" else f'<text>{escape(slide["direction"])}</text>')
+        return {"markup": f'<page><col bg="surface" pad="32"><text size="48">{escape(slide["title"])}</text></col>{content}</page>'}
     if schema == "SlideContent":
         item = data["item"]
         title = item["title"]
+        subtitle = item.get("purpose") or title
+        points = [("Scope", "Define the problem."), ("Evidence", "Check the assumptions."),
+                  ("Action", "Assign an owner.")]
         icons = {}
-        if "quantum computing" in data.get("topic", "").lower():
-            variants = {
-                "cover": ("A practical briefing on the science, its potential, and what remains experimental.", []),
-                "comparison": ("Quantum computers use a different model of information and computation.", [
-                    ("Classical bits", "A bit has a definite value of 0 or 1. Classical systems remain the default for most workloads."),
-                    ("Quantum bits", "Qubits can occupy a superposition, and algorithms use interference to change measurement probabilities."),
-                ]),
-                "closing": ("Focus on targeted experiments and measurable progress in error correction.", [
-                    ("Start with a specific problem", "Evaluate whether it fits a credible quantum algorithm."),
-                    ("Benchmark honestly", "Compare results with the strongest classical approach."),
-                    ("Track logical qubits", "Look for reliable operations with improved error correction."),
-                ]),
-            }
-            subtitle, points = variants.get(item["layout"], ("Practical systems require reliable control, measurement and error correction.", [
-                ("Hardware", "Physical qubits must stay controllable despite environmental noise."),
-                ("Software", "Algorithms must be benchmarked on appropriately scoped tasks."),
-                ("Error correction", "Logical qubits use multiple physical qubits to reduce faults."),
-            ]))
-            icons = {"Classical bits": "cpu", "Quantum bits": "atom", "Hardware": "cpu",
-                     "Software": "code", "Error correction": "shield"}
-        else:
-            subtitle = item.get("purpose", "")[:210]
-            points = [("What matters", "Identify the main problem, who it affects, and what would count as a meaningful improvement."),
-                      ("What to validate", "Compare assumptions with available evidence and document open questions."),
-                      ("What happens next", "Choose one practical next step with a clear owner and a review date.")]
+        if item["layout"] == "comparison" and "quantum computing" in data.get("topic", "").lower():
+            points = [("Classical bits", "Binary values."), ("Quantum bits", "Superposition.")]
+            icons = {"Classical bits": "cpu", "Quantum bits": "atom"}
+        elif item["layout"] == "cover":
+            points = []
         if data.get("required_exhibit") == "swimlane":
             return {"title": title, "swimlane": {
                 "lanes": ["Requester", "Reviewer"],
@@ -115,13 +135,20 @@ def demo_response(schema: str, data: dict) -> dict:
             ]}]}}
         return {"title": title, "subtitle": subtitle,
                 "points": [{"title": name, "body": body, "icon": icons.get(name)} for name, body in points],
-                "notes": "Offline Studio Demo content. Configure a model provider to generate source-grounded material."}
+                "notes": "Speaker notes for the export test."}
     if schema == "ResearchQueries":
         return {"queries": [data["intent"]["subject"]]}
     if schema in {"ResearchBrief", "EvidenceSummary"}:
         return {"summary": "Reference material is available for review.", "uncertainties": []}
     if schema == "Review":
         return {"issues": [], "regenerate_content": False}
-    if schema == "EditProposal":
-        raise ValueError("Conversational editing requires a configured live AI provider.")
-    raise ValueError(f"Unsupported demo response schema: {schema}")
+    raise AssertionError(f"Missing model fixture for {schema}")
+
+
+if __name__ == "__main__":
+    import runpy
+    import sys
+
+    module = sys.argv.pop(1)
+    with model_fixture():
+        runpy.run_module(module, run_name="__main__", alter_sys=True)

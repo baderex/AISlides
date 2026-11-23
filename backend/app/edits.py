@@ -59,10 +59,8 @@ CONTENT_EDIT = re.compile(
 )
 
 
-def propose(item, document, request):
+def propose(document, request):
     ai = Intelligence()
-    if ai.provider == "demo":
-        raise ProviderError("Conversational editing requires a configured live AI provider.")
     slides = [s for s in document.slides if not request.slide_id or s.id == request.slide_id]
     if not slides:
         raise ValueError("No slide matches the selected scope.")
@@ -87,7 +85,7 @@ def propose(item, document, request):
         "instruction": request.instruction, "current_theme": document.theme.model_dump(),
         "slides": [s.model_dump(mode="json", exclude={"spec"}) for s in slides[:12]],
         "sources": [s.model_dump(mode="json") for s in document.sources]
-    }, "slide")
+    }, "edit")
     if request.slide_id and any(isinstance(op, Restyle) or op.slide_id != request.slide_id for op in proposal.operations):
         raise ProviderError("The model proposed changes outside the selected slide. Try a more specific edit.")
     for operation in proposal.operations:
@@ -142,6 +140,8 @@ def apply(document, proposal, *, locked_theme=False):
                     slide.background = rules.cover_background
                 else:
                     slide.background = colors.get(slide.background, slide.background)
+                if slide.spec and (region := slide.spec.html_region) and region.background:
+                    region.background = colors.get(region.background, region.background)
                 for element in inherited_elements(slide.elements):
                     for attr in ("fill", "color", "border", "header_fill", "header_color", "label_color"):
                         value = getattr(element, attr, None)
@@ -154,7 +154,6 @@ def apply(document, proposal, *, locked_theme=False):
                     elif isinstance(element, Table) and (rules or element.row_rule):
                         style_table(element, theme, slide.background,
                                     preserve_palette=theme.profile == "consulting" or element.placeholder_idx is not None)
-            document.theme = theme
             continue
         slide = slides.get(operation.slide_id)
         if not slide:

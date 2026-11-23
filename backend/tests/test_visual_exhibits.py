@@ -181,7 +181,7 @@ def test_worker_generates_and_exports_a_semantic_visual(monkeypatch):
 
     monkeypatch.setattr(Intelligence, "structured", respond)
     client = TestClient(app)
-    path = create(client, "One slide for engineers on how the browser compares fresh and stale cache hits.", research=False)
+    path = create(client, "One slide for engineers on how the browser compares fresh and stale cache hits.", research=False, native=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"

@@ -129,13 +129,13 @@ export class SlideCanvas {
     const count = table.rows[0].length;
     const numericCount = table.numeric_columns?.length ?? 0;
     const mixed = !!table.row_rule && count >= 4 && numericCount > 0 && numericCount < count;
-    const weights = table.rows[0].map((_, index) => (compact || mixed) && !table.numeric_columns?.includes(index) ? 1.5 : 1);
+    const weights = table.css?.columns ?? table.rows[0].map((_, index) => (compact || mixed) && !table.numeric_columns?.includes(index) ? 1.5 : 1);
     const total = weights.reduce((sum, weight) => sum + weight, 0);
     return {
-      insetY: this.font(Math.min(6, (height * 540 / table.rows.length) * .15)),
+      insetY: this.font(table.css ? 3 : Math.min(6, (height * 540 / table.rows.length) * .15)),
       columns: weights.map(weight => ({
         percent: 100 * weight / total,
-        insetX: this.font(Math.min(12, points * weight / total * .1)),
+        insetX: this.font(table.css ? 6 : Math.min(12, points * weight / total * .1)),
       })),
     };
   }

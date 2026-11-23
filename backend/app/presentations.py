@@ -93,7 +93,7 @@ def queue_generation(db, item, *, restart_failed=False):
         item.status = "CREATED"
         emit(db, item, "generation.resumed", "Generation queued again from its saved checkpoint.", job)
         return job
-    job = Job(presentation_id=item.id)
+    job = Job(presentation_id=item.id, context={"layout_engine":"auto"})
     db.add(job)
     db.flush()
     emit(db, item, "generation.started", "Generation queued.", job)

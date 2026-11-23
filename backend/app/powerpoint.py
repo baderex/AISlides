@@ -15,7 +15,7 @@ from pptx.util import Inches, Pt
 
 from app.branding import SLOT_TYPES, layout_for_slide, native_layouts
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
-from app.rendering import TEXT_LEADING, segment_ink, table_columns, table_insets
+from app.rendering import TEXT_LEADING, segment_ink, table_columns, table_insets, table_rows
 
 
 def color(value):
@@ -88,7 +88,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 obj = slot if filled else shapes.add_textbox(x, y, w, h)
                 frame = obj.text_frame
                 frame.text = el.text
-                frame.word_wrap = True
+                frame.word_wrap = not (el.single_line and not el.edited)
                 frame.auto_size = MSO_AUTO_SIZE.NONE
                 if not filled:
                     frame.margin_top = frame.margin_bottom = frame.margin_left = frame.margin_right = 0
@@ -106,7 +106,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                             alpha(run.font._element.solidFill, el.opacity)
                         offset += len(line) + 1
                     paragraph.alignment = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[el.align]
-                    paragraph.line_spacing = TEXT_LEADING
+                    paragraph.line_spacing = Pt(el.line_spacing * el.size) if el.line_spacing else TEXT_LEADING
                     paragraph.space_before = paragraph.space_after = Pt(0)
                     paragraph.font.name = el.font
                     paragraph.font.size = Pt(el.size)
@@ -159,9 +159,10 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 filled = slot_kind == "table"
                 row_count, columns = len(el.rows), len(el.rows[0])
                 obj = slot.insert_table(row_count, columns) if filled else shapes.add_table(row_count, columns, x, y, w, h)
-                if filled:
-                    for row in obj.table.rows:
-                        row.height = h // row_count
+                if filled or el.css:
+                    heights = [Pt(height) for _, height in table_rows(el, h.pt)]
+                    for i, row in enumerate(obj.table.rows):
+                        row.height = heights[i] if i < row_count - 1 else h - sum(heights[:-1])
                 column_widths = [Pt(cw) for _, cw in table_columns(el, w.pt)]
                 if el.row_rule:
                     for j, column in enumerate(obj.table.columns):
@@ -184,12 +185,13 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                             cell.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
                         for paragraph in cell.text_frame.paragraphs:
                             if rule:
-                                paragraph.alignment = PP_ALIGN.RIGHT if el.cell_align(j) == "right" else PP_ALIGN.LEFT
+                                paragraph.alignment = {"left":PP_ALIGN.LEFT, "right":PP_ALIGN.RIGHT,
+                                                       "center":PP_ALIGN.CENTER}[el.cell_align(j, i)]
                             paragraph.font.name = el.font
                             paragraph.font.size = Pt(el.size)
                             paragraph.font.color.rgb = color(ink)
                             paragraph.font.bold = el.cell_bold(i, j)
-                            paragraph.line_spacing = TEXT_LEADING
+                            paragraph.line_spacing = Pt(el.size * 1.18) if el.css else TEXT_LEADING
                             paragraph.space_before = paragraph.space_after = Pt(0)
             elif isinstance(el, Chart):
                 chart_data = CategoryChartData()

@@ -401,6 +401,8 @@ def generate(item_id: str, owner_id: str = owner):
         if item.status == "COMPLETED":
             raise Conflict("Generation has already completed.")
         job = queue_generation(db, item, restart_failed=True)
+        if item.request.get("generate") is False:
+            item.request = {**item.request, "generate": True}
         result = {"job_id": job.id, "state": job.state}
     notify(job.id)
     return result
@@ -650,8 +652,7 @@ def chat(item_id: str, data: ChatRequest, owner_id: str = owner):
         document = read_document(item.document)
         locked_theme = presentation_brand(db, item, owner_id) is not None
         revision = item.revision
-        db.expunge(item)
-    proposal = propose(item, document, data)
+    proposal = propose(document, data)
     revised = apply(document, proposal, locked_theme=locked_theme)
     with Session.begin() as db:
         begin_write(db)
