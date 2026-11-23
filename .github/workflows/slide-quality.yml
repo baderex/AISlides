@@ -1,0 +1,156 @@
+name: Slide quality tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Regression only (free), smoke (one live deck), or full (four live decks)"
+        required: true
+        type: choice
+        default: regression
+        options:
+          - regression
+          - smoke
+          - full
+      web_research:
+        description: "Also test live Brave web research (requires RESEARCH_API_KEY)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: slide-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regression:
+    name: Backend, editor, and browser regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      POWERPOINT_RENDERER: /usr/bin/soffice
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install renderer, Python and browser dependencies
+        id: setup
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-impress fonts-liberation fonts-dejavu-core
+          sudo install -d /usr/local/share/fonts/framecraft
+          sudo install -m 644 backend/app/fonts/*.ttf /usr/local/share/fonts/framecraft/
+          sudo fc-cache -f
+          python -m venv backend/.venv
+          backend/.venv/bin/python -m pip install -e './backend[dev]'
+          backend/.venv/bin/python -m playwright install --with-deps chromium
+          mkdir -p test-results
+          npm --prefix frontend ci
+          cd frontend
+          npx playwright install --with-deps chromium
+      - name: Backend regression tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        working-directory: backend
+        run: .venv/bin/python -m pytest --junitxml=../test-results/backend.xml
+      - name: Frontend unit tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        working-directory: frontend
+        run: npm test
+      - name: Frontend production build
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        working-directory: frontend
+        run: npm run build
+      - name: Browser E2E tests with fixture provider
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        working-directory: frontend
+        run: npm run e2e -- --reporter=list,junit
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: ../test-results/e2e.xml
+      - name: Retain test reports and browser traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-results
+          path: |
+            test-results/
+            frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  live:
+    name: Live generation and slide review
+    if: ${{ inputs.suite != 'regression' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backend and Office renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-impress fonts-liberation fonts-dejavu-core
+          python -m pip install -e './backend[dev]'
+          python -m playwright install --with-deps chromium
+          sudo install -d /usr/local/share/fonts/framecraft
+          sudo install -m 644 backend/app/fonts/*.ttf /usr/local/share/fonts/framecraft/
+          sudo fc-cache -f
+      - name: Configure model (non-secret settings only)
+        run: |
+          cat > backend/.env <<'EOF'
+          LLM_API_URL=https://openrouter.ai/api/v1
+          LLM_MODEL_ID=deepseek/deepseek-v4.1-flash
+          LLM_VISION_ENABLED=true
+          IMAGE_PROVIDER=none
+          EOF
+          mkdir -p live-results
+      - name: Run live benchmark
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          RESEARCH_API_KEY: ${{ inputs.web_research && secrets.RESEARCH_API_KEY || '' }}
+          SUITE: ${{ inputs.suite }}
+          WEB_RESEARCH: ${{ inputs.web_research }}
+          BENCHMARK_OFFICE_REVIEW: '1'
+          POWERPOINT_RENDERER: /usr/bin/soffice
+          AI_JOB_TOKEN_BUDGET: '150000'
+          AI_JOB_COST_BUDGET: '3'
+          ACCOUNT_DAILY_BUDGET_USD: '15'
+          PROVIDER_DAILY_BUDGET_USD: '15'
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::error::Add LLM_API_KEY to GitHub Actions repository secrets."
+            exit 1
+          fi
+          args=(--output live-results --ci-fixture)
+          if [ "$SUITE" = "smoke" ]; then
+            args+=(--case financial-review)
+          fi
+          if [ "$WEB_RESEARCH" = "true" ]; then
+            if [ -z "$RESEARCH_API_KEY" ]; then
+              echo "::error::Add RESEARCH_API_KEY or disable the web-research option."
+              exit 1
+            fi
+            args+=(--web-research)
+          fi
+          python scripts/benchmark_decks.py "${args[@]}"
+      - name: Retain generated decks and review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-slide-quality-${{ inputs.suite }}
+          path: live-results/
+          if-no-files-found: warn
+          retention-days: 7
