@@ -8,6 +8,8 @@ The Angular dev server reloads frontend changes. Restart the supervisor after ch
 
 Each generation job has a cumulative token budget (`AI_JOB_TOKEN_BUDGET`, default 90,000). Planning, slide generation, reviews and validation retries all draw from it. **Retry generation** preserves both completed slides and usage. To give a saved job more room, set a higher total in `backend/.env`, restart the worker and retry the presentation. The worker setting also applies to other jobs it processes.
 
+The worker limits each reply by stage and by the budget left after estimating the request input. Outline limits scale with the requested slide count. On OpenRouter, the worker requests non-thinking mode for DeepSeek V4 models. Inspect `usage.by_stage` at `GET /api/v1/jobs/{job_id}` for call counts, input and output tokens, validation failures, and truncations. Where reported, `reasoning` is included in output. Older checkpoints retain their original totals and accumulate stage details for new calls.
+
 ## Branded templates and export review
 
 Open **Skill library → New skill → Branded PPTX** and select a `.pptx` with title or body placeholders defined in Slide Master view. FrameCraft uses the template aspect ratio, theme and placeholder positions during generation. The browser canvas approximates the theme and slot positions. The PowerPoint export uses the native masters, backgrounds and layout artwork, including the original layout names. Ordinary slide artwork and text in the uploaded sample deck stay out of the generated slides. Move recurring brand artwork to the slide master or layouts before importing. Templates support 16:9, 4:3 and square slides.

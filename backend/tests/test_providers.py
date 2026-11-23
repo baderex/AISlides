@@ -6,7 +6,7 @@ import pytest
 
 from app.composition import Intent, Outline, SlideContent
 from app.config import Settings, settings
-from app.providers import Intelligence, ProviderError
+from app.providers import Intelligence, ModelReply, ProviderError
 
 
 def openrouter(monkeypatch):
@@ -48,6 +48,7 @@ def test_chat_completions_use_the_configured_endpoint_model_and_key(monkeypatch,
 
     def post(url, body, headers):
         assert url == endpoint
+        assert body["max_completion_tokens" if "api.openai.com" in url else "max_tokens"] > 0
         assert body["model"] == "test-model"
         assert headers == {"Authorization": "Bearer fixture-key"}
         return {"choices": [{"message": {"content": '{"title": "Exhibit"}'}}]}
@@ -74,6 +75,12 @@ def test_native_providers_use_the_same_model_settings(monkeypatch, base, path, a
         assert headers[auth] == ("Bearer fixture-key" if auth == "Authorization" else "fixture-key")
         if auth != "x-goog-api-key":
             assert body["model"] == "test-model"
+        if path == "/api/chat":
+            assert body["options"]["num_predict"] > 0
+        elif path == "/v1/messages":
+            assert body["max_tokens"] > 0
+        else:
+            assert body["generationConfig"]["maxOutputTokens"] > 0
         return payload
 
     monkeypatch.setattr(client, "_post", post)
@@ -89,9 +96,9 @@ def test_openrouter_retries_with_validation_feedback(monkeypatch):
         {"title": "Exhibit", "points": [{"title": "First finding"}], "table": None},
     ])
 
-    def request(model, system, content, image, contract):
+    def request(model, system, content, image, contract, **kwargs):
         prompts.append(system)
-        return json.dumps(next(responses)), 90, 30
+        return ModelReply(json.dumps(next(responses)), 90, 30)
 
     monkeypatch.setattr(client, "_request", request)
     slide = client.structured(SlideContent, "Write a slide.", {}, "slide")
@@ -132,7 +139,7 @@ def test_detailed_design_brief_passes_intent_planning_on_first_response(monkeypa
 def test_openrouter_reports_fields_when_corrections_fail(monkeypatch):
     client = openrouter(monkeypatch)
     bad = {"title": "Exhibit", "table": "private model text"}
-    monkeypatch.setattr(client, "_request", lambda *args: (json.dumps(bad), 90, 30))
+    monkeypatch.setattr(client, "_request", lambda *args, **kwargs: ModelReply(json.dumps(bad), 90, 30))
 
     with pytest.raises(ProviderError, match="The model API returned invalid content for the slide step") as failure:
         client.structured(SlideContent, "Write a slide.", {}, "slide")
@@ -152,7 +159,7 @@ def test_planned_exhibit_is_required_and_repaired(monkeypatch):
         assert "cover_callout" not in contract["properties"]
         assert "response_schema" in kwargs
         prompts.append(system)
-        return json.dumps({"title": "Decision", "decision": decision if len(prompts) > 1 else None}), 90, 30
+        return ModelReply(json.dumps({"title": "Decision", "decision": decision if len(prompts) > 1 else None}), 90, 30)
 
     monkeypatch.setattr(client, "_request", request)
     slide = client.structured(SlideContent, "Write the decision slide.", {"required_exhibit": "decision"}, "slide")
@@ -204,9 +211,9 @@ def test_explicit_visible_point_count_is_repaired(monkeypatch):
     prompts = []
     points = [{"title": "Camp table"}, {"title": "Reading corner"}, {"title": "Extra use case"}]
 
-    def request(model, system, content, image, contract):
+    def request(model, system, content, image, contract, **kwargs):
         prompts.append(system)
-        return json.dumps({"title": "Use cases", "points": points if len(prompts) == 1 else points[:2]}), 90, 30
+        return ModelReply(json.dumps({"title": "Use cases", "points": points if len(prompts) == 1 else points[:2]}), 90, 30)
 
     monkeypatch.setattr(client, "_request", request)
     slide = client.structured(SlideContent, "Show the two use cases.", {"point_count": 2}, "slide")
@@ -266,6 +273,48 @@ def test_budget_check_counts_native_schema_and_checkpoint_usage(monkeypatch):
     assert "next outline request" in str(error.value)
     assert "AI_JOB_TOKEN_BUDGET" in str(error.value)
     assert client.usage["input"] + client.usage["output"] == 86879
+
+
+def test_output_limit_uses_remaining_checkpoint_budget_and_charges_failed_response(monkeypatch):
+    client = openrouter(monkeypatch)
+    client.usage.update(input=70000, output=18150)
+    monkeypatch.setattr(settings(), "llm_model_id", "deepseek/deepseek-v4.1-flash")
+    monkeypatch.setattr(settings(), "ai_job_token_budget", 90000)
+    calls = []
+
+    def post(url, body, headers):
+        calls.append(body)
+        return {"choices": [{"message": {"content": "{}"}}], "usage": {
+            "prompt_tokens": 1000, "completion_tokens": 850, "completion_tokens_details": {"reasoning_tokens": 600}}}
+
+    monkeypatch.setattr(client, "_post", post)
+    with pytest.raises(ProviderError, match="90,000 of 90,000"):
+        client.structured(Intent, "Extract intent.", {}, "analyze")
+
+    call, = calls
+    assert call["max_tokens"] == 850
+    assert call["reasoning"] == {"enabled": False}
+    assert client.usage["by_stage"]["analyze"] == {"calls": 1, "input": 1000, "output": 850,
+                                                   "reasoning": 600, "validation_failures": 1}
+    assert Intelligence(usage=client.usage).usage == client.usage
+
+
+@pytest.mark.parametrize("count", [1, 6, 30])
+def test_truncated_outline_gets_one_larger_attempt_with_room_for_requested_slides(monkeypatch, count):
+    client = openrouter(monkeypatch)
+    limits = []
+
+    def post(url, body, headers):
+        limits.append(body["max_tokens"])
+        return {"choices": [{"finish_reason": "length", "message": {"content": None}}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": body["max_tokens"]}}
+
+    monkeypatch.setattr(client, "_post", post)
+    with pytest.raises(ProviderError, match="output limit for the outline"):
+        client.structured(Outline, "Plan the deck.", {"slide_count": count}, "outline")
+    assert limits == [1024 + 512 * count, 2 * (1024 + 512 * count)]
+    assert client.usage["output"] == sum(limits)
+    assert client.usage["by_stage"]["outline"]["truncated"] == 2
 
 
 @pytest.mark.parametrize(("layout", "expected"), [(" Line_Chart ", "chart"), ("data-table", "research"), (" Metrics ", "metrics")])

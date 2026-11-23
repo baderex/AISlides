@@ -1,6 +1,7 @@
 import base64
 import io
 from datetime import date
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -21,8 +22,21 @@ from app.providers import Intelligence
 from app.questions import Clarification
 from app.queue import claim
 from app.research import collect
-from app.workflow import advance, align_query_period, requested_calendar_period
+from app.workflow import advance, align_query_period, outline_inputs, requested_calendar_period
 from test_workflow import create, work
+
+
+def test_outline_reuses_web_research_and_keeps_supplied_evidence():
+    item = SimpleNamespace(request={"prompt": "Five years of index performance and the top five companies"})
+    web = {"id": "exchange", "title": "Annual report", "url": "https://example.test/report", "excerpt": "Data " * 420}
+    upload = {"id": "ref", "title": "Company filing", "asset_id": "file", "excerpt": "Required filing details"}
+    context = {"sources": [web, upload]}
+    assert outline_inputs(item, context)["sources"][0]["excerpt"] == web["excerpt"][:1400]
+    context["research"] = {"summary": "The exchange provides annual returns.", "uncertainties": ["Ranking unavailable"]}
+    supplied = outline_inputs(item, context)
+    assert supplied["sources"] == [{"id": "exchange", "title": "Annual report"}, upload]
+    assert supplied["research"] == context["research"]
+    assert len(context["sources"][0]["excerpt"]) == 2100
 
 
 def test_powerpoint_upload_extracts_reference_text():

@@ -273,6 +273,18 @@ def evidence_inputs(item, context):
     return supplied
 
 
+def outline_inputs(item, context):
+    supplied = evidence_inputs(item, context)
+    research = supplied["research"] or {}
+    if research.get("summary") or research.get("observations"):
+        # The outline uses the researcher's findings and gaps. Slide authors still get the source text.
+        supplied["sources"] = [
+            {"id": source["id"], "title": source["title"]} if source.get("url") and not source.get("asset_id") else source
+            for source in supplied["sources"]
+        ]
+    return supplied
+
+
 def slide_inputs(item, context, part=None):
     supplied = inputs(item, context)
     if part is None:
@@ -494,7 +506,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "Set web_images_requested only if the user explicitly requests "
             "existing photos, portraits, or other sourced images. A request for research, charts, or generated illustrations does not imply web images. "
             "Set reuse_uploaded_images only when the brief explicitly asks to repeat the same image on multiple slides.",
-            inputs(item, context))
+            inputs(item, context), "analyze")
         if brand:
             intent.visual_direction = "Branded PowerPoint template"
         elif requested_consulting(item.request["prompt"]):
@@ -510,7 +522,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         batch = ai.structured(Clarification,
             "Ask 0 to 3 high-impact clarification questions only when important intent is ambiguous. Never ask for an audience, style or count already supplied. "
             "For a broad topic without an audience or visual direction, prefer exactly two questions with types audience and visual_style. "
-            "Use labels Executive / Board and Editorial report among suitable options. When the prompt is detailed return an empty list.", inputs(item, context))
+            "Use labels Executive / Board and Editorial report among suitable options. When the prompt is detailed return an empty list.",
+            inputs(item, context), "clarify")
         batch = standard_options(batch, Intent.model_validate(context["intent"]))
         if brand:
             batch.questions = [question for question in batch.questions if question.type != "output_format"]
@@ -551,7 +564,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                     "calendar year. Use the full name of the conventional broad benchmark when the prompt uses shorthand. "
                     "Put exact years or dates in queries. Prefer official statistics, filings, and original "
                     "reports. Use a targeted query for the likely publisher or its domain when known." + period_guidance,
-                    {**inputs(item, context), "as_of": today.isoformat(), "last_completed_year": today.year - 1}, "research")
+                    {**inputs(item, context), "as_of": today.isoformat(), "last_completed_year": today.year - 1}, "research-queries")
                 sources = collect_data_sources(align_query_period(query, period) for query in research.queries)
             else:
                 sources = collect(context["intent"]["subject"])
@@ -710,7 +723,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "For portraits use the subject's full name and 'official photographic portrait'. Leave other image queries empty."
             if web_research and inferred_intent.get("web_images_requested") else " Leave every image_query empty."
         )
-        planning_inputs = evidence_inputs(item, context) if data_driven else inputs(item, context)
+        planning_inputs = outline_inputs(item, context) if data_driven else inputs(item, context)
         outline = ai.structured(Outline,
             f"Plan exactly {count} slides. Honor the requested slide allocation and give every slide a distinct purpose. "
             "If the user requests a cover, use the cover layout and their supplied deck title as its headline. "

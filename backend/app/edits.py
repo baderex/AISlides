@@ -87,7 +87,7 @@ def propose(item, document, request):
         "instruction": request.instruction, "current_theme": document.theme.model_dump(),
         "slides": [s.model_dump(mode="json", exclude={"spec"}) for s in slides[:12]],
         "sources": [s.model_dump(mode="json") for s in document.sources]
-    }, "slide")
+    }, "edit")
     if request.slide_id and any(isinstance(op, Restyle) or op.slide_id != request.slide_id for op in proposal.operations):
         raise ProviderError("The model proposed changes outside the selected slide. Try a more specific edit.")
     for operation in proposal.operations:
