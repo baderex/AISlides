@@ -1,45 +1,49 @@
 import asyncio
+import base64
 import json
 import re
-from collections import defaultdict, deque
-from time import monotonic
+import unicodedata
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
+from app import artifacts
+from app.artifact_render import MIME, build
+from app.asset_lifecycle import collect_unused, drain_deletes, referenced_ids, retire_skill, schedule_deletes, store_asset, track, track_document
 from app.auth import COOKIE, authenticate, digest, login_session, passwords, resolve
-from app.branding import PPTX, inspect_template, layout_for_slide
+from app.branding import PPTX, inspect_template
 from app.config import settings
-from app.composition import OutlineItem, SlideContent
-from app.db import Asset, ExportRecord, Job, LoginSession, PresentationRecord, Session, SkillRecord, SlidePreview, StudioEvent, User, Version, now, uid
+from app.composition_models import OutlineItem, SlideContent
+from app.db import (
+    ArtifactJob, Asset, AssetReference, ExportRecord, Job, LoginSession, PresentationRecord,
+    Session, SkillRecord, SlidePreview, User, Version, begin_write, lock_account, now, uid,
+)
 from app.domain import Contract, CreatePresentation, Document, Layout, Recipe, Skill, Slide, read_document
 from app.edits import ApplyEdit, ChatRequest, apply, propose
-from app.export_review import ReviewBusy, ReviewUnavailable, add_pdf_evidence, render_native_pdf, renderer, review_powerpoint
+from app.events import event_response, fetch_events
+from app.export_review import renderer
 from app.imagery import image_configured
+from app.limits import chat_slot, consume
 from app.lucide import bundled_icon, icon_png
-from app.master_artwork import master_artwork
-from app.powerpoint import to_pptx
 from app.presentations import (
-    Conflict, assert_editable, assets_for, begin_write, details, emit, image_ids, latest_job, persist,
+    Conflict, assert_editable, assets_for, details, emit, image_ids, latest_job, persist,
     present_owned, queue_generation, referenced_images, skill_for, summary,
 )
-from app.previews import get_preview
+from app.previews import cached_preview, fingerprint
 from app.questions import Answers, Clarification, Choice, SlideCount, validate_answers
 from app.queue import notify
-from app.rendering import fit_slide_text, to_pdf
 from app.slide_design import recipe_options, recompose_slide
 from app.skills import list_skills
-from app.storage import Storage, parse_upload
+from app.storage import Storage, decode_upload
 from app.visuals import Visual
 
 api = APIRouter(prefix="/api/v1")
 owner = Depends(resolve)
-MIME = {"pptx": PPTX, "pdf": "application/pdf"}
-attempts = defaultdict(deque)
 
 
 class Credentials(Contract):
@@ -65,26 +69,17 @@ class EditExhibit(SaveSlide):
 
 
 def limit_auth(request):
-    current = monotonic()
-    if len(attempts) > 1000:
-        for address in list(attempts):
-            if not attempts[address] or attempts[address][-1] < current - 60:
-                attempts.pop(address, None)
-    if len(attempts) >= 10000:
-        raise HTTPException(429, "Too many sign-in requests. Try again shortly.")
-    key = request.client.host if request.client else "unknown"
-    recent = attempts[key]
-    while recent and recent[0] < current - 60:
-        recent.popleft()
-    if len(recent) >= 10:
-        raise HTTPException(429, "Too many sign-in attempts. Try again in a minute.")
-    recent.append(current)
+    address = request.client.host if request.client else "unknown"
+    with Session.begin() as db:
+        consume(db, "auth:" + digest(address), 60, 1, 10, "Too many sign-in attempts. Try again in a minute.")
 
 
 def item_for(db, item_id, owner_id, lock=False):
     item = present_owned(db, item_id, owner_id, lock)
     if not item:
         raise HTTPException(404, "Presentation not found.")
+    if lock:
+        lock_account(db, owner_id)
     return item
 
 
@@ -201,11 +196,15 @@ def export_skill(skill_id: str, owner_id: str = owner):
 @api.delete("/skills/{skill_id}", status_code=204, response_class=Response)
 def delete_skill(skill_id: str, owner_id: str = owner):
     with Session.begin() as db:
+        begin_write(db)
+        lock_account(db, owner_id)
         result = db.execute(update(SkillRecord).where(
             SkillRecord.id == skill_id, SkillRecord.owner_id == owner_id, SkillRecord.deleted.is_(False),
         ).values(deleted=True))
         if result.rowcount != 1:
             raise HTTPException(404, "Skill not found.")
+        collect_unused(db, owner_id, retire_skill(db, owner_id, skill_id))
+    drain_deletes()
     return Response(status_code=204)
 
 
@@ -226,9 +225,15 @@ def create_skill(manifest: Skill, owner_id: str = owner):
 
 def store_skill(manifest: Skill, owner_id: str):
     with Session.begin() as db:
+        begin_write(db)
+        lock_account(db, owner_id)
+        asset_ids = referenced_ids(manifest.model_dump())
+        if len(assets_for(db, owner_id, asset_ids)) != len(asset_ids):
+            raise HTTPException(422, "A skill asset is unavailable.")
         record = SkillRecord(owner_id=owner_id, manifest=manifest.model_dump(mode="json"))
         db.add(record)
         db.flush()
+        track(db, owner_id, "skill:" + record.id, record.manifest, skill_id=record.id)
         result = {"id": record.id, **record.manifest}
     return result
 
@@ -266,25 +271,28 @@ def create_skill_from_asset(asset_id: str, owner_id: str = owner, *, branded: bo
 
 
 @api.post("/assets", status_code=201)
-def upload(file: UploadFile = File(...), owner_id: str = owner):
+async def upload(file: UploadFile = File(...), owner_id: str = owner):
     name = re.split(r"[/\\]", file.filename or "upload")[-1][:200]
     maximum = settings().asset_limit_bytes
-    raw = file.file.read(maximum + 1)
+    raw = await file.read(maximum + 1)
     if len(raw) > maximum:
         raise HTTPException(413, f"File exceeds the {maximum // (1024*1024)} MB upload limit.")
+    declared = (file.content_type or "").split(";")[0].lower()
+    if name.lower().endswith((".pptx", ".docx", ".pdf")):
+        key = await run_in_threadpool(artifacts.enqueue, owner_id, None, "conversion", {"name": name, "declared": declared}, raw)
+        return await completed_artifact(key, owner_id)
+    return await run_in_threadpool(save_upload, owner_id, name, raw, declared)
+
+
+def save_upload(owner_id, name, raw, declared):
     try:
-        media_type, raw, extracted = parse_upload(name, raw)
+        media_type, raw, extracted = decode_upload(name, raw, declared)
     except Exception as error:
         raise HTTPException(415, "The file is invalid or uses an unsupported format.") from error
-    declared = (file.content_type or "").split(";")[0].lower()
-    if declared not in {"", "application/octet-stream", media_type, "text/markdown", "text/csv"}:
-        if not (media_type == "image/png" and declared in {"image/jpeg", "image/webp"}):
-            raise HTTPException(415, "The declared media type does not match the file.")
     with Session.begin() as db:
         asset = Asset(owner_id=owner_id, name=name, media_type=media_type, size=len(raw), extracted=extracted)
-        db.add(asset)
-        db.flush()
-        Storage().put(asset.id, raw, media_type)
+        begin_write(db)
+        store_asset(db, asset, raw)
         result = {"id": asset.id, "name": asset.name, "media_type": asset.media_type, "size": asset.size}
     return result
 
@@ -304,10 +312,26 @@ def get_asset(asset_id: str, owner_id: str = owner):
 
 
 @api.get("/presentations")
-def presentations(owner_id: str = owner):
+def presentations(response: Response, owner_id: str = owner, cursor: str = Query(default="", max_length=256),
+                  q: str = Query(default="", max_length=200), limit: int = Query(default=100, ge=1, le=100)):
     with Session() as db:
-        query = select(PresentationRecord).where(PresentationRecord.owner_id == owner_id).order_by(PresentationRecord.updated.desc()).limit(100)
-        return [summary(item) for item in db.scalars(query)]
+        deck = PresentationRecord
+        query = select(deck).where(deck.owner_id == owner_id)
+        if q.strip():
+            query = query.where(deck.title.icontains(q.strip(), autoescape=True))
+        if cursor:
+            try:
+                boundary = json.loads(base64.urlsafe_b64decode(cursor))
+                if not isinstance(boundary, list) or len(boundary) != 2 or not all(isinstance(v, str) for v in boundary):
+                    raise ValueError
+                query = query.where(tuple_(deck.updated, deck.id) < tuple(boundary))
+            except (ValueError, TypeError) as error:
+                raise HTTPException(422, "Invalid presentation cursor.") from error
+        rows = list(db.scalars(query.order_by(deck.updated.desc(), deck.id.desc()).limit(limit + 1)))
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            response.headers["X-Next-Cursor"] = base64.urlsafe_b64encode(json.dumps([last.updated, last.id]).encode()).decode()
+        return [summary(item) for item in rows[:limit]]
 
 
 @api.post("/presentations", status_code=201)
@@ -315,6 +339,8 @@ def create_presentation(data: CreatePresentation, owner_id: str = owner):
     if not data.prompt.strip():
         raise HTTPException(422, "Enter a presentation prompt.")
     with Session.begin() as db:
+        begin_write(db)
+        lock_account(db, owner_id)
         if len(assets_for(db, owner_id, data.asset_ids)) != len(set(data.asset_ids)):
             raise HTTPException(422, "One or more reference assets are unavailable.")
         skill = skill_for(db, owner_id, data.skill_id)
@@ -332,6 +358,7 @@ def create_presentation(data: CreatePresentation, owner_id: str = owner):
         item = PresentationRecord(owner_id=owner_id, title=title, request=data.model_dump(mode="json"), document=doc.model_dump(mode="json"))
         db.add(item)
         db.flush()
+        track_document(db, item)
         emit(db, item, "conversation.user", data.prompt)
         if data.generate:
             job_id = queue_generation(db, item).id
@@ -369,18 +396,24 @@ def delete_presentation(item_id: str, owner_id: str = owner):
         item = item_for(db, item_id, owner_id, True)
         keys = list(db.scalars(select(ExportRecord.id).where(ExportRecord.presentation_id == item.id)))
         keys.extend(db.scalars(select(SlidePreview.storage_key).where(SlidePreview.presentation_id == item.id)))
+        candidates = list(db.scalars(select(AssetReference.asset_id).where(AssetReference.presentation_id == item.id)))
+        skill_id = item.request.get("skill_id")
+        keys.extend(db.scalars(select(ArtifactJob.id).where(ArtifactJob.presentation_id == item.id,
+                               ArtifactJob.state == "complete", ArtifactJob.kind.in_(("preview", "artwork")))))
+        schedule_deletes(db, keys)
         db.delete(item)
-    if keys:
-        storage = Storage()
-        for key in keys:
-            storage.delete(key)
+        db.flush()
+        candidates.extend(retire_skill(db, owner_id, skill_id))
+        collect_unused(db, owner_id, candidates)
+    drain_deletes()
     return Response(status_code=204)
 
 
 @api.post("/presentations/{item_id}/duplicate", status_code=201)
 def duplicate(item_id: str, owner_id: str = owner):
     with Session.begin() as db:
-        original = item_for(db, item_id, owner_id)
+        begin_write(db)
+        original = item_for(db, item_id, owner_id, True)
         doc = read_document(original.document)
         if not doc.slides:
             raise HTTPException(409, "There are no slides to duplicate.")
@@ -432,39 +465,16 @@ def job_details(job_id: str, owner_id: str = owner):
         return {"id": job.id, "state": job.state, "checkpoint": job.checkpoint, "error": job.error, "usage": job.context.get("usage")}
 
 
-def fetch_events(item_id, after):
-    with Session() as db:
-        query = select(StudioEvent).where(StudioEvent.presentation_id == item_id, StudioEvent.id > after).order_by(StudioEvent.id).limit(100)
-        return [{"id": e.id, "presentation_id": e.presentation_id, "job_id": e.job_id, "type": e.type,
-                 "timestamp": e.timestamp, "payload": e.payload} for e in db.scalars(query)]
-
-
 @api.get("/presentations/{item_id}/events")
 async def events(item_id: str, request: Request, owner_id: str = owner,
-                 after: int = 0, last_event_id: str | None = Header(default=None)):
+                 after: int = Query(default=0, ge=0, le=2**63-1), last_event_id: str | None = Header(default=None)):
     def check_access():
         with Session() as db:
             item_for(db, item_id, owner_id)
     await run_in_threadpool(check_access)
-    cursor = max(after, int(last_event_id) if last_event_id and last_event_id.isdecimal() and len(last_event_id) <= 12 else 0)
-
-    async def stream():
-        nonlocal cursor
-        ticks = 0
-        yield "retry: 1500\n\n"
-        while not await request.is_disconnected():
-            batch = await run_in_threadpool(fetch_events, item_id, cursor)
-            for event in batch:
-                cursor = event["id"]
-                yield f"id: {cursor}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-            if len(batch) < 100:
-                if ticks % 15 == 0:
-                    yield ": heartbeat\n\n"
-                ticks += 1
-                await asyncio.sleep(.7)
-
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
+    cursor = max(after, int(last_event_id) if last_event_id and last_event_id.isascii() and last_event_id.isdecimal()
+                 and len(last_event_id) <= 18 else 0)
+    return event_response(item_id, cursor, request)
 
 
 @api.get("/presentations/{item_id}/questions")
@@ -567,47 +577,56 @@ def edit_exhibit(item_id: str, slide_id: str, data: EditExhibit, owner_id: str =
 
 
 @api.get("/presentations/{item_id}/slides/{slide_id}/preview")
-def slide_preview(item_id: str, slide_id: str, owner_id: str = owner):
-    with Session() as db:
-        item = item_for(db, item_id, owner_id)
-        document = read_document(item.document)
-        slide = next((entry for entry in document.slides if entry.id == slide_id), None)
-        if not slide:
-            raise HTTPException(404, "Slide not found.")
-        validate_document_assets(db, owner_id, document)
-        brand = presentation_brand(db, item, owner_id)
-    artwork = None
-    if brand and (executable := renderer()):
-        artwork = render_slide_artwork(executable, brand, slide, document.aspect_ratio)
-    with Session() as db:
-        raw = get_preview(db, item_id, document, slide, artwork=artwork)
-    return Response(raw, media_type="image/png")
+async def slide_preview(item_id: str, slide_id: str, owner_id: str = owner):
+    def prepare():
+        with Session() as db:
+            item = item_for(db, item_id, owner_id)
+            document = read_document(item.document)
+            slide = next((entry for entry in document.slides if entry.id == slide_id), None)
+            if not slide:
+                raise HTTPException(404, "Slide not found.")
+            validate_document_assets(db, owner_id, document)
+            brand = presentation_brand(db, item, owner_id)
+            executable = (settings().powerpoint_renderer or renderer()) if brand else None
+            if not executable and (raw := cached_preview(db, item_id, document, slide)):
+                return Response(raw, media_type="image/png")
+            params = {"document": document.model_copy(update={"slides": [slide]}).model_dump(mode="json"),
+                      "brand": brand.model_dump(mode="json") if brand else None, "renderer": executable,
+                      "fingerprint": fingerprint(document, slide)}
+        return artifacts.enqueue(owner_id, item_id, "preview", params)
+    return await image_response(prepare, owner_id)
 
 
-def render_slide_artwork(executable, brand, slide, aspect):
-    try:
-        return master_artwork(executable, brand.asset_id, layout_for_slide(brand, slide),
-                              slide.background, aspect)
-    except (ReviewUnavailable, FileNotFoundError) as error:
-        raise HTTPException(503, str(error)) from error
-    except ReviewBusy as error:
-        raise HTTPException(429, str(error)) from error
+async def image_response(prepare, owner_id):
+    for _ in range(2):
+        value = await run_in_threadpool(prepare)
+        if isinstance(value, Response):
+            return value
+        result = await completed_artifact(value, owner_id)
+        try:
+            raw = await run_in_threadpool(lambda: Storage().get(result["file_key"]))
+            return Response(raw, media_type="image/png", headers={"Cache-Control": "private, no-cache"})
+        except FileNotFoundError:
+            await run_in_threadpool(artifacts.forget_image, value, owner_id)
+    raise HTTPException(503, "The rendered preview is unavailable.")
 
 
 @api.get("/presentations/{item_id}/master-artwork")
-def slide_master_artwork(item_id: str, layout: Layout, background: str = Query(pattern=r"^#[0-9a-fA-F]{6}$"),
-                         index: int | None = Query(default=None, ge=0), owner_id: str = owner):
-    with Session() as db:
-        item = item_for(db, item_id, owner_id)
-        brand = presentation_brand(db, item, owner_id)
-        aspect = item.document["aspect_ratio"]
-    if not brand or not (executable := renderer()):
-        return Response(status_code=204)
-    if index is not None and not any(entry.index == index for entry in brand.layouts):
-        raise HTTPException(404, "PowerPoint layout not found.")
-    slide = Slide(title="Master artwork", layout=layout, background=background.upper(), brand_layout_index=index)
-    raw = render_slide_artwork(executable, brand, slide, aspect)
-    return Response(raw, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
+async def slide_master_artwork(item_id: str, layout: Layout, background: str = Query(pattern=r"^#[0-9a-fA-F]{6}$"),
+                              index: int | None = Query(default=None, ge=0), owner_id: str = owner):
+    def prepare():
+        with Session() as db:
+            item = item_for(db, item_id, owner_id)
+            brand = presentation_brand(db, item, owner_id)
+            aspect = item.document["aspect_ratio"]
+        if not brand or not (executable := settings().powerpoint_renderer or renderer()):
+            return Response(status_code=204)
+        if index is not None and not any(entry.index == index for entry in brand.layouts):
+            raise HTTPException(404, "PowerPoint layout not found.")
+        slide = Slide(id="master", title="Master artwork", layout=layout, background=background.upper(), brand_layout_index=index)
+        return artifacts.enqueue(owner_id, item_id, "artwork", {"brand": brand.model_dump(mode="json"),
+            "slide": slide.model_dump(mode="json"), "aspect": aspect, "renderer": executable})
+    return await image_response(prepare, owner_id)
 
 
 @api.get("/presentations/{item_id}/versions")
@@ -652,7 +671,8 @@ def chat(item_id: str, data: ChatRequest, owner_id: str = owner):
         document = read_document(item.document)
         locked_theme = presentation_brand(db, item, owner_id) is not None
         revision = item.revision
-    proposal = propose(document, data)
+    with chat_slot(owner_id):
+        proposal = propose(document, data)
     revised = apply(document, proposal, locked_theme=locked_theme)
     with Session.begin() as db:
         begin_write(db)
@@ -679,47 +699,57 @@ def apply_chat(item_id: str, data: ApplyEdit, owner_id: str = owner):
 
 
 def download(raw, media_type, title, extension):
-    filename = re.sub(r"[^A-Za-z0-9._ -]+", "", title).strip(" .")[:100] or "presentation"
-    if extension:
-        filename += "." + extension
-    return Response(raw, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    title = "".join(c for c in title if not unicodedata.category(c).startswith("C") and c not in '/\\:"<>|?*')
+    title = title.strip(" .")[:150] or "presentation"
+    fallback = re.sub(r"[^A-Za-z0-9._ -]+", "", title).strip(" .")[:100] or "presentation"
+    suffix = "." + extension if extension else ""
+    encoded = quote(title + suffix, safe="")
+    disposition = f"""attachment; filename="{fallback}{suffix}"; filename*=UTF-8''{encoded}"""
+    return Response(raw, media_type=media_type, headers={"Content-Disposition": disposition})
+
+
+@api.get("/artifacts/{key}")
+def artifact_status(key: str, owner_id: str = owner):
+    status = artifacts.status(key, owner_id)
+    if not status:
+        raise HTTPException(404, "File job not found or expired.")
+    return status
+
+
+async def completed_artifact(key, owner_id):
+    deadline = asyncio.get_running_loop().time() + settings().artifact_timeout_seconds * 2
+    while True:
+        status = await run_in_threadpool(artifact_status, key, owner_id)
+        if status["state"] == "complete":
+            return status["result"]
+        if status["state"] == "failed":
+            error = status["result"]
+            raise HTTPException(error["status"], error["detail"])
+        if asyncio.get_running_loop().time() >= deadline:
+            raise HTTPException(503, "File processing is still pending.", headers={"Location": f"/api/v1/artifacts/{key}"})
+        await asyncio.sleep(.5)
 
 
 @api.post("/presentations/{item_id}/export")
-def export(item_id: str, format: str = "pptx", owner_id: str = owner):
+def export(item_id: str, format: str = "pptx", background: bool = False, owner_id: str = owner):
     if format not in MIME:
         raise HTTPException(422, "Select pptx or pdf.")
-    document, revision, brand = export_snapshot(item_id, owner_id)
-    storage = Storage()
-    if format == "pptx":
-        raw = to_pptx(document, storage.get, brand)
-    elif brand and (executable := renderer()):
-        try:
-            raw = render_native_pdf(executable, to_pptx(document, storage.get, brand))
-            raw = add_pdf_evidence(raw, document)
-        except ReviewUnavailable as error:
-            raise HTTPException(503, str(error)) from error
-        except ReviewBusy as error:
-            raise HTTPException(429, str(error)) from error
-    else:
-        raw = to_pdf(document, storage.get)
-    store_export(item_id, owner_id, revision, format, raw, storage)
-    return download(raw, MIME[format], document.title, format)
+    params = export_snapshot(item_id, owner_id, format)
+    if background or len(params["document"]["slides"]) >= settings().export_queue_slide_threshold or (
+            format == "pdf" and params["brand"]):
+        key = artifacts.enqueue(owner_id, item_id, "export", params)
+        location = f"/api/v1/artifacts/{key}"
+        return JSONResponse({"id": key, "status_url": location}, status_code=202, headers={"Location": location})
+    raw, media_type, result = build("export", params)
+    store_export(item_id, owner_id, result["revision"], format, raw, result["title"])
+    return download(raw, media_type, result["title"], format)
 
 
 @api.post("/presentations/{item_id}/export/review")
-def review_export(item_id: str, expected: int, owner_id: str = owner):
-    document, revision, brand = export_snapshot(item_id, owner_id, expected)
-    storage = Storage()
-    raw = to_pptx(document, storage.get, brand)
-    try:
-        slides = review_powerpoint(raw, document)
-    except ReviewUnavailable as error:
-        raise HTTPException(503, str(error)) from error
-    except ReviewBusy as error:
-        raise HTTPException(429, str(error)) from error
-    key = store_export(item_id, owner_id, revision, "pptx", raw, storage)
-    return {"id": key, "revision": revision, "slides": slides}
+async def review_export(item_id: str, expected: int, owner_id: str = owner):
+    params = await run_in_threadpool(export_snapshot, item_id, owner_id, "pptx", expected)
+    key = await run_in_threadpool(artifacts.enqueue, owner_id, item_id, "review", params)
+    return await completed_artifact(key, owner_id)
 
 
 @api.get("/presentations/{item_id}/exports/{key}")
@@ -733,10 +763,10 @@ def download_export(item_id: str, key: str, owner_id: str = owner):
         raw = Storage().get(record.id)
     except FileNotFoundError as error:
         raise HTTPException(404, "Export not found or expired.") from error
-    return download(raw, MIME[record.format], item.title, record.format)
+    return download(raw, MIME[record.format], record.title or item.title, record.format)
 
 
-def export_snapshot(item_id, owner_id, expected=None):
+def export_snapshot(item_id, owner_id, format, expected=None):
     with Session() as db:
         item = item_for(db, item_id, owner_id)
         if expected is not None:
@@ -747,17 +777,16 @@ def export_snapshot(item_id, owner_id, expected=None):
         validate_document_assets(db, owner_id, document)
         revision = item.revision
         brand = presentation_brand(db, item, owner_id)
-        for slide in document.slides:
-            fit_slide_text(document, slide)
-    return document, revision, brand
+        return {"document": document.model_dump(mode="json"), "revision": revision, "format": format,
+                "brand": brand.model_dump(mode="json") if brand else None}
 
 
-def store_export(item_id, owner_id, revision, format, raw, storage):
+def store_export(item_id, owner_id, revision, format, raw, title):
     key = uid()
     with Session.begin() as db:
         begin_write(db)
         item_for(db, item_id, owner_id, True)
-        db.add(ExportRecord(id=key, presentation_id=item_id, revision=revision, format=format))
+        db.add(ExportRecord(id=key, presentation_id=item_id, revision=revision, format=format, title=title))
         db.flush()
-        storage.put(key, raw, MIME[format])
+        Storage().put(key, raw, MIME[format])
     return key

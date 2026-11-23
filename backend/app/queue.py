@@ -33,13 +33,18 @@ def requested_job() -> str | None:
     return None
 
 
-def heartbeat(db, worker_id: str):
+def heartbeat(db, worker_id: str, ticket=None, model=Job):
     entry = db.get(WorkerHeartbeat, worker_id)
     seen = int(time.time())
     if entry:
         entry.seen = seen
     else:
         db.add(WorkerHeartbeat(id=worker_id, seen=seen))
+    if ticket:
+        key, token = ticket
+        db.execute(update(model).where(model.id == key, model.lease == token,
+                                       model.lease_owner == worker_id, model.state == "running")
+                   .values(lease_until=seen + settings().lease_seconds))
     db.commit()
 
 
@@ -61,7 +66,7 @@ def claim(db, worker_id=None, preferred=None):
         ordering.insert(0, case((Job.id == preferred, 0), else_=1))
     candidate = select(Job.id).where(allowed).order_by(*ordering).limit(1).scalar_subquery()
     token = uid()
-    lease = max(settings().lease_seconds, 3 * settings().ai_timeout_seconds + 60)
+    lease = settings().lease_seconds
     result = db.execute(update(Job).where(Job.id == candidate, allowed)
                         .values(state="running", lease=token, lease_owner=worker_id, lease_until=current + lease, updated=now())
                         .returning(Job.id)).scalar_one_or_none()

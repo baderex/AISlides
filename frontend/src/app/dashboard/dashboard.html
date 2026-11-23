@@ -67,12 +67,16 @@
                 <a class="subtle-button" routerLink="/presentations" aria-label="View all presentations">View all <lucide-icon [img]="i.ArrowRight" [size]="15" /></a>
               } @else {
                 <h1 id="presentations-heading">Presentations</h1>
+                <input type="search" class="field" aria-label="Search presentations" placeholder="Search presentations"
+                  [ngModel]="deckSearch()" (ngModelChange)="deckSearch.set($event)" maxlength="200" />
               }
             </div>
             @if (deletedKind() === 'presentation') { <p class="notice library-notice" role="status">Presentation deleted.</p> }
-            @if (loading()) {
+            @if (loading() || (section() === 'presentations' && fetchingPage() && !visiblePresentations().length)) {
               <div class="empty-row" aria-live="polite">Loading presentations…</div>
-            } @else if (!recent().length) {
+            } @else if (!visiblePresentations().length && section() === 'presentations' && deckSearch()) {
+              <p>No presentations match your search.</p>
+            } @else if (!visiblePresentations().length) {
               <div class="empty-row"><span class="empty-icon"><lucide-icon [img]="i.Clock3" [size]="20" /></span>
                 <div><strong>No presentations yet</strong><p>New presentations will appear here.</p></div>
                 <button type="button" class="button" (click)="start()"><lucide-icon [img]="i.Plus" [size]="16" /> Create a presentation</button>
@@ -95,6 +99,9 @@
                   </article>
                 }
               </div>
+            }
+            @if (section() === 'presentations' && nextPage(); as cursor) {
+              <button type="button" class="button" [disabled]="fetchingPage()" (click)="loadPage(deckSearch(), cursor)">Load more presentations</button>
             }
           </section>
         }

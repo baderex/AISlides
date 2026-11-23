@@ -1,6 +1,8 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.db import Asset, Job, PresentationRecord, SkillRecord, StudioEvent, Version, now
+from app.asset_lifecycle import track_document
+from app.limits import admit_ai
+from app.db import begin_write, Asset, Job, PresentationRecord, SkillRecord, StudioEvent, Version, now
 from app.domain import Document, Group, Image, Slide, Source, read_document
 
 
@@ -11,6 +13,8 @@ class Conflict(ValueError):
 def emit(db, item, event_type, message, job=None, **data):
     db.add(StudioEvent(presentation_id=item.id, job_id=job.id if job else None, type=event_type,
                        payload={"message": message, **data}))
+    if db.bind.dialect.name == "postgresql":
+        db.execute(select(func.pg_notify("framecraft_events", item.id)))
 
 
 def latest_job(db, item_id):
@@ -27,6 +31,7 @@ def persist(db, item, document: Document, label: str | None = None):
     item.title = document.title
     item.revision += 1
     item.updated = now()
+    track_document(db, item, version=bool(label))
     if label:
         db.add(Version(presentation_id=item.id, revision=item.revision, document=item.document, label=label))
 
@@ -75,11 +80,6 @@ def present_owned(db, item_id, owner_id, lock=False):
     return db.scalar(query.with_for_update() if lock else query)
 
 
-def begin_write(db):
-    if db.bind.dialect.name == "sqlite":
-        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
-
 def queue_generation(db, item, *, restart_failed=False):
     job = latest_job(db, item.id)
     if job:
@@ -87,12 +87,14 @@ def queue_generation(db, item, *, restart_failed=False):
             return job
         if not restart_failed or job.state not in {"failed", "cancelled"}:
             raise Conflict("This presentation already has a completed generation. Duplicate it to start a new deck.")
+        admit_ai(db, item.owner_id)
         job.state, job.error, job.cancelled = "queued", None, False
         job.lease = None
         job.lease_owner = None
         item.status = "CREATED"
         emit(db, item, "generation.resumed", "Generation queued again from its saved checkpoint.", job)
         return job
+    admit_ai(db, item.owner_id)
     job = Job(presentation_id=item.id, context={"layout_engine":"auto"})
     db.add(job)
     db.flush()

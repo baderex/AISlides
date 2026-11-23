@@ -11,16 +11,13 @@ import httpx
 from pydantic import BaseModel, ValidationError, create_model
 
 from app.config import Settings, settings
+from app.limits import ProviderError, provider_call, settle_spend
 
 log = logging.getLogger(__name__)
 PROVIDER_HOSTS = {
     "api.openai.com": "openai", "api.anthropic.com": "anthropic",
     "generativelanguage.googleapis.com": "gemini", "openrouter.ai": "openrouter",
 }
-
-
-class ProviderError(Exception):
-    pass
 
 
 @dataclass
@@ -304,7 +301,14 @@ class Intelligence:
             try:
                 options = {"response_schema": response_schema} if response_schema else {}
                 limit = min(allowance, remaining)
-                reply = self._request(s.llm_model_id, prompt, content, image, contract, max_output_tokens=limit, **options)
+                # UTF-8 bytes bound text tokens conservatively across tokenizer families.
+                input_bound = len((prompt + content + schema_text).encode()) + 1024 + (16384 if image else 0)
+                bound = input_bound * s.ai_input_usd_per_million + limit * s.ai_output_usd_per_million
+                with provider_call(bound) as reservation:
+                    reply = self._request(s.llm_model_id, prompt, content, image, contract, max_output_tokens=limit, **options)
+                billed_input = reply.input_tokens if reply.input_tokens is not None else input_bound
+                billed_output = reply.output_tokens if reply.output_tokens is not None else limit
+                settle_spend(reservation, billed_input * s.ai_input_usd_per_million + billed_output * s.ai_output_usd_per_million)
                 stats = self._record_usage(stage, reply, estimate, limit, attempt + 1)
                 if reply.truncated:
                     stats["truncated"] = stats.get("truncated", 0) + 1

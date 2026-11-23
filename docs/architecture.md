@@ -1,6 +1,6 @@
 # Studio architecture
 
-Angular 21 serves a zoneless client with lazy dashboard and workspace routes. FastAPI exposes a versioned API. A separate Python worker drives generation using a SQL-backed state machine. SQLite and filesystem storage are the native defaults. PostgreSQL, Redis and S3 are production adapters.
+Angular 21 serves a zoneless client with lazy dashboard and workspace routes. FastAPI exposes a versioned API. A separate Python worker drives generation using a SQL-backed state machine and runs rendering and conversion jobs in time-limited subprocesses. SQLite and filesystem storage are the native defaults. PostgreSQL, Redis and S3 are production adapters.
 
 - The browser uses `/api/v1` on the same origin for uploads, editing, exports, and server-sent events. The Angular development proxy forwards API and health requests to FastAPI. Production serves the built client behind an HTTPS reverse proxy.
 - The API owns sessions, validates workspace access and revisions, and queues generation. The worker claims jobs from SQL and commits one checkpoint at a time. Optional Redis dispatch provides job IDs to prioritize, and SQL polling recovers missed dispatches.

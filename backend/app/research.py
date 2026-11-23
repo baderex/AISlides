@@ -7,6 +7,7 @@ from PIL import Image
 
 from app.config import settings
 from app.domain import Source
+from app.limits import provider_call
 from app.providers import ProviderError
 from app.storage import inspect_upload
 
@@ -16,8 +17,9 @@ def search_excerpt(fragments, limit):
 
 
 def collect_context(url, query, count, headers):
-    response = httpx.get(url, params={"q": query, "maximum_number_of_urls": count,
-                         "maximum_number_of_tokens": 4096}, headers=headers, timeout=15, follow_redirects=False)
+    with provider_call(settings().research_cost_usd * 1_000_000):
+        response = httpx.get(url, params={"q": query, "maximum_number_of_urls": count,
+                             "maximum_number_of_tokens": 4096}, headers=headers, timeout=15, follow_redirects=False)
     response.raise_for_status()
     terms = set(re.findall(r"[a-z0-9]{3,}", query.lower()))
     sources = []
@@ -51,10 +53,11 @@ def collect(query: str, *, count: int = 6, detailed: bool = False) -> list[Sourc
     if detailed:
         params["extra_snippets"] = True
     try:
-        response = httpx.get(configuration.research_api_url,
-                             params=params,
-                             headers=headers,
-                             timeout=15, follow_redirects=False)
+        with provider_call(configuration.research_cost_usd * 1_000_000):
+            response = httpx.get(configuration.research_api_url,
+                                 params=params,
+                                 headers=headers,
+                                 timeout=15, follow_redirects=False)
         response.raise_for_status()
     except httpx.HTTPError as error:
         raise ProviderError("Web research is temporarily unavailable. Check the research integration.") from error
@@ -77,11 +80,12 @@ def find_image(query: str) -> tuple[Source, bytes, float]:
     portrait_requested = "portrait" in query.casefold()
     with httpx.Client(timeout=6, follow_redirects=False) as client:
         try:
-            response = client.get(
-                configuration.research_image_api_url,
-                params={"q": query, "count": 8, "safesearch": "strict"},
-                headers={"X-Subscription-Token": configuration.research_api_key, "Accept": "application/json"},
-            )
+            with provider_call(configuration.research_cost_usd * 1_000_000):
+                response = client.get(
+                    configuration.research_image_api_url,
+                    params={"q": query, "count": 8, "safesearch": "strict"},
+                    headers={"X-Subscription-Token": configuration.research_api_key, "Accept": "application/json"},
+                )
             response.raise_for_status()
             results = response.json()["results"]
             if not isinstance(results, list):

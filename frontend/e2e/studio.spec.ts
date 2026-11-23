@@ -347,3 +347,37 @@ test('import a branded template and review the generated PowerPoint', async ({ p
     'assert deck.slides[0].shapes.title.text == "Quantum Computing"',
   ].join('\n'), deck]);
 });
+
+
+test('failed autosave keeps edits across a cancelled deck switch and retries on the next edit', async ({page, request}) => {
+  const created = await request.post('/api/v1/presentations', {data: {prompt: 'Navigation guard', generate: false}});
+  const deck = await created.json();
+  deck.document.slides = [{id: 'original', title: 'Original slide'}];
+  expect((await request.patch('/api/v1/presentations/' + deck.id, {data: {revision: 0, document: deck.document}})).ok()).toBe(true);
+  await page.goto('/presentation/' + deck.id);
+  await page.getByRole('button', {name: 'More presentation actions'}).click();
+  await page.getByRole('button', {name: /Duplicate presentation/}).click();
+  await expect(page).not.toHaveURL(new RegExp(deck.id + '$'));
+  const copyId = page.url().split('/').at(-1)!;
+  const copyPath = '/api/v1/presentations/' + copyId;
+  await page.route('**' + copyPath, route => route.request().method() === 'PATCH'
+    ? route.fulfill({status: 503, json: {detail: 'Temporary save failure'}}) : route.continue());
+  const add = page.getByRole('button', {name: 'Add slide', exact: true}).first();
+  await add.click();
+  await expect(page.getByRole('banner').getByRole('status')).toHaveText('Save failed');
+  expect(await page.evaluate(() => !dispatchEvent(new Event('beforeunload', {cancelable: true})))).toBe(true);
+  const dialog = page.waitForEvent('dialog');
+  await page.evaluate(() => history.back());
+  const warning = await dialog;
+  expect(warning.message()).toContain('unsaved');
+  await warning.dismiss();
+  await expect(page).toHaveURL(new RegExp(copyId + '$'));
+  await expect(page.locator('.thumbnail')).toHaveCount(2);
+  await page.unroute('**' + copyPath);
+  await add.click();
+  await expect(page.getByRole('banner').getByRole('status')).toHaveText('Saved');
+  expect((await (await request.get(copyPath)).json()).document.slides).toHaveLength(3);
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(deck.id + '$'));
+  await expect(page.locator('.thumbnail')).toHaveCount(1);
+});

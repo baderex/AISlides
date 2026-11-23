@@ -6,9 +6,12 @@ import httpx
 from PIL import Image
 from sqlalchemy import select
 
+from app.asset_lifecycle import store_asset, track
 from app.config import Settings, settings
 from app.db import Asset, Job, Session
 from app.domain import Source
+from app.job_state import lock_presentation
+from app.limits import provider_call
 from app.presentations import begin_write
 from app.providers import ProviderError, provider_for
 from app.research import find_image
@@ -39,7 +42,7 @@ def image_configured() -> bool:
 
 
 def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str) -> str | None:
-    key = str(uuid5(NAMESPACE_URL, f"framecraft:{job_id}:slide-image:{index}"))
+    key = str(uuid5(NAMESPACE_URL, f"framecraft:{job_id}:slide-image:{index}:{prompt}"))
     with Session() as db:
         if db.get(Asset, key):
             return key
@@ -56,12 +59,13 @@ def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str
     if config.image_provider == "openai":
         payload.update(size="1024x1024", quality="medium", n=1)
     try:
-        response = httpx.post(
-            config.image_gen_url.strip() or default_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-            timeout=config.ai_timeout_seconds,
-        )
+        with provider_call(config.image_cost_usd * 1_000_000):
+            response = httpx.post(
+                config.image_gen_url.strip() or default_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+                timeout=config.ai_timeout_seconds,
+            )
         response.raise_for_status()
         encoded = response.json()["data"][0]["b64_json"]
         if not isinstance(encoded, str):
@@ -84,7 +88,7 @@ def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str
 
 
 def source_web_image(job_id: str, token: str, index: int, owner_id: str, query: str) -> tuple[Source, float] | None:
-    key = str(uuid5(NAMESPACE_URL, f"framecraft:{job_id}:slide-web-image:{index}"))
+    key = str(uuid5(NAMESPACE_URL, f"framecraft:{job_id}:slide-web-image:{index}:{query}"))
     with Session() as db:
         asset = db.get(Asset, key)
         if asset:
@@ -102,10 +106,12 @@ def source_web_image(job_id: str, token: str, index: int, owner_id: str, query: 
 def save_image(job_id: str, token: str, asset: Asset, raw: bytes) -> bool:
     with Session.begin() as db:
         begin_write(db)
+        if not lock_presentation(db, job_id):
+            return False
         job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
         if not job or job.lease != token or job.cancelled:
             return False
         if not db.get(Asset, asset.id):
-            Storage().put(asset.id, raw, asset.media_type)
-            db.add(asset)
+            store_asset(db, asset, raw)
+            track(db, asset.owner_id, "media:" + asset.id, {"asset_id": asset.id}, presentation_id=job.presentation_id)
     return True

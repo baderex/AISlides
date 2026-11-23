@@ -162,10 +162,14 @@ def test_branded_pdf_exports_the_native_deck_when_a_renderer_is_available(monkey
         return output.getvalue()
 
     monkeypatch.setattr("app.api.renderer", lambda: "office-renderer")
-    monkeypatch.setattr("app.api.render_native_pdf", render)
+    monkeypatch.setattr("app.artifact_render.renderer", lambda: "office-renderer")
+    monkeypatch.setattr("app.artifact_render.render_native_pdf", render)
     client = TestClient(app)
     path, _ = branded_deck(client)
     response = client.post(path + "/export", params={"format": "pdf"})
+    assert response.status_code == 202
+    status = client.get(response.headers["Location"]).json()
+    response = client.get(status["result"]["download"])
     assert response.status_code == 200 and response.headers["content-type"] == "application/pdf"
     assert response.content.startswith(b"%PDF")
     assert len(rendered) == 1
@@ -208,7 +212,9 @@ def test_canvas_artwork_renders_the_layout_without_sample_or_generated_content(m
         pdf.save()
         return output.getvalue()
 
-    monkeypatch.setattr("app.api.renderer", lambda: "office-renderer")
+    from app.config import settings
+    configuration = settings()
+    monkeypatch.setattr(configuration, "powerpoint_renderer", "office-renderer")
     monkeypatch.setattr("app.master_artwork.render_native_pdf", render)
     client = TestClient(app)
     path, deck = branded_deck(client)
@@ -264,7 +270,7 @@ def test_review_download_matches_the_rendered_powerpoint(monkeypatch):
         assert len(Presentation(io.BytesIO(raw)).slides) == len(document.slides) == 3
         return []
 
-    monkeypatch.setattr("app.api.review_powerpoint", review)
+    monkeypatch.setattr("app.artifact_render.review_powerpoint", review)
     client = TestClient(app)
     path, deck = branded_deck(client)
     endpoint = path + "/export/review"

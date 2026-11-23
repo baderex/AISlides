@@ -47,6 +47,14 @@ export class ExhibitEditor implements OnInit {
     if (this.useStructuredData) this.structuredData = JSON.stringify(this.visual, null, 2);
   }
 
+  hasDraft() {
+    const original = this.spec();
+    const originalVisual = original.content.visual;
+    return this.recipe !== original.recipe || this.illustrative !== (original.content.illustrative_exhibit ?? false)
+      || (this.useStructuredData ? this.structuredData !== JSON.stringify(originalVisual, null, 2)
+        : JSON.stringify(this.visual) !== JSON.stringify(originalVisual));
+  }
+
   submit() {
     let visual = this.visual;
     if (this.useStructuredData) {

@@ -10,6 +10,7 @@ from app.config import settings
 from app.db import Session
 from app.presentations import Conflict
 from app.providers import ProviderError, provider_configured, provider_for
+from app.limits import LimitExceeded
 from app.queue import ready
 from app.storage import Storage
 
@@ -48,6 +49,11 @@ async def request_boundary(request: Request, call_next):
 @app.exception_handler(Conflict)
 async def conflict_error(request, error):
     return JSONResponse({"detail": str(error)}, status_code=409)
+
+
+@app.exception_handler(LimitExceeded)
+async def limit_error(request, error):
+    return JSONResponse({"detail": str(error)}, status_code=429)
 
 
 @app.exception_handler(ProviderError)

@@ -1,5 +1,5 @@
 import { DatePipe } from '@angular/common';
-import { afterNextRender, Component, computed, ElementRef, inject, Injector, signal, viewChild } from '@angular/core';
+import { afterNextRender, Component, computed, effect, ElementRef, inject, Injector, signal, viewChild } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink, RouterLinkActive } from '@angular/router';
@@ -43,7 +43,12 @@ export class Dashboard {
   readonly selectedSkill = signal<Skill | null>(null);
   readonly preview = signal<Skill | null>(null);
   readonly section = computed(() => this.routeUrl()[0]?.path ?? 'home');
-  readonly visiblePresentations = computed(() => this.section() === 'home' ? this.recent().slice(0, 3) : this.recent());
+  readonly library = signal<PresentationSummary[]>([]);
+  readonly deckSearch = signal('');
+  readonly nextPage = signal<string | null>(null);
+  readonly fetchingPage = signal(false);
+  private pageRequest = 0;
+  readonly visiblePresentations = computed(() => this.section() === 'home' ? this.recent().slice(0, 3) : this.library());
   readonly deleteTarget = signal<DeleteTarget | null>(null);
   readonly search = signal('');
   readonly category = signal('All skills');
@@ -72,7 +77,33 @@ export class Dashboard {
   skillFile: File | null = null;
   apiSkillLink(id: string) { return this.api.skillLink(id); }
 
-  constructor() { void this.load(); }
+  constructor() {
+    void this.load();
+    effect(onCleanup => {
+      const search = this.deckSearch();
+      if (this.section() !== 'presentations' || !this.user()) return;
+      this.pageRequest++;
+      this.nextPage.set(null);
+      this.fetchingPage.set(true);
+      const timer = setTimeout(() => void this.loadPage(search), 180);
+      onCleanup(() => clearTimeout(timer));
+    });
+  }
+
+  async loadPage(search: string, cursor = '') {
+    const request = ++this.pageRequest;
+    this.fetchingPage.set(true);
+    try {
+      const page = await this.api.list(search, cursor);
+      if (request !== this.pageRequest) return;
+      this.library.update(items => cursor ? [...items, ...page.items.filter(row => !items.some(old => old.id === row.id))] : page.items);
+      this.nextPage.set(page.next);
+    } catch (error) {
+      if (request === this.pageRequest) this.error.set(errorMessage(error));
+    } finally {
+      if (request === this.pageRequest) this.fetchingPage.set(false);
+    }
+  }
 
   async load() {
     this.loading.set(true);
@@ -84,7 +115,7 @@ export class Dashboard {
       const [decks, skills, capabilities] = await Promise.all([
         this.api.list(), this.api.skills(), this.api.capabilities().catch(() => null),
       ]);
-      this.recent.set(decks);
+      this.recent.set(decks.items);
       this.skills.set(skills);
       this.capabilities.set(capabilities);
     } catch (error) {
@@ -166,6 +197,7 @@ export class Dashboard {
         if (!this.categories().includes(this.category())) this.category.set('All skills');
       } else {
         this.recent.update(items => items.filter(presentation => presentation.id !== item.id));
+        this.library.update(items => items.filter(presentation => presentation.id !== item.id));
       }
       this.deleteTarget.set(null);
       this.deletedKind.set(item.kind);
