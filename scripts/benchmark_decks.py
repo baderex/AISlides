@@ -216,15 +216,26 @@ def generate(client, brief, output, launch_image):
         preview = checked(client.get(f"{path}/slides/{slide['id']}/preview"))
         (output / f"slide-{index:02}.png").write_bytes(preview.content)
     contact_sheet(output, "slide-*.png", "preview-contact-sheet.png")
-    report["slides"] = export_checks(output, document)
-    write_json(output / "run.json", report)
-    if brief["id"] == WEB_BRIEF["id"] and not any(
-            source.get("url") for source in document["sources"]):
-        raise RuntimeError("Web research case returned no cited web sources")
+    errors = []
+    try:
+        report["slides"] = export_checks(output, document)
+    except Exception as error:
+        errors.append("Export checks: " + safe_error(error))
+    if brief["id"] == WEB_BRIEF["id"]:
+        cited = {source_id for slide in document["slides"] for source_id in slide["source_ids"]}
+        if not any(source.get("url") and source["id"] in cited for source in document["sources"]):
+            errors.append("Web research case returned no cited web sources")
     if os.environ.get("BENCHMARK_OFFICE_REVIEW") == "1":
-        report["office_findings"] = office_review(output, document)
-        contact_sheet(output, "office-slide-*.jpg", "office-contact-sheet.png")
-        write_json(output / "run.json", report)
+        # Keep Office rendering evidence even if the structural export check fails.
+        try:
+            report["office_findings"] = office_review(output, document)
+            contact_sheet(output, "office-slide-*.jpg", "office-contact-sheet.png")
+        except Exception as error:
+            errors.append("Office rendering: " + safe_error(error))
+    report["errors"] = errors
+    write_json(output / "run.json", report)
+    if errors:
+        raise RuntimeError("; ".join(errors))
     print(f"{brief['id']}: {len(document['slides'])} slides in {seconds}s", flush=True)
 
 

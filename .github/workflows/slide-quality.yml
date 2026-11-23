@@ -48,6 +48,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libreoffice-impress fonts-liberation fonts-dejavu-core
+          sudo install -d /usr/local/share/fonts/framecraft
+          sudo install -m 644 backend/app/fonts/*.ttf /usr/local/share/fonts/framecraft/
+          sudo fc-cache -f
           python -m venv backend/.venv
           backend/.venv/bin/python -m pip install -e './backend[dev]'
           backend/.venv/bin/python -m playwright install --with-deps chromium
@@ -102,9 +105,9 @@ jobs:
           sudo apt-get install -y libreoffice-impress fonts-liberation fonts-dejavu-core
           python -m pip install -e './backend[dev]'
           python -m playwright install --with-deps chromium
-          mkdir -p "$HOME/.local/share/fonts/framecraft"
-          cp backend/app/fonts/*.ttf "$HOME/.local/share/fonts/framecraft/"
-          fc-cache -f
+          sudo install -d /usr/local/share/fonts/framecraft
+          sudo install -m 644 backend/app/fonts/*.ttf /usr/local/share/fonts/framecraft/
+          sudo fc-cache -f
       - name: Configure model (non-secret settings only)
         run: |
           cat > backend/.env <<'EOF'
