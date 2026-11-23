@@ -309,6 +309,7 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
         if schema.__name__ == "ArtDirection":
             return schema.model_validate(model_response("ArtDirection", data))
         fixtures = {
+            "Review": {"regenerate_content": False},
             "Intent": {"subject": "Example", "slide_count": 1},
             "Clarification": {"questions": []},
             "HtmlPlan": {"title":"Example", "slides":[{

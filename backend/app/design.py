@@ -161,8 +161,11 @@ NUMERIC_CELL = re.compile(r"[+\-−]?\s*[$€£¥]?\s*(?:\d[\d,]*(?:\.\d+)?|\.\d
 def style_table(table, theme, background=None, *, preserve_palette=False):
     rules = theme.design
     background = background or theme.background
+    table.font = theme.font
+    dense = len(table.rows) >= 5 or len(table.rows[0]) >= 4
+    if table.w >= .65:
+        table.size = max(table.size, 15 if dense else 18)
     if not preserve_palette:
-        dense = len(table.rows) >= 5 or len(table.rows[0]) >= 4
         cell_focus = bool(table.focus_rows and table.focus_columns)
         table.fill = rules.dense_surface if rules and dense else theme.surface
         if contrast(table.fill, background) < 3:
@@ -170,7 +173,6 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
         table.color = readable(theme.ink, table.fill, rules.dense_ink if rules else theme.muted, background)
         table.header_fill = blend(table.fill, background, .42)
         table.header_color = readable(theme.ink, table.header_fill, table.color, background)
-        table.font = theme.font
         if rules:
             table.focus_fill = blend(table.fill, theme.accent, .10 if cell_focus else .16) if table.focus_rows else None
             if table.focus_fill and contrast(table.color, table.focus_fill) < 4.5:
@@ -188,8 +190,6 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
             table.negative_ink = semantic_palette(theme, table.fill)["negative"]
             if any(contrast(table.negative_ink, fill) < 4.5 for fill in fills):
                 table.negative_ink = table.color
-        if table.w >= .65:
-            table.size = max(table.size, 15 if dense else 18)
     table.row_rule = blend(table.fill, table.color, .27)
     table.header_rule = theme.accent
     table.numeric_columns = []
@@ -199,16 +199,19 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
             table.numeric_columns.append(index)
 
 
-def style_slide_tables(slide, theme, *, preserve_palette=False):
+def style_slide_tables(slide, theme, *, preserve_palette=False, table_floor=None):
     for element, *_ in flattened(slide.elements):
         if isinstance(element, Table):
             style_table(element, theme, slide.background, preserve_palette=preserve_palette)
+            element.minimum_pt = table_floor
+            element.size = max(element.size, table_floor or 8)
     return slide
 
 
 def style_chart(chart, theme, background):
     palette = semantic_palette(theme, background)
-    chart.palette = [c for key, c in palette.items() if key.startswith("series")]
+    identities = len(chart.categories) if chart.chart == "pie" else len(chart.series)
+    chart.palette = [c for key, c in palette.items() if key.startswith("series")][:identities]
     chart.color = chart.palette[0]
     chart.label_color = palette["muted"]
     if chart.highlight is not None:

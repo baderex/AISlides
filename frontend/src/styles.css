@@ -409,6 +409,11 @@ studio-canvas { display: block; width: 100%; }
 .slide-text { height: 100%; white-space: pre-wrap; line-height: 1.13; overflow: hidden; overflow-wrap: anywhere; user-select: none; }
 .slide-shape.ellipse, .slide-pie { border-radius: 50%; }
 .slide-shape.triangle { clip-path: polygon(50% 0,100% 100%,0 100%); }
+.chart-plot { position: relative; height: 100%; }
+.chart-plot > svg { display: block; width: 100%; }
+.chart-key { display: grid; align-content: center; align-items: center; position: absolute; inset: 0 0 0 51%; }
+.chart-key > * { display: flex; gap: .25em; align-items: center; min-width: 0; overflow-wrap: anywhere; line-height: 1.2; padding-right: .25em; }
+.chart-key i { width: .55em; height: .55em; flex: none; }
 .slide-content .slide-chart { height: 90%; }
 .slide-content :is(.negative-value, .focus-value) { font-weight: 700; }
 .connector-tip { position: absolute; width: .85cqw; height: .85cqw; clip-path: polygon(0 0,100% 50%,0 100%); }

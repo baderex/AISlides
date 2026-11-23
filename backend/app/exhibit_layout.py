@@ -62,7 +62,7 @@ def quantitative(c, v):
             left, right = row.values if tornado else sorted((origin, row.values[0]))
             position = x(row.values[0])
             y = .04 + i * height
-            color = c.accent if not v.highlight or v.highlight == row.label else c.rule
+            color = c.accent if not v.highlight or v.highlight == row.label else c.colors["neutral"]
             if row.label == c.highlight_band:
                 c.shape(0, y, 1, height, c.surface, z=-4, element_key=f"{identity}:highlight")
             if left != right:
@@ -166,7 +166,7 @@ def course(c, v):
         for i, row in enumerate(v.rows):
             identity = f"slope:{row.label}"
             left, right = map(positions, row.values)
-            color = c.accent if not v.highlight or row.label == v.highlight else c.muted
+            color = c.accent if not v.highlight or row.label == v.highlight else c.colors["neutral"]
             c.line((.41, left), (.59, right), color=color, weight=2 if row.label == v.highlight else 1.2,
                    element_key=f"{identity}:connector")
             c.line((.39, slots[0][i] + .043), (.41, left), color=color, element_key=f"{identity}:left-tick")
@@ -249,12 +249,13 @@ def matrix(c, v):
             c.shape(min(zero, zero + length), (i + 1.44) * row_height, abs(length), .12 * row_height,
                     c.accent, element_key=f"{v.type}:score-bar:{v.rows[i].label}")
     table_width = .79 if weighted and c.score_bars else 1
+    floor = c.typography["table"].minimum_pt
     c.slide.elements.append(Table(**c.box(0, 0, table_width, .84 if show_key else .98), rows=rows, fill=c.slide.background,
-                                  color=c.ink, size=max(9, min(15, 96 / len(rows))), font=c.theme.font,
+                                  color=c.ink, size=max(floor, min(15, 96 / len(rows))), minimum_pt=floor, font=c.theme.font,
                                   header_fill=c.accent, header_color=readable("#FFFFFF", c.accent),
                                   focus_rows=[i for i, row in enumerate(v.rows, 1)
                                               if row.label in (v.recommended, c.highlight_band)],
-                                  focus_fill=c.surface, focus_ink=c.accent, row_rule=c.rule,
+                                  focus_fill=c.surface, focus_ink=readable(c.accent, c.surface, c.ink), row_rule=c.rule,
                                   numeric_columns=[i for i in range(1, len(headers)) if all(
                                       isinstance(row.cells[i - 1], (int, float)) for row in v.rows
                                   )] if not weighted else list(range(1, len(headers))),
@@ -311,7 +312,7 @@ def scatter(c, v):
         max_height = min(.17, .25 * c.w * c.ptw / (c.h * c.pth))
         height = max_height * sqrt(point.size / largest) if point.size and v.type == "bubble-chart" else .035
         width = height * c.h * c.pth / (c.w * c.ptw)
-        fill = c.accent if not v.highlight or point.label == v.highlight else c.muted
+        fill = c.accent if not v.highlight or point.label == v.highlight else c.colors["neutral"]
         c.shape(px - width / 2, py - height / 2, width, height, fill, shape="ellipse", opacity=.78,
                 element_key=f"{identity}:point")
         label = f"{point.label} ({fmt(point.size)})" if v.type == "bubble-chart" else point.label
@@ -783,7 +784,7 @@ def code(c, v):
         c.label(str(i + 1), .015, y + height * .08, .054, height * .85, 12, color=readable(c.muted, fill, c.ink),
                 font=mono, align="right", element_key=f"{identity}:number")
         c.label(line.code.expandtabs(4), .09, y + height * .08, .90, height * .85, 14,
-                font=mono, bold=line.highlight, element_key=f"{identity}:text")
+                font=mono, role="code", bold=line.highlight, element_key=f"{identity}:text")
         c.mark(str(i + 1), .98, y + height / 2)
 
 
@@ -868,9 +869,9 @@ def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned
             kicker_x = icon.w / w + .008
         frame.label(details.kicker, kicker_x, 0, .30 - kicker_x, .12, 12, color=frame.muted, bold=True,
                     centered=True, element_key="exhibit:decoration:kicker")
-        frame.label(details.key_metric, .32, 0, .29, .12, 23, color=frame.accent, bold=True,
+        frame.label(details.key_metric, .32, 0, .29, .12, 23, color=frame.accent_text, bold=True,
                     element_key="exhibit:decoration:metric")
-        frame.label(details.delta, .62, 0, .13, .12, 15, color=frame.accent, bold=True,
+        frame.label(details.delta, .62, 0, .13, .12, 15, color=frame.accent_text, bold=True,
                     element_key="exhibit:decoration:delta")
         if details.status is not None:
             frame.label(f"{'○◔◑◕●'[details.status]}  {details.status_label}", .77, 0, .23, .12, 13,
@@ -896,7 +897,7 @@ def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned
     if unit:
         frame.label(unit, 0, (y - frame.y) / frame.h, 1, .075, 11, color=frame.muted, element_key="exhibit:unit")
     if footer:
-        frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted, element_key="exhibit:footer")
+        frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted, element_key="exhibit:footer", role="footnote")
     width = w * .72 if notes else w
     body = ExhibitCanvas(document, slide, (x, y + h * upper, width, h * (1 - lower - upper)),
                          highlight_band=details.highlight_band if details else None, recipe=recipe, score_bars=score_bars)

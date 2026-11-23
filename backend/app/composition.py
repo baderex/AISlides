@@ -158,9 +158,10 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     item = item.model_copy(update={"layout": layout})
     if brand:
         slide = compose_branded(item, content, document, image_ids, brand)
-        return style_slide_tables(slide, document.theme, preserve_palette=True)
+        roles = DeckDesignSpec.from_theme(document.theme, document.aspect_ratio, layout).typography
+        return style_slide_tables(slide, document.theme, preserve_palette=True, table_floor=roles["table"].minimum_pt)
     t = document.theme
-    typography = DeckDesignSpec.from_theme(t, document.aspect_ratio, layout).typography if rules else {}
+    typography = DeckDesignSpec.from_theme(t, document.aspect_ratio, layout).typography
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     font_scale = max(.87, factor) if rules else factor
@@ -181,17 +182,24 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     def rect(x, y, w, h, fill, shape="rect", *, element_key=None):
         elements.append(Shape(x=x, y=y, w=w, h=h, fill=fill, shape=shape, z=-1, element_key=element_key))
 
-    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False, align="left", element_key=None):
+    def label(value, x, y, w, h, size, color=ink, bold=False, heading=False, align="left", element_key=None, role="label"):
         if value.strip():
             face = rules.heading_font if rules and heading else t.font
-            elements.append(Text(x=x, y=y, w=w, h=h, text=value, size=max(8, size * font_scale),
+            if value == item.title:
+                role = "cover" if layout == "cover" else "headline"
+            floor = typography[role].minimum_pt
+            elements.append(Text(x=x, y=y, w=w, h=h, text=value, role=role, minimum_pt=floor, size=max(floor, size * font_scale),
                                  color=color, bold=bold, font=face, align=align, element_key=element_key))
 
     def fitted_label(value, x, y, w, max_h, preferred, minimum, color, *, bold=False, heading=False,
-                     prefer_one_line=False, keep_words=False, align="left", element_key=None):
+                     prefer_one_line=False, keep_words=False, align="left", element_key=None, role="label"):
         if not value.strip():
             return y
         face = rules.heading_font if rules and heading else t.font
+        if value == item.title:
+            role = "cover" if layout == "cover" else "headline"
+        minimum = max(minimum, typography[role].minimum_pt)
+        preferred = max(preferred, minimum)
         if prefer_one_line:
             preferred = next((size for size in range(preferred, max(minimum, round(.88 * preferred)) - 1, -1)
                               if text_height(value, w * ptw, size, bold, face) <= 1.35 * size), preferred)
@@ -200,20 +208,22 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             if height <= max_h and (not keep_words or longest_word_width(value, size, bold, face) <= .98 * w * ptw):
                 break
         height = min(height, max_h)
-        label(value, x, y, w, height, size / font_scale, color, bold, heading=heading, align=align, element_key=element_key)
+        label(value, x, y, w, height, size / font_scale, color, bold, heading=heading, align=align, element_key=element_key, role=role)
         return y + height
 
     points = content.points
     image_ratio = image_ratio or web_image_ratio
     if rules and item.layout == "cover" and content.image_asset_id in image_ids and image_ratio:
         if compact:
-            image = Image(x=.055, y=.33, w=.89, h=.61, asset_id=content.image_asset_id, alt=item.title)
+            image = Image(x=.055, y=.33, w=.89, h=.61, asset_id=content.image_asset_id, alt=item.title,
+                          **content.picture_placement.model_dump())
             end = fitted_label(item.title, .07, .07, .86, .15, 48, 31, ink, heading=True)
-            fitted_label(content.subtitle, .07, end + .014, .86, max(.06, .32 - end), 17, 13, muted)
+            fitted_label(content.subtitle, .07, end + .014, .86, max(.06, .32 - end), 17, 13, muted, role="body")
         else:
-            image = Image(x=.035, y=.045, w=.65, h=.91, asset_id=content.image_asset_id, alt=item.title)
+            image = Image(x=.035, y=.045, w=.65, h=.91, asset_id=content.image_asset_id, alt=item.title,
+                          **content.picture_placement.model_dump())
             end = fitted_label(item.title, .719, .29, .245, .33, 64, 30, ink, heading=True)
-            fitted_label(content.subtitle, .722, end + .028, .225, .22, 19, 14, muted)
+            fitted_label(content.subtitle, .722, end + .028, .225, .22, 19, 14, muted, role="body")
         elements.append(fit_image(image, document, image_ratio))
         return slide
 
@@ -222,17 +232,17 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         panel_ink = readable("#FFFFFF", t.accent, t.ink)
         rect(.655, .22, .275, .53, t.accent)
         end = fitted_label(item.title, .07, .225, .55, .39, 54 if compact else 59, 32, ink, heading=True)
-        fitted_label(content.subtitle, .07, end + .024, .55, .21, 19, 14, muted)
+        fitted_label(content.subtitle, .07, end + .024, .55, .21, 19, 14, muted, role="body")
         fitted_label(callout.label, .677, .27, .232, .078, 15, 12, panel_ink, bold=True)
         end = fitted_label(callout.value, .677, .36, .232, .15, 43, 27, panel_ink, heading=True)
-        fitted_label(callout.detail, .677, end + .027, .232, .21, 16, 12, panel_ink)
+        fitted_label(callout.detail, .677, end + .027, .232, .21, 16, 12, panel_ink, role="body")
         return slide
 
     if rules and item.layout == "closing" and content.decision:
         decision = content.decision
         panel_ink = readable("#FFFFFF", t.accent, t.ink)
         end = fitted_label(item.title, .07, .095, .86, .18, 36, 28, ink, heading=True)
-        fitted_label(decision.if_missed, .07, end + .015, .86, max(.055, .347 - end), 17, 13, muted)
+        fitted_label(decision.if_missed, .07, end + .015, .86, max(.055, .347 - end), 17, 13, muted, role="body")
         step = .86 / len(decision.gates)
         for i, gate in enumerate(decision.gates):
             x = .07 + i * step
@@ -243,11 +253,11 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             fitted_label(threshold, x, .391, step - .024, .09, 33, 24, accent, heading=True)
             label(gate.label, x, .485, step - .024, .104, 16, ink, True)
             detail = "\n".join(part for part in (measure[:1].upper() + measure[1:], gate.detail) if part)
-            fitted_label(detail, x, .589, step - .024, .10, 14, 11, muted)
+            fitted_label(detail, x, .589, step - .024, .10, 14, 11, muted, role="body")
         rect(.07, .71, .86, .24, t.accent)
         end = fitted_label(f"{decision.action} {decision.request}.", .09, .727, .82, .105, 26, 18, panel_ink, heading=True)
         scope_y = end + .009
-        fitted_label(decision.scope, .09, scope_y, .82, .934 - scope_y, 15, 12, panel_ink)
+        fitted_label(decision.scope, .09, scope_y, .82, .934 - scope_y, 15, 12, panel_ink, role="body")
         return slide
 
     if rules and item.layout in {"cover", "closing"}:
@@ -267,7 +277,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                            .40, (60 if compact else 78) if display else (54 if compact else 62), 32, ink,
                            heading=True, align=align)
         end = fitted_label(content.next_step or content.subtitle, .12 if centered else .07, end + .023,
-                           .76 if centered else .75, .15, 20, 14, muted, align=align)
+                           .76 if centered else .75, .15, 20, 14, muted, align=align, role="body")
         if item.layout == "closing" and not content.next_step:
             visible = [point for point in points[:3] if point.title.casefold() not in {
                 item.title.casefold(), (content.next_step or content.subtitle).casefold()
@@ -297,10 +307,10 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         if rules:
             end = fitted_label(item.title, .068, .25, .86 if rules.cover_style == "rules" else .66,
                                .31, typography["cover"].target_pt, 30, ink, heading=True)
-            fitted_label(content.subtitle, .07, end + .032, .68, .19, 21, 15, muted)
+            fitted_label(content.subtitle, .07, end + .032, .68, .19, 21, 15, muted, role="body")
         else:
             label(item.title, .068, .24, .66, .28, 47, ink, True, heading=True)
-            label(content.subtitle, .07, .58, .64 if editorial else .70, .13, 23, muted)
+            label(content.subtitle, .07, .58, .64 if editorial else .70, .13, 23, muted, role="body")
         if points and item.layout == "closing":
             for i, point in enumerate(points[:3]):
                 label(point.title, .07 + .295 * i, .77, .274, .13, 18, ink, True)
@@ -313,11 +323,11 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         end = fitted_label(item.title, .07, .095, .86, .20, typography["headline"].target_pt, 26, ink,
                            bold=rules.heading_font.casefold() == t.font.casefold(), heading=True, prefer_one_line=True)
         if content.subtitle:
-            end = fitted_label(content.subtitle, .07, end + .018, .86, .112, typography["body"].target_pt, 14, muted)
+            end = fitted_label(content.subtitle, .07, end + .018, .86, .112, typography["body"].target_pt, 14, muted, role="body")
         body_top = max(.252, min(.455, end + .035))
     else:
         label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
-        label(content.subtitle, .07, .352, .86, .08, 17, muted)
+        label(content.subtitle, .07, .352, .86, .08, 17, muted, role="body")
     if rules and recipe == "diagram_swimlane" and content.swimlane:
         draw_swimlane(elements, content.swimlane, body_top, t, bg, fitted_label)
         return slide
@@ -355,13 +365,13 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 end = fitted_label(title, x + .02, y + h * .28, w - .04, h * .31,
                                    28, 17, panel_ink, bold=True, heading=True, element_key=f"{identity}:heading")
                 fitted_label(point.body, x + .02, end + .027, w - .04, y + h - end - .042, 16, 13, body_ink,
-                             element_key=f"{identity}:body")
+                             element_key=f"{identity}:body", role="body")
             else:
                 split = .31
                 fitted_label(title, x + .024, y + .024, split, max(.05, h - .037),
                              23, 14, panel_ink, bold=True, heading=True, element_key=f"{identity}:heading")
                 fitted_label(point.body, x + split + .06, y + .024, w - split - .084, max(.05, h - .037),
-                             18, 13, body_ink, element_key=f"{identity}:body")
+                             18, 13, body_ink, element_key=f"{identity}:body", role="body")
         return slide
     first_body_element = len(elements)
     use_icons = item.layout in STANDARD_ICON_LAYOUTS and not (content.chart or content.table or content.stacked_comparison)
@@ -432,7 +442,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             rect(x, .463, width, .004, accent if lead else blend(bg, ink, .30))
             fitted_label(metric.title, x, .492, width, .075, 16, 12, ink, bold=True)
             fitted_label(metric.value, x, .586, width, .131, 42 if lead else 35, 23, accent if lead else ink, heading=True)
-            fitted_label(metric.body, x, .75, width, .124, 15, 12, muted)
+            fitted_label(metric.body, x, .75, width, .124, 15, 12, muted, role="body")
     elif rules and item.layout == "timeline" and content.rollout:
         rollout = content.rollout
         phase_ink = readable(ink, t.surface, t.ink, bg)
@@ -450,7 +460,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 y = .725 + i * .075
                 rect(.07, y, .86, .002, t.surface)
                 label(pair.risk, .07, y + .008, .25, .065, 15, ink, True)
-                label(pair.mitigation, .338, y + .008, .592, .065, 15, ink)
+                label(pair.mitigation, .338, y + .008, .592, .065, 15, ink, role="body")
     elif item.layout == "research" and content.table_ready:
         rows = [[cell[:180] for cell in row] for row in content.table]
         focus = {value.strip().casefold() for value in content.table_focus[:2]} if rules else set()
@@ -467,18 +477,19 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                               header_fill=accent if consulting else None,
                               header_color=readable("#FFFFFF", accent) if consulting else None))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
-        image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
+        image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title,
+                          **content.picture_placement.model_dump())
         elements.append(image)
         if image_ratio:
             for i, point in enumerate(points[:3]):
                 y = .46 + i * .146
                 label(point.title, .07, y, .43, .056, 18, ink, True)
-                label(point.body, .07, y + .06, .43, .08, 15, muted)
+                label(point.body, .07, y + .06, .43, .08, 15, muted, role="body")
         else:
             for i, point in enumerate(points[:2]):
                 y = .46 + i * .21
                 label(point.title, .07, y, .43, .06, 20, ink, True)
-                label(point.body, .07, y + .07, .43, .125, 16, muted)
+                label(point.body, .07, y + .07, .43, .125, 16, muted, role="body")
     elif item.layout == "chart" and slide.source_ids and content.chart_ready:
         data = content.chart
         direct_labels = bool(rules and data.chart != "pie" and len(data.values) <= 6)
@@ -523,8 +534,8 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                 offset = icon.w + .008
             label(point.value or f"0{i + 1}", x + offset, .465, width - .024 - offset, .047, 14, accent, True)
             label(point.title, x, .605, width - .024, .095, 20, ink, True)
-            label(point.body, x, .72, width - .024, .18, 16, muted)
-    elif rules and item.layout == "process" and points and (
+            label(point.body, x, .72, width - .024, .18, 16, muted, role="body")
+    elif rules and item.layout in {"process", "metrics"} and points and (
         compact or len(points) > 3 or any(len(point.title) > 38 or len(point.body) > 85 for point in points)
     ):
         visible = points[:4]
@@ -532,15 +543,16 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         for i, point in enumerate(visible):
             y = .45 + i * row_height
             with_icon = bool(use_icons and point.icon)
-            label(f"{i + 1:02}", .07, y + .008, .050 if with_icon else .09,
-                  row_height - .012, 23 if with_icon else 27, accent, True, heading=True)
+            if item.layout == "process" or point.value and (slide.source_ids or not any(c.isdigit() for c in point.value)):
+                marker = f"{i + 1:02}" if item.layout == "process" else point.value
+                label(marker, .07, y + .008, .09, row_height - .012, 23, accent, True)
             if with_icon:
                 elements.append(slide_icon(document, point.icon, .124, y + .011, .040, bg))
             if i:
                 rect(.07, y, .86, .002, t.surface)
             title = re.sub(rf"^Step\s+0?{i + 1}\s*[:.–-]\s*", "", point.title, flags=re.IGNORECASE)
             end = fitted_label(title or point.title, .18, y + .008, .75, row_height * .40, 21, 15, ink, bold=True)
-            fitted_label(point.body, .18, end + .002, .75, max(.025, y + row_height - end - .008), 16, 13, muted)
+            fitted_label(point.body, .18, end + .002, .75, max(.025, y + row_height - end - .008), 16, 13, muted, role="body")
     elif item.layout in {"comparison", "metrics", "process", "showcase"} and points:
         points = points[:2 if item.layout == "comparison" and not rules else 3]
         gap = {"compact": .012, "regular": .022, "spacious": .032}[rules.spacing] if rules else .022
@@ -567,10 +579,10 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             if rules and item.layout == "comparison":
                 end = fitted_label(point.title, x + .018, .575 if offset or value else .493,
                                    width - .036, .139, 20, 15, ink, bold=True)
-                fitted_label(point.body, x + .018, end + .012, width - .036, .94 - end - .012, 16, 13, muted)
+                fitted_label(point.body, x + .018, end + .012, width - .036, .94 - end - .012, 16, 13, muted, role="body")
             else:
                 label(point.title, x + .018, .596, width - .036, .09, 18, card_ink, True)
-                label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, card_muted)
+                label(point.body, x + .018, .70, width - .036, .157, 16 if not compact else 15, card_muted, role="body")
     else:
         icon_column = use_icons and any(point.icon for point in points[:3])
         text_x = .125 if icon_column else .103
@@ -582,7 +594,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             else:
                 rect(.07, y + .021, .014, .025, t.accent, "ellipse")
             label(point.title, text_x, y, text_width, .062, 20, ink, True)
-            label(point.body, text_x, y + .063, text_width, .075, 16, muted)
+            label(point.body, text_x, y + .063, text_width, .075, 16, muted, role="body")
     if rules:
         scale = (.955 - body_top) / (.955 - .445)
         for element in elements[first_body_element:]:
@@ -598,7 +610,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     if len(points) > 3:
         remainder = "\n".join(f"{p.title}: {p.body}" for p in points[3:])
         slide.notes = (slide.notes + "\n" + remainder).strip()[:7000]
-    return style_slide_tables(slide, t, preserve_palette=consulting)
+    return style_slide_tables(slide, t, preserve_palette=consulting, table_floor=typography["table"].minimum_pt)
 
 
 def compose_visual_slide(item, content, document, brand, image_ids, source_ids, recipe):
@@ -625,12 +637,12 @@ def compose_visual_slide(item, content, document, brand, image_ids, source_ids, 
         slide = Slide(title=heading, layout=role, background=document.theme.background, notes=content.notes,
                       source_ids=list(dict.fromkeys(key for key in content.source_ids if key in source_ids)))
         frame = ExhibitCanvas(document, slide, (.06, .055, .88, .89))
-        frame.label(heading, 0, 0, 1, .184, 35, bold=True, emphasis=content.decorations.emphasis if content.decorations else ())
+        frame.label(heading, 0, 0, 1, .184, 35, role="headline", bold=True, emphasis=content.decorations.emphasis if content.decorations else ())
         heading_box = slide.elements[-1]
         top = max(.17, heading_box.y + heading_box.h + .042)
         frame = ExhibitCanvas(document, slide, (.06, top, .88, .945 - top))
     if content.subtitle:
-        frame.label(content.subtitle, 0, 0, 1, .115, 15, color=frame.muted)
+        frame.label(content.subtitle, 0, 0, 1, .115, 15, color=frame.muted, role="body")
     start = .13 if content.subtitle else 0
     frame.line((0, start), (1, start), color=frame.rule, element_key="exhibit:header-rule")
     bounds = (frame.x, frame.y + frame.h * (start + .025), frame.w, frame.h * (1 - start - .025))
@@ -644,7 +656,7 @@ def compose_visual_slide(item, content, document, brand, image_ids, source_ids, 
     if status == UNVERIFIED:
         slide.warnings.append("Some exhibit values lack matching source observations.")
     if status:
-        frame.label(status, 0, .956, 1, .044, 11, color=frame.ink, bold=True, element_key=STATUS_KEY)
+        frame.label(status, 0, .956, 1, .044, 11, color=frame.ink, bold=True, element_key=STATUS_KEY, role="footnote")
         bounds = (*bounds[:3], bounds[3] - frame.h * .06)
     compose_exhibit(document, slide, content, bounds, annotations=content.annotations,
                     planned_annotations=item.annotations, recipe=recipe)

@@ -18,8 +18,10 @@ namespace => {
     if (type === "exhibit") return {...common,background:el.closest("[data-surface]")?.dataset.surface ||
       hex(getComputedStyle(slide).backgroundColor)};
     if (type === "shape") return {...common, shape:el.dataset.shape || "rect",
+      radius_pt:el.dataset.shape === "round" ? parseFloat(style.borderTopLeftRadius)*.75 : null,
       fill:hex(style.backgroundColor), polygon:JSON.parse(el.dataset.points || "null")};
-    if (type === "image") return {...common, asset_id:el.dataset.asset, alt:el.alt};
+    if (type === "image") return {...common, asset_id:el.dataset.asset, alt:el.alt, fit:style.objectFit,
+      focal_x:Number(el.dataset.focalX ?? .5), focal_y:Number(el.dataset.focalY ?? .5)};
     if (type === "line") {
       const anchor = value => {
         if (!value) return null;
@@ -47,14 +49,14 @@ namespace => {
       }
       const single = fragments.length > 0 && !el.innerText.includes("\n") &&
         fragments.every(line => Math.abs(line.top-fragments[0].top)<1);
-      return {...common,text:el.innerText,font:face,size,color:hex(style.color),
+      return {...common,role:el.dataset.role || null,minimum_pt:Number(el.dataset.minimumPt) || null,text:el.innerText,font:face,size,color:hex(style.color),
         bold:Number(style.fontWeight)>=600,align:style.textAlign,single_line:single,
         line_spacing:parseFloat(style.lineHeight)/parseFloat(style.fontSize)};
     }
     if (type !== "table") throw Error("Unsupported editable object " + type);
     const cells = [...el.rows].map(row=>[...row.cells]);
     const grid = fn => cells.map(row=>row.map(cell=>fn(cell,getComputedStyle(cell))));
-    return {...common,font:face,size,rows:grid(cell=>cell.innerText),
+    return {...common,font:face,size,minimum_pt:Number(el.dataset.minimumPt),rows:grid(cell=>cell.innerText),
       header_fill:hex(getComputedStyle(cells[0][0]).backgroundColor),
       row_rule:hex(getComputedStyle(cells[0][0]).borderBottomColor),
       cell_fills:grid((_,s)=>hex(s.backgroundColor)), cell_inks:grid((_,s)=>hex(s.color)),

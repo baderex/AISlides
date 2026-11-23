@@ -33,7 +33,7 @@ def output_allowance(stage: str, data: dict) -> int:
     if stage == "outline":
         return 1024 + 512 * data["slide_count"]
     return {"analyze": 1024, "clarify": 2048, "research-queries": 768, "research": 4096,
-            "design": 2048, "vision": 1024, "html-slide": 8192, "slide": 4096,
+            "design": 2048, "vision": 1024, "content-review": 1024, "html-slide": 8192, "slide": 4096,
             "edit": 8192}.get(stage, 4096)
 
 
@@ -141,9 +141,9 @@ def layout_response_schema(schema, data, layout):
     if layout in {"research", "comparison"} or (layout == "summary" and data.get("sources")):
         keys.update(("table", "table_focus", "table_focus_columns"))
     if data.get("image_assets"):
-        keys.add("image_asset_id")
+        keys.update(("image_asset_id", "picture_placement"))
     if data.get("generate_image"):
-        keys.add("image_prompt")
+        keys.update(("image_prompt", "image_orientation", "picture_placement"))
     # A revision can start from a saved slide that chose a different exhibit than its plan.
     keys.update(key for key, value in (data.get("previous") or {}).items() if value and key in schema.model_fields)
     fields = response_fields(schema, (key for key in schema.model_fields if key in keys))

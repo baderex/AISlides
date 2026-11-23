@@ -256,7 +256,14 @@ PHASE_NUMBER = re.compile(r"\d|\b(?:zero|one|two|three|four|five|six|seven|eight
                           r"fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\b", re.I)
 
 
+class PicturePlacement(Contract):
+    fit: Literal["contain", "cover"] = Field(default="contain", description="Contain logos/screenshots or cover a photographic frame")
+    focal_x: float = Field(default=.5, ge=0, le=1)
+    focal_y: float = Field(default=.5, ge=0, le=1)
+
+
 class SlideContent(Contract):
+    picture_placement: PicturePlacement = Field(default_factory=PicturePlacement)
     title: ShortText
     subtitle: str = Field(default="", max_length=220)
     points: list[Point] = Field(default_factory=list, max_length=5)
@@ -265,6 +272,7 @@ class SlideContent(Contract):
     source_ids: list[str] = Field(default_factory=list, max_length=12)
     image_asset_id: str | None = None
     image_prompt: str = Field(default="", max_length=400)
+    image_orientation: Literal["landscape", "portrait", "square"] = Field(default="square", description="Aspect of the intended illustration frame")
     chart: ChartContent | None = None
     table: list[list[str]] | None = Field(default=None, max_length=8)
     stacked_comparison: StackedComparison | None = None

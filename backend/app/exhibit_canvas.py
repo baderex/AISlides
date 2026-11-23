@@ -1,3 +1,4 @@
+from app.deck_design import DeckDesignSpec
 from app.design import blend, readable
 from app.palette import semantic_palette
 from app.domain import Line, Shape, Text, TextSpan
@@ -13,11 +14,13 @@ class ExhibitCanvas:
         self.theme = document.theme
         self.ink = readable(self.theme.ink, slide.background)
         self.muted = readable(self.theme.muted, slide.background, self.ink)
-        self.accent = readable(self.theme.accent, slide.background, self.ink)
-        self.surface = blend(slide.background, self.accent, .10)
         self.colors = semantic_palette(self.theme, slide.background)
+        self.accent = self.colors["highlight"]
+        self.accent_text = self.colors["accentText"]
+        self.surface = blend(slide.background, self.accent, .10)
         self.rule = self.colors["border"]
         self.palette = [v for k, v in self.colors.items() if k.startswith("series")]
+        self.typography = DeckDesignSpec.from_theme(self.theme, document.aspect_ratio, slide.layout).typography
         self.ptw, self.pth = physical(document)
         self.marks = {}
         self.highlight_band = highlight_band
@@ -36,13 +39,15 @@ class ExhibitCanvas:
         return element
 
     def label(self, value, x, y, w, h, size=15, *, color=None, bold=False, align="left", font=None, emphasis=(),
-              centered=False, element_key=None):
+              centered=False, element_key=None, role="label"):
         if not value.strip() or w <= 0 or h <= 0:
             return
         bounds = self.box(x, y, w, h)
         font = font or self.theme.font
         width, height = bounds["w"] * self.ptw, bounds["h"] * self.pth
-        while size > 8 and (text_height(value, width, size, bold, font) + 3 > height or
+        floor = self.typography[role].minimum_pt
+        size = max(size, floor)
+        while size > floor and (text_height(value, width, size, bold, font) + 3 > height or
                             longest_word_width(value, size, bold, font) > width * .99):
             size -= 1
         bounds["h"] = min(height, text_height(value, width, size, bold, font) + 3) / self.pth
@@ -53,7 +58,7 @@ class ExhibitCanvas:
         for start, end in matches:
             if not spans or start >= spans[-1].end:
                 spans.append(TextSpan(start=start, end=end, bold=True))
-        self.slide.elements.append(Text(**bounds, text=value, size=size, font=font, color=color or self.ink,
+        self.slide.elements.append(Text(**bounds, text=value, size=size, role=role, minimum_pt=floor, font=font, color=color or self.ink,
                                         bold=bold, align=align, spans=spans, element_key=element_key))
 
     def line(self, a, b, *, color=None, arrow=False, weight=1.2, dashed=False, z=-1,

@@ -1,3 +1,5 @@
+from uuid import NAMESPACE_URL, uuid5
+
 from sqlalchemy import func, select
 
 from app.asset_lifecycle import track_document
@@ -72,7 +74,8 @@ def referenced_images(slides: list[Slide]):
 
 
 def asset_sources(assets):
-    return [Source(title=asset.name, excerpt=asset.extracted[:3000], asset_id=asset.id) for asset in assets]
+    return [Source(id=str(uuid5(NAMESPACE_URL, f"framecraft:asset:{asset.id}")), title=asset.name,
+                   excerpt=asset.extracted[:20000], asset_id=asset.id) for asset in assets]
 
 
 def present_owned(db, item_id, owner_id, lock=False):

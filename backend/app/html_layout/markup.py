@@ -15,11 +15,14 @@ class PagePlan(Contract):
     title: str = Field(min_length=1, max_length=160)
     layout: Layout = "summary"
     direction: str = Field(min_length=1, max_length=1800, description="Specific exhibit, composition and information to communicate")
+    required_details: list[str] = Field(default_factory=list, max_length=8,
+                                        description="Brief requirements assigned to this slide: facts, units, qualifications and decision conditions")
     source_ids: list[Identifier] | None = Field(default=None, max_length=60)
     exhibit: VisualType | Literal["workbook-chart"] | None = None
     picture_id: Identifier | None = Field(default=None, description="Uploaded picture explicitly assigned to this slide")
     image_query: str = Field(default="", max_length=380)
     image_prompt: str = Field(default="", max_length=400)
+    image_orientation: Literal["landscape", "portrait", "square"] = Field(default="square", description="Aspect of the intended illustration frame")
 
 
 class HtmlPlan(Contract):
@@ -95,7 +98,7 @@ class RecoveredExhibitFrame(ExhibitFrameCopy):
 
 
 PLAN = """Art-direct an editable slide deck from the supplied brief. Follow its requested count, aspect,
-audience, wording, data, and slide order. Vary compositions and derive exhibit conclusions and calculations
+audience, wording, data, and slide order. Assign every requested fact, qualification and decision condition to the appropriate slide in required_details. Vary compositions and derive exhibit conclusions and calculations
 from the supplied facts. Use the cover title requested. Select exhibit for structured figures, scorecards,
 comparisons, schedules or diagrams so their inputs remain editable together. Use decision-matrix for a
 weighted scorecard or weighted choice, heatmap for retention grids, waterfall for bridges, and workbook-chart for ordinary
@@ -128,7 +131,7 @@ For a planned exhibit, include precisely one <exhibit grow="1"/> where its data 
 Return the matching exhibit_data separately. The renderer derives scores, dimensions and data labels.
 Supply exact observations and cited source_ids for quantitative inputs. Set illustrative only for data
 explicitly identified as illustrative. Leave room below the exhibit for the evidence footer.
-Use <picture asset="uploaded-id" alt="Description" grow="1"/> for a relevant supplied picture.
+Use <picture asset="uploaded-id" alt="Description" grow="1"/> for a supplied picture. Use fit="cover" for a cropped photograph and focal_x/focal_y (0 to 1) for crop alignment. Use contain for logos, screenshots and diagrams.
 Only use IDs in available_pictures. The original image retains its aspect ratio and is editable.
 <text role="headline" align="left">Text</text>. Use cover, headline, body, label, code or footnote roles.
 The role supplies the font, weight, leading and size. For overrides size is in CSS pixels (points / 0.75).
@@ -223,7 +226,8 @@ def parse_markup(value):
                 raise MarkupError(f"Unexpected <{child.tag}> inside <{node.tag}>. {hint}")
         if node.tag in TAGS and node.tag not in {"row","col"} and not len(node):
             raise MarkupError(f"Empty {node.tag}")
-        return {"tag":node.tag, "a":node.attrib, "t":(node.text or "").strip(),
+        text = node.text or ""
+        return {"tag":node.tag, "a":node.attrib, "t":text if node.get("role") == "code" else text.strip(),
                 "children":[clean(c, depth + 1) for c in node]}
     parsed = clean(root, 0)
     if sum(1 for _ in root.iter()) > 300:

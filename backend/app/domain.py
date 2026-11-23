@@ -69,7 +69,7 @@ class Source(Contract):
     id: Identifier = Field(default_factory=uid)
     title: ShortText
     url: HttpUrl | None = None
-    excerpt: str = Field(default="", max_length=3000)
+    excerpt: str = Field(default="", max_length=20000)
     asset_id: Identifier | None = None
 
 
@@ -101,7 +101,12 @@ class TextSpan(Contract):
     bold: bool | None = None
 
 
+TextRole = Literal["cover", "headline", "body", "label", "footnote", "code"]
+
+
 class Text(ElementBase):
+    role: TextRole | None = None
+    minimum_pt: float | None = Field(default=None, ge=8, le=100)
     type: Literal["text"] = "text"
     single_line: bool = False
     line_spacing: float | None = Field(default=None, ge=.5, le=4)
@@ -140,6 +145,7 @@ class Text(ElementBase):
 
 class Shape(ElementBase):
     type: Literal["shape"] = "shape"
+    radius_pt: float | None = Field(default=None, ge=0, le=540)
     shape: Literal["rect", "round", "ellipse", "triangle", "diamond"] = "rect"
     fill: Color = "#4C52D9"
     polygon: list[tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, le=1)]]] | None = Field(
@@ -149,6 +155,9 @@ class Shape(ElementBase):
 class Image(ElementBase):
     type: Literal["image"] = "image"
     asset_id: Identifier
+    fit: Literal["fill", "contain", "cover"] = "fill"
+    focal_x: float = Field(default=.5, ge=0, le=1)
+    focal_y: float = Field(default=.5, ge=0, le=1)
     alt: str = Field(default="", max_length=220)
 
 
@@ -190,6 +199,7 @@ class TableLayout(Contract):
 
 
 class Table(ElementBase):
+    minimum_pt: float | None = Field(default=None, ge=8, le=28)
     css: TableLayout | None = None
     type: Literal["table"] = "table"
     rows: list[list[Annotated[str, Field(max_length=180)]]] = Field(min_length=1, max_length=12)
@@ -305,6 +315,11 @@ class Chart(ElementBase, WorkbookData):
     font: str = Field(default="Arial", max_length=60)
     highlight: int | None = Field(default=None, ge=0)
     context_color: Color | None = None
+
+    @property
+    def needs_key(self):
+        return (self.element_key == "workbook:chart" or self.chart == "pie" or not self.show_values
+                or len(self.series) > 1 and self.chart != "stacked_column")
 
     def mark_color(self, category: int, series: int = 0) -> str:
         if self.highlight is not None and category != self.highlight and self.context_color:

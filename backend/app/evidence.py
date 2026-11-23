@@ -256,6 +256,9 @@ def commit_comparison(data, rows, currency):
     category = data.categories[totals.index(smaller)]
     if not percent:
         return ""
+    if not re.search(r"\b(?:running|operating|operational) costs?\b", data.label, re.I):
+        other = data.categories[totals.index(larger)]
+        return f"{data.label} is {percent}% lower for {category} than for {other}"
     if category[-1:].casefold() == "s":
         return f"{category[0].upper()}{category[1:]} cost {percent}% less to run"
     return f"{category[0].upper()}{category[1:]} operating costs are {percent}% lower"

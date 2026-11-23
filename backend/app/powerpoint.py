@@ -17,6 +17,7 @@ from pptx.util import Inches, Pt
 from app.branding import SLOT_TYPES, layout_for_slide, native_layouts
 from app.bundled_fonts import faces, powerpoint_face
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
+from app.render_geometry import image_placement
 from app.rendering import TEXT_LEADING, flattened, segment_ink, table_columns, table_insets, table_rows
 
 
@@ -162,8 +163,8 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 effect = obj._element.find(".//" + qn("a:effectRef"))
                 if effect is not None:
                     effect.set("idx", "0")
-                if el.shape == "round":
-                    obj.adjustments[0] = .12
+                if el.shape == "round" and not el.polygon:
+                    obj.adjustments[0] = .12 if el.radius_pt is None else min(.5, Pt(el.radius_pt) / min(w,h))
             elif isinstance(el, Line):
                 start, end = el.endpoints(w, h)
                 kind = MSO_CONNECTOR.ELBOW if el.route == "elbow" else MSO_CONNECTOR.STRAIGHT
@@ -184,8 +185,10 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 raw_image = io.BytesIO(get_asset(el.asset_id))
                 filled = slot_kind == "picture"
                 obj = slot.insert_picture(raw_image) if filled else shapes.add_picture(raw_image, x, y, w, h)
-                if filled:
-                    obj.crop_top = obj.crop_bottom = obj.crop_left = obj.crop_right = 0
+                (dx, dy, dw, dh), crop = image_placement(el, *obj.image.size, w, h)
+                x, y, w, h = round(x+dx), round(y+dy), round(dw), round(dh)
+                obj.left, obj.top, obj.width, obj.height = x, y, w, h
+                obj.crop_left, obj.crop_top, obj.crop_right, obj.crop_bottom = crop
                 obj._element.nvPicPr.cNvPr.set("descr", el.alt)
             elif isinstance(el, Table):
                 filled = slot_kind == "table"
@@ -237,11 +240,9 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                 obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
                 obj.chart.has_legend = (len(el.series) > 1 and not (el.chart == "stacked_column" and el.show_values)
                                         or el.chart == "pie")
-                if el.palette or el.show_values or el.highlight is not None or el.chart == "stacked_column":
-                    style_native_chart(obj.chart, el)
-                elif el.chart not in {"line", "pie"}:
-                    obj.chart.series[0].format.fill.solid()
-                    obj.chart.series[0].format.fill.fore_color.rgb = color(el.color)
+                if el.needs_key:
+                    obj.chart.has_legend = True
+                style_native_chart(obj.chart, el)
             if filled:
                 placeholders.pop(el.placeholder_idx)
                 obj.left, obj.top, obj.width, obj.height = x, y, w, h
@@ -329,7 +330,25 @@ def style_native_chart(chart, element):
             else:
                 point.format.fill.solid()
                 point.format.fill.fore_color.rgb = shade
-    if element.chart != "pie":
+    if element.chart == "pie":
+        chart.has_title = True
+        title = chart.chart_title.text_frame
+        title.text = element.series[0].name
+        title_font = title.paragraphs[0].font
+        title_font.name, title_font.size = element.font, Pt(14)
+        title_font.color.rgb = color(element.label_color)
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        labels = plot.data_labels
+        labels.show_category_name = True
+        labels.show_value = True
+        labels.number_format = chart_number_format(element, ".##")
+        labels.font.name = element.font
+        labels.font.size = Pt(11)
+        labels.font.color.rgb = color(element.label_color)
+        labels.position = XL_DATA_LABEL_POSITION.OUTSIDE_END
+    else:
+        chart.value_axis.tick_labels.number_format = chart_number_format(element, ".##")
         chart.value_axis.has_major_gridlines = False
         for axis in (chart.category_axis, chart.value_axis):
             axis.tick_labels.font.name = element.font

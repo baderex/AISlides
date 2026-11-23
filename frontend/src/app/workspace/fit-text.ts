@@ -32,7 +32,7 @@ export class FitText {
     if (!overflows()) return;
 
     let high = Number.parseFloat(getComputedStyle(this.host).fontSize);
-    let low = high * 8 / (this.studioFitText().size ?? 12);
+    let low = high * (element.minimum_pt ?? 8) / (element.size ?? 12);
     if (!Number.isFinite(high) || low >= high) return;
     for (let step = 0; step < 8; step++) {
       const trial = (low + high) / 2;

@@ -41,8 +41,10 @@ def image_configured() -> bool:
     return config.image_provider in IMAGE_PROVIDER_DEFAULTS and bool(image_api_key(config))
 
 
-def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str) -> str | None:
-    key = str(uuid5(NAMESPACE_URL, f"framecraft:{job_id}:slide-image:{index}:{prompt}"))
+def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str, placement: str = "square") -> str | None:
+    size = {"landscape": "1536x1024", "portrait": "1024x1536", "square": "1024x1024"}[placement]
+    original_key = uuid5(NAMESPACE_URL, f"framecraft:{job_id}:slide-image:{index}:{prompt}")
+    key = str(original_key if placement == "square" else uuid5(original_key, placement))
     with Session() as db:
         if db.get(Asset, key):
             return key
@@ -57,7 +59,7 @@ def render_image(job_id: str, token: str, index: int, owner_id: str, prompt: str
         "prompt": "Create a presentation illustration without captions, text or logos. " + prompt,
     }
     if config.image_provider == "openai":
-        payload.update(size="1024x1024", quality="medium", n=1)
+        payload.update(size=size, quality="medium", n=1)
     try:
         with provider_call(config.image_cost_usd * 1_000_000):
             response = httpx.post(
