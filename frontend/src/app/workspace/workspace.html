@@ -4,7 +4,7 @@
       <div class="workspace-title">
         <a class="brand-mark" routerLink="/" aria-label="Back to studio"><lucide-icon [img]="i.Layers3" [size]="21" /></a>
         <span class="title-divider"></span>
-        <div><h1>{{ presentation.title }}</h1><div class="workspace-status"><span [class.ready]="presentation.status === 'COMPLETED'" [class.failed]="presentation.status === 'FAILED'"></span>{{ statusLabel() }} @if (editor.dirty()) { · Unsaved changes }</div></div>
+        <div><h1>{{ presentation.title }}</h1><div class="workspace-status"><span [class.ready]="presentation.status === 'COMPLETED'" [class.failed]="presentation.status === 'FAILED'"></span><span>{{ statusLabel() }}</span> @if (canEdit()) { · <span role="status">{{ saving() ? 'Saving…' : saveFailed() ? 'Save failed' : editor.dirty() ? 'Unsaved changes' : 'Saved' }}</span> }</div></div>
       </div>
       <div class="workspace-actions">
         <button type="button" class="button" [disabled]="!editor.current()" (click)="presenting.set(true)"><lucide-icon [img]="i.MonitorPlay" [size]="16" /><span>Present</span></button>
@@ -204,7 +204,7 @@
       <button type="button" [disabled]="exporting()" (click)="reviewPowerPoint()"><lucide-icon [img]="i.MonitorPlay" [size]="23" /><span><strong>Review PowerPoint export</strong><small>Preview the exported slides and check for layout issues</small></span></button>
       <button type="button" [disabled]="exporting()" (click)="export('pdf')"><lucide-icon [img]="i.FileText" [size]="23" /><span><strong>PDF</strong><small>Share a fixed-layout copy (.pdf)</small></span><lucide-icon [img]="i.Download" [size]="17" /></button>
     </div>
-    @if (exporting()) { <p class="quiet" role="status">Preparing your export…</p> }
+    @if (exporting()) { <p class="quiet" role="status">{{ exportStatus() }}</p> }
     @if (error()) { <p class="error" role="alert">{{ error() }}</p> }
   </studio-dialog>
 }

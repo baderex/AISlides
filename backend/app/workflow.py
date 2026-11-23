@@ -6,8 +6,9 @@ import re
 from datetime import date
 
 from PIL import Image as PILImage
-from sqlalchemy import select, update
 
+from app.generation import run_checkpoint
+from app.job_state import start_status
 from app.branding import layout_for_slide, scan_saved_artwork
 from app.composition import (
     EXHIBIT_LAYOUTS, IMAGE_LAYOUTS, EvidenceSummary, Intent, Outline, OutlineItem, ResearchBrief, ResearchQueries, Review,
@@ -15,20 +16,17 @@ from app.composition import (
 )
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
-from app.db import Job, PresentationRecord, Session, now
 from app.design import ArtDirection, DIRECTOR_PROMPT, apply_brand_kit, enforce_constraints, explicit_constraints, font_family, reference_sheet
-from app.domain import Skill, Slide, Source, Theme, read_document
+from app.domain import Slide, Source, Theme, read_document
 from app.evidence import EVIDENCE_GUIDANCE, EvidenceObservation, resolve_headline, verified_observations
 from app.export_review import ReviewBusy, ReviewUnavailable, renderer
 from app.imagery import image_configured, render_image, source_web_image
 from app import html_layout
 from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, page_schema
 from app.master_artwork import master_artwork
-from app.presentations import asset_sources, assets_for, begin_write, emit, persist, referenced_images, skill_for
-from app.previews import put_preview
-from app.providers import Intelligence, ProviderError
+from app.presentations import asset_sources, referenced_images
+from app.providers import ProviderError
 from app.questions import Choice, Clarification, Option, standard_options
-from app.queue import notify
 from app.rendering import flattened
 from app.research import collect
 from app.slide_design import LAYOUT_RUBRIC, LayoutReview, build_slide, review_layouts
@@ -389,82 +387,7 @@ def prepare_html_image(job_id, token, index, part, item, context, ai, web_resear
 
 
 def advance(job_id: str, token: str):
-    with Session() as db:
-        job = db.get(Job, job_id)
-        if not job or job.lease != token or job.cancelled:
-            return
-        item = db.get(PresentationRecord, job.presentation_id)
-        if not item:
-            return
-        context, stage = dict(job.context), job.checkpoint
-        assets = assets_for(db, item.owner_id, item.request["asset_ids"])
-        record = skill_for(db, item.owner_id, item.request.get("skill_id"), include_deleted=True)
-        skill = Skill.model_validate(record.manifest) if record else None
-        db.expunge_all()
-    ai = None
-    try:
-        ai = Intelligence(usage=context.get("usage"))
-        step = process(job_id, token, item, stage, context, assets, skill, ai)
-        if step is None:
-            return
-        next_stage, state, status, events, document, version_label = step
-        context["usage"] = ai.usage
-        pending_preview = context.pop("_preview_bytes", None)
-        commit(job_id, token, next_stage, state, status, context, events, document, version_label, png=pending_preview)
-    except Exception as error:
-        if ai:
-            context["usage"] = ai.usage
-        log.exception("workflow failed job=%s checkpoint=%s", job_id, stage)
-        message = str(error) if isinstance(error, ProviderError) else "Generation failed while processing the current stage. Retry from the saved checkpoint."
-        commit(job_id, token, stage, "failed", "FAILED", context,
-               [("generation.failed", message, {})], error=message)
-
-
-def start_status(job_id, token, status, event_type, message, **payload):
-    with Session.begin() as db:
-        begin_write(db)
-        item = lock_presentation(db, job_id)
-        if not item:
-            return False
-        guarded = db.execute(update(Job).where(Job.id == job_id, Job.lease == token, Job.cancelled.is_(False))
-                             .values(updated=now()).returning(Job.presentation_id)).scalar_one_or_none()
-        if not guarded:
-            return False
-        item.status = status
-        item.updated = now()
-        emit(db, item, event_type, message, db.get(Job, job_id), **payload)
-        return True
-
-
-def commit(job_id, token, checkpoint, state, status, context, events, document=None, version_label=None, error=None, png=None):
-    with Session.begin() as db:
-        begin_write(db)
-        item = lock_presentation(db, job_id)
-        if not item:
-            return
-        guarded = db.execute(update(Job).where(Job.id == job_id, Job.lease == token, Job.cancelled.is_(False))
-                             .values(checkpoint=checkpoint, state=state, context=context, lease=None, lease_owner=None, lease_until=0,
-                                     error=error, updated=now()).returning(Job.presentation_id)).scalar_one_or_none()
-        if not guarded:
-            return
-        job = db.get(Job, job_id)
-        item.status, item.updated = status, now()
-        if document:
-            if png:
-                put_preview(db, item.id, document, document.slides[-1], png)
-            persist(db, item, document, version_label)
-        elif version_label:
-            persist(db, item, read_document(item.document), version_label)
-        for event_type, message, payload in events:
-            emit(db, item, event_type, message, job, **payload)
-    if state == "queued":
-        notify(job_id)
-
-
-def lock_presentation(db, job_id):
-    return db.scalar(select(PresentationRecord).where(
-        PresentationRecord.id == select(Job.presentation_id).where(Job.id == job_id).scalar_subquery()
-    ).with_for_update())
+    run_checkpoint(job_id, token, process)
 
 
 def finish_slide(document, context, events, slide, png, index):

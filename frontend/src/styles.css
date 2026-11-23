@@ -216,7 +216,7 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
 .workspace-title h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 780; }
 .title-divider, .tool-divider { width: 1px; flex: 0 0 1px; height: 25px; background: var(--line); }
 .workspace-status { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-top: 4px; color: var(--muted); }
-.workspace-status > span { width: 6px; height: 6px; border-radius: 50%; background: #8874ec; }
+.workspace-status > span:first-child { width: 6px; height: 6px; border-radius: 50%; background: #8874ec; }
 .workspace-status > .ready { background: #278a75; }
 .workspace-status > .failed { background: #bd4057; }
 .workspace-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 7px; }

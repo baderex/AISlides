@@ -101,6 +101,26 @@ def test_each_visual_lays_out_and_exports_editable_objects(kind):
     assert part.title in " ".join(pdf_text.split())
 
 
+@mark.parametrize("use_series", [False, True])
+def test_single_slope_binds_and_renders_both_periods(use_series):
+    periods = ["2023", "2025"]
+    amounts = [11967.39, 10490.69]
+    quotes = [f"TASI {year}: {amount} points" for year, amount in zip(periods, amounts)]
+    source = Source(id="exchange", title="Year-end closes", excerpt=". ".join(quotes))
+    labels = {"series": periods} if use_series else {"start_label": periods[0], "end_label": periods[1]}
+    content = SlideContent(title="TASI closing levels", source_ids=[source.id], visual={
+        "type": "slope", "unit": "points", "rows": rows([("TASI", amounts)]), **labels,
+    }, exhibit_observations=[
+        {"source_id": source.id, "metric": "TASI", "period": period, "amount": amount, "unit": "points", "quote": quote}
+        for period, amount, quote in zip(periods, amounts, quotes)
+    ])
+    deck = Document(title=content.title, sources=[source])
+    slide = build_slide(OutlineItem(title=content.title, layout="chart"), content, deck, 0, set())
+    assert [b["status"] for b in slide.spec.value_bindings] == ["verified", "verified"]
+    assert sum(el.element_key == "slope:TASI:connector" for el in slide.elements) == 1
+    assert set(periods) <= {el.text for el in slide.elements if isinstance(el, Text)}
+
+
 def test_two_scenario_plan_preserves_annotations_and_editable_flow():
     part = OutlineItem.model_validate({
         "slideIntent": "explain-process",

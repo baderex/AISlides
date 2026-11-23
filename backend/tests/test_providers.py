@@ -246,6 +246,31 @@ def test_planned_exhibit_is_required_and_repaired(monkeypatch):
     assert "populate the decision object for this slide" in prompts[1]
 
 
+def test_single_index_slope_repairs_endpoints_and_ignores_a_redundant_highlight(monkeypatch):
+    client = openrouter(monkeypatch)
+    calls = []
+    visual = {"type": "slope", "series": ["2023", "2025"], "highlight": "2025",
+              "rows": [{"label": "TASI", "values": [11967.39, 10490.69]}]}
+
+    def request(model, system, content, image, contract, **kwargs):
+        calls.append(system)
+        definitions = kwargs["response_schema"]["$defs"]
+        props = definitions["SlopeVisual"]["properties"]
+        assert props["rows"]["minItems"] == 1
+        values = definitions["SlopeRow"]["properties"]["values"]
+        assert values["minItems"] == values["maxItems"] == 2
+        answer = visual if len(calls) > 1 else {**visual, "rows": [{"label": "TASI", "values": [11967.39]}]}
+        return ModelReply(json.dumps({"title": "TASI closing levels", "visual": answer}), 90, 30)
+
+    monkeypatch.setattr(client, "_request", request)
+    result = client.structured(SlideContent, "Compare the two closes.", {
+        "item": {"layout": "chart"}, "required_exhibit": "visual", "visual_choice": {"type": "slope"}}, "slide")
+    assert len(calls) == 2
+    assert "visual.slope.rows.0.values: use at least 2 items" in calls[1]
+    assert result.visual.highlight is None
+    assert result.visual.rows[0].values == visual["rows"][0]["values"]
+
+
 def test_maturity_heatmap_schema_separates_scores_from_categories(monkeypatch):
     client = openrouter(monkeypatch)
     calls = []

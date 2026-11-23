@@ -40,3 +40,17 @@ def database():
         db.add(User(id=LOCAL_USER, email="local@framecraft.test"))
         seed(db)
     yield
+
+
+@pytest.fixture(autouse=True)
+def artifact_worker(monkeypatch):
+    # Exercise the same claim and completion paths without starting a service per API test.
+    from app.artifacts import claim_artifact, execute
+
+    def dispatch(_):
+        with Session() as db:
+            ticket = claim_artifact(db, "test-worker")
+        if ticket:
+            execute(*ticket)
+
+    monkeypatch.setattr("app.artifacts.notify", dispatch)

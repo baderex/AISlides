@@ -1,5 +1,5 @@
 import { DatePipe } from '@angular/common';
-import { Component, HostListener, OnDestroy, computed, inject, signal, viewChild, ElementRef } from '@angular/core';
+import { Component, HostListener, OnDestroy, computed, effect, inject, signal, viewChild, ElementRef } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Api, errorMessage } from '../api';
@@ -67,6 +67,11 @@ export class Workspace implements OnDestroy {
   readonly displayedSlide = computed(() => this.preview()?.document.slides.find(slide => slide.id === this.editor.current()?.id) ?? this.editor.current());
   readonly canvasArea = viewChild<ElementRef<HTMLElement>>('canvasArea');
   readonly agentScroll = viewChild<ElementRef<HTMLElement>>('agentScroll');
+  private exhibitEditor = viewChild(ExhibitEditor);
+  readonly exportStatus = signal('Preparing your export…');
+  readonly saving = signal(false);
+  readonly saveFailed = signal(false);
+  private saveInFlight?: Promise<void>;
   private stream: EventSource | null = null;
   private id = '';
   private sequence = 0;
@@ -79,12 +84,42 @@ export class Workspace implements OnDestroy {
   textDraft = '';
   private routeSubscription = this.route.paramMap.subscribe(params => { const id = params.get('id'); if (id) void this.open(id); });
 
+  constructor() {
+    effect(onCleanup => {
+      const document = this.editor.document();
+      if (!document || !this.editor.dirty() || !this.canEdit()) return;
+      const timer = setTimeout(() => {
+        void this.persist('Autosave').catch(error => this.error.set(errorMessage(error)));
+      }, 1500);
+      onCleanup(() => clearTimeout(timer));
+    });
+  }
+
+  private hasDraft() {
+    if (this.editor.dirty() || this.exhibitEditor()?.hasDraft()) return true;
+    const text = this.editor.current()?.elements.find(el => el.id === this.textId);
+    return this.modal() === 'text' && text?.type === 'text' && text.text !== this.textDraft;
+  }
+
+  canLeave() {
+    return !this.hasDraft() || window.confirm('Leave this presentation and discard unsaved changes?');
+  }
+
+  @HostListener('window:beforeunload', ['$event'])
+  beforeUnload(event: BeforeUnloadEvent) {
+    if (this.hasDraft()) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  }
+
   artwork(slide: Slide) {
     const item = this.item();
     return item?.request.skill_id ? this.api.artwork(item.id, slide) : null;
   }
 
   ngOnDestroy() {
+    this.id = '';
     this.routeSubscription.unsubscribe();
     this.stream?.close();
     clearTimeout(this.refreshTimer);
@@ -117,7 +152,7 @@ export class Workspace implements OnDestroy {
       if (this.stream !== stream) return;
       const event = JSON.parse(message.data) as StudioEvent;
       if (event.id <= (this.events().at(-1)?.id ?? 0)) return;
-      this.events.update(items => [...items, event]);
+      this.events.update(items => [...items.slice(-499), event]);
       if (['generation', 'question', 'slide', 'agent'].some(prefix => event.type.startsWith(prefix))) this.scheduleRefresh();
       this.scrollAgent(false);
     };
@@ -191,15 +226,26 @@ export class Workspace implements OnDestroy {
     });
   }
 
-  private async persist() {
-    if (!this.editor.dirty()) return;
+  private async persist(label = 'Manual edit'): Promise<void> {
+    const id = this.id;
+    while (this.saveInFlight) await this.saveInFlight;
     const current = this.item(), document = this.editor.document();
-    if (!current || !document) return;
-    const saved = await this.api.save(this.id, current.revision, document, 'Manual edit');
-    this.sequence++;
-    this.item.set(saved);
-    // Keep edits made while the save was in flight.
-    if (this.editor.document() === document) this.editor.accept(saved.document);
+    if (id !== this.id || !this.editor.dirty() || !current || !document) return;
+    this.saveFailed.set(false);
+    this.saving.set(true);
+    this.saveInFlight = this.api.save(id, current.revision, document, label).then(saved => {
+      if (id !== this.id) return;
+      this.sequence++;
+      this.item.set(saved);
+      if (this.editor.document() === document) this.editor.accept(saved.document);
+    }).catch(error => {
+      if (id === this.id) this.saveFailed.set(true);
+      throw error;
+    }).finally(() => {
+      this.saveInFlight = undefined;
+      this.saving.set(false);
+    });
+    await this.saveInFlight;
   }
 
   async versionsOpen() {
@@ -230,7 +276,7 @@ export class Workspace implements OnDestroy {
   }
 
   async remove() {
-    await this.action(async () => { await this.api.remove(this.id); this.modal.set(null); await this.router.navigate(['/']); });
+    await this.action(async () => { await this.api.remove(this.id); this.editor.dirty.set(false); this.modal.set(null); await this.router.navigate(['/']); });
   }
 
   async saveSkill() {
@@ -267,12 +313,15 @@ export class Workspace implements OnDestroy {
     this.exporting.set(true);
     await this.action(async () => {
       await this.persist();
-      const response = await this.api.export(this.id, format);
+      const response = await this.api.export(this.id, format, state => this.exportStatus.set(
+        state === 'queued' ? 'Waiting for an export worker…' : 'Rendering your export…'));
       if (!response.body) throw new Error('The export was empty.');
       const link = document.createElement('a');
       const url = URL.createObjectURL(response.body);
       link.href = url;
-      link.download = response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? ('presentation.' + format);
+      const disposition = response.headers.get('Content-Disposition') ?? '';
+      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      link.download = encoded ? decodeURIComponent(encoded) : disposition.match(/filename="([^"]+)"/)?.[1] ?? ('presentation.' + format);
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
       this.modal.set(null);
@@ -285,6 +334,7 @@ export class Workspace implements OnDestroy {
     if (this.exporting() || this.busy()) return;
     const id = this.id;
     this.exportReview.set(null);
+    this.exportStatus.set('Reviewing the rendered PowerPoint…');
     this.exporting.set(true);
     await this.action(async () => {
       await this.persist();

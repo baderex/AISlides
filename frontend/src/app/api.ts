@@ -19,7 +19,11 @@ export class Api {
     return firstValueFrom(this.http.post<{email: string}>(this.root + '/auth/' + action, { email, password }));
   }
   logout() { return firstValueFrom(this.http.post(this.root + '/auth/logout', {})); }
-  list() { return firstValueFrom(this.http.get<PresentationSummary[]>(this.root + '/presentations')); }
+  async list(q = '', cursor = '') {
+    const response = await firstValueFrom(this.http.get<PresentationSummary[]>(this.root + '/presentations',
+      {params: {q, cursor, limit: 24}, observe: 'response'}));
+    return {items: response.body ?? [], next: response.headers.get('X-Next-Cursor')};
+  }
   create(request: CreatePresentation) { return firstValueFrom(this.http.post<Presentation>(this.root + '/presentations', request)); }
   deck(id: string) { return firstValueFrom(this.http.get<Presentation>(this.url(id))); }
   capabilities() { return firstValueFrom(this.http.get<GenerationCapabilities>(this.root + '/capabilities')); }
@@ -59,8 +63,18 @@ export class Api {
   apply(id: string, preview: EditPreview) {
     return firstValueFrom(this.http.post<Presentation>(this.url(id, '/chat/apply'), { revision: preview.revision, proposal: preview.proposal }));
   }
-  export(id: string, format: 'pdf' | 'pptx') {
-    return firstValueFrom(this.http.post(this.url(id, '/export?format=' + format), {}, { responseType: 'blob', observe: 'response' }));
+  async export(id: string, format: 'pdf' | 'pptx', progress: (state: string) => void) {
+    const job = await firstValueFrom(this.http.post<{status_url: string}>(this.url(id, '/export'),
+      {}, {params: {format, background: true}}));
+    while (true) {
+      const status = await firstValueFrom(this.http.get<{state: string; result?: {download?: string; detail?: string}}>(job.status_url));
+      if (status.state === 'complete' && status.result?.download) {
+        return firstValueFrom(this.http.get(status.result.download, {responseType: 'blob', observe: 'response'}));
+      }
+      if (status.state === 'failed') throw new Error(status.result?.detail ?? 'Export failed.');
+      progress(status.state);
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
   }
   reviewExport(id: string, revision: number) {
     return firstValueFrom(this.http.post<ExportReview>(this.url(id, '/export/review'), {}, { params: { expected: revision } }));

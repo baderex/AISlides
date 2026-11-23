@@ -43,6 +43,12 @@ EVIDENCE_LABELS = {UNVERIFIED, ILLUSTRATIVE, VERIFIED, DERIVED}
 
 def values_for(v):
     if isinstance(v, QuantitativeVisual):
+        if v.type == "slope":
+            periods = v.series or [v.start_label, v.end_label]
+            for i, row in enumerate(v.rows):
+                for j, amount in enumerate(row.values):
+                    yield ExhibitValue(f"rows/{i}/values/{j}", row.label, periods[j], amount, v.unit)
+            return
         if v.baseline is not None and v.type in {"waterfall", "tornado"}:
             yield ExhibitValue("baseline", v.metric, v.start_label if v.type == "waterfall" else "Baseline",
                                v.baseline, v.unit)

@@ -14,6 +14,7 @@ from pypdf import PdfReader
 from app.config import settings
 from app.lucide import bundled_icon, icon_png
 
+OBJECT_PREFIX = "framecraft-objects/"
 PILImage.MAX_IMAGE_PIXELS = 24_000_000
 
 
@@ -23,7 +24,7 @@ class Storage:
         self.root = self.settings.local_storage_path
         self.s3 = None
         if self.settings.storage_backend == "local":
-            self.root.mkdir(parents=True, exist_ok=True)
+            (self.root / OBJECT_PREFIX).mkdir(parents=True, exist_ok=True)
         else:
             import boto3
             self.s3 = boto3.client("s3", endpoint_url=self.settings.s3_endpoint)
@@ -32,32 +33,59 @@ class Storage:
         return str(UUID(key))
 
     def put(self, key: str, raw: bytes, media_type: str):
-        key = self._key(key)
+        key = OBJECT_PREFIX + self._key(key)
         if self.s3:
             self.s3.put_object(Bucket=self.settings.s3_bucket, Key=key, Body=raw, ContentType=media_type)
         else:
             temporary = self.root / (key + ".tmp")
-            temporary.write_bytes(raw)
-            temporary.replace(self.root / key)
+            try:
+                temporary.write_bytes(raw)
+                temporary.replace(self.root / key)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def get(self, key: str) -> bytes:
         if icon := bundled_icon(key):
             return icon_png(*icon)
         key = self._key(key)
-        if self.s3:
+        for path in (OBJECT_PREFIX + key, key):
+            if self.s3:
+                try:
+                    with self.s3.get_object(Bucket=self.settings.s3_bucket, Key=path)["Body"] as body:
+                        return body.read()
+                except self.s3.exceptions.NoSuchKey:
+                    continue
             try:
-                with self.s3.get_object(Bucket=self.settings.s3_bucket, Key=key)["Body"] as body:
-                    return body.read()
-            except self.s3.exceptions.NoSuchKey as error:
-                raise FileNotFoundError(key) from error
-        return (self.root / key).read_bytes()
+                return (self.root / path).read_bytes()
+            except FileNotFoundError:
+                continue
+        raise FileNotFoundError(key)
 
     def delete(self, key: str):
         key = self._key(key)
+        for path in (OBJECT_PREFIX + key, key):
+            if self.s3:
+                self.s3.delete_object(Bucket=self.settings.s3_bucket, Key=path)
+            else:
+                (self.root / path).unlink(missing_ok=True)
+
+    def old_objects(self, cutoff):
+        """Enumerate UUID objects in the studio storage namespace older than the grace period."""
         if self.s3:
-            self.s3.delete_object(Bucket=self.settings.s3_bucket, Key=key)
+            pages = self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.settings.s3_bucket, Prefix=OBJECT_PREFIX)
+            entries = ((item["Key"][len(OBJECT_PREFIX):], item["LastModified"].timestamp()) for page in pages for item in page.get("Contents", ()))
         else:
-            (self.root / key).unlink(missing_ok=True)
+            entries = ((entry.name, entry.stat().st_mtime) for entry in (self.root / OBJECT_PREFIX).iterdir() if entry.is_file())
+        for key, modified in entries:
+            if modified >= cutoff:
+                continue
+            try:
+                if not self.s3 and key.endswith(".tmp") and self._key(key[:-4]) == key[:-4]:
+                    (self.root / OBJECT_PREFIX / key).unlink(missing_ok=True)
+                elif self._key(key) == key:
+                    yield key
+            except ValueError:
+                continue
 
     def check(self):
         if self.s3:
@@ -65,6 +93,17 @@ class Storage:
         else:
             if not os.access(self.root, os.R_OK | os.W_OK):
                 raise OSError("Storage is not readable and writable")
+
+
+def decode_upload(name, raw, declared):
+    try:
+        media_type, raw, extracted = parse_upload(name, raw)
+    except (ValueError, OSError, subprocess.SubprocessError, BadZipFile) as error:
+        raise ValueError("The file is invalid or uses an unsupported format.") from error
+    if declared not in {"", "application/octet-stream", media_type, "text/markdown", "text/csv"}:
+        if not (media_type == "image/png" and declared in {"image/jpeg", "image/webp"}):
+            raise ValueError("The declared media type does not match the file.")
+    return media_type, raw, extracted
 
 
 def parse_upload(name: str, raw: bytes) -> tuple[str, bytes, str]:
