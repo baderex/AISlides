@@ -17,6 +17,7 @@ from app.composition import Intent, Outline, ResearchBrief, ResearchQueries, Sli
 from app.config import Settings, settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
 from app.domain import Source
+from app.html_layout.markup import HtmlPlan, PageMarkup
 from app.main import app
 from app.providers import Intelligence
 from app.questions import Clarification
@@ -287,7 +288,10 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     Image.new("RGB", (20, 20), "blue").save(image, image_format)
     encoded = base64.b64encode(image.getvalue()).decode()
 
+    image_requests = []
+
     def request(url, **kwargs):
+        image_requests.append(url)
         assert url == expected_url
         assert kwargs["headers"] == {"Authorization": f"Bearer {expected_key}"}
         payload = {
@@ -304,12 +308,16 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
         fixtures = {
             "Intent": {"subject": "Example", "slide_count": 1},
             "Clarification": {"questions": []},
-            "Outline": {"title": "Example", "slides": [{"title": "Example", "layout": "editorial"}]},
-            "SlideContent": {"title": "Example", "image_prompt": "An abstract blue shape"},
+            "HtmlPlan": {"title":"Example", "background":"#FFFFFF", "accent":"#234567", "ink":"#111111",
+                         "muted":"#334455", "surface":"#EEEEEE", "display":"Georgia", "slides":[{
+                             "title":"Example", "layout":"editorial", "direction":"Place the illustration",
+                             "image_prompt":"An abstract blue shape Deck imagery direction: Restrained editorial imagery coordinated with the deck palette."}]},
         }
-        if schema.__name__ == "ArtDirection":
-            from app.demo import demo_response
-            return schema.model_validate(demo_response("ArtDirection", data))
+        if schema is PageMarkup:
+            asset = data["required_picture"]
+            assert asset in data["available_pictures"]
+            markup = f'<page><picture asset="{asset}" alt="Blue shape"/></page>' if "correction" in data else "<page><text>Missing image</text></page>"
+            return schema(markup=markup)
         return schema.model_validate(fixtures[schema.__name__])
 
     monkeypatch.setattr(httpx, "post", request)
@@ -320,6 +328,7 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
+    assert image_requests == [expected_url]
     assert any(el["type"] == "image" for el in result["document"]["slides"][0]["elements"])
     response = client.post(path + "/export?format=pptx")
     assert response.status_code == 200
@@ -327,10 +336,11 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
     assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in deck.slides[0].shapes)
 
 
-@pytest.mark.parametrize(("direction", "requested"), [
-    ("Professional", True), ("Strategy consulting", True), ("Professional", False),
+@pytest.mark.parametrize(("direction", "requested", "html"), [
+    ("Professional", True, False), ("Strategy consulting", True, False), ("Professional", False, False),
+    ("Professional", True, True), ("Professional", False, True),
 ])
-def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, direction, requested):
+def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, direction, requested, html):
     client = TestClient(app)
     configuration = settings()
     monkeypatch.setattr(configuration, "research_api_key", "test-search-token")
@@ -362,12 +372,24 @@ def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, 
     monkeypatch.setattr("app.workflow.collect", lambda query: [])
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: http_client(transport=httpx.MockTransport(respond), **kwargs))
     structured = Intelligence.structured
+    if html:
+        monkeypatch.setattr("app.providers.provider_for", lambda config: "compatible")
+        monkeypatch.setattr("app.providers.provider_configured", lambda config, provider: True)
 
     def plan(self, schema, task, data, stage="planning", image=None):
         if schema is Intent:
             return Intent(subject="Example", slide_count=1, visual_direction=direction, web_images_requested=requested)
         if schema is Clarification:
             return Clarification()
+        if schema is HtmlPlan:
+            assert data["web_images"] == requested
+            return schema(title="Example", background="#FFFFFF", accent="#234567", ink="#111111", muted="#334455",
+                          surface="#EEEEEE", display="Georgia", slides=[dict(title="Example", layout="editorial",
+                          direction="Introduce the subject", image_query="Example official portrait")])
+        if schema is PageMarkup:
+            asset = data["required_picture"]
+            return schema(markup=f'<page><picture asset="{asset}" alt="Portrait"/></page>' if asset else
+                          "<page><text>Example</text></page>")
         if schema is Outline:
             assert ("Web image search is enabled" in task) == requested
             return Outline.model_validate({"title": "Example", "slides": [

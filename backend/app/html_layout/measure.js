@@ -14,6 +14,8 @@ namespace => {
     const type = el.dataset.node;
     const common = {type, id: namespace + "-" + el.id, z, x:(r.x-page.x)/page.width,
       y:(r.y-page.y)/page.height, w:r.width/page.width, h:r.height/page.height};
+    if (type === "exhibit") return {...common,background:el.closest("[data-surface]")?.dataset.surface ||
+      hex(getComputedStyle(slide).backgroundColor)};
     if (type === "shape") return {...common, shape:el.dataset.shape || "rect",
       fill:hex(style.backgroundColor), polygon:JSON.parse(el.dataset.points || "null")};
     if (type === "image") return {...common, asset_id:el.dataset.asset, alt:el.alt};

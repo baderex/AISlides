@@ -281,6 +281,11 @@ def recompose_slide(slide, document, index, *, keep_recipe, replacement_content=
     spec = slide.spec
     if not spec or (slide.brand_layout_index is not None and brand is None):
         return None
+    if spec.html_region:
+        if replacement_content is None:
+            return None  # Restyling uses the existing element-level CSS layout.
+        from app.html_layout.exhibits import rebuild_region
+        return rebuild_region(document, slide, replacement_content, selected_recipe or spec.recipe)
     try:
         part = OutlineItem.model_validate(spec.plan)
         content = replacement_content or SlideContent.model_validate(spec.content)
@@ -316,21 +321,7 @@ def recompose_slide(slide, document, index, *, keep_recipe, replacement_content=
             previous = old.get(element.id)
             baseline = spec.generated_elements.get(element.id)
             if previous and previous.edited and baseline is not None:
-                changes = {field: value for field, value in generated_state(previous).items()
-                           if value != baseline.get(field) and (not layout_changed or field not in GEOMETRY_FIELDS)}
-                if replacement_content:
-                    new = generated_state(element)
-                    changes = {field: value for field, value in changes.items()
-                               if field not in {"text", "spans", "rows"} or new.get(field) == baseline.get(field)}
-                if changes:
-                    candidate = {**element.model_dump(mode="json"), **changes, "edited": True}
-                    try:
-                        element = type(element).model_validate(candidate)
-                    except ValidationError:
-                        candidate = {**element.model_dump(mode="json"),
-                                     **{key: value for key, value in changes.items() if key not in GEOMETRY_FIELDS},
-                                     "edited": True}
-                        element = type(element).model_validate(candidate)
+                element = preserve_edits(element, previous, baseline, layout_changed, replacement_content is not None)
             new_elements.append(element)
         new_elements.extend(element.model_copy(deep=True) for element in slide.elements
                             if element.id not in generated and element.element_key != STATUS_KEY)
@@ -358,3 +349,38 @@ def recompose_slide(slide, document, index, *, keep_recipe, replacement_content=
         return result
     except ValidationError:
         return None
+
+
+def preserve_edits(element, previous, baseline, layout_changed, data_changed, *, measured_exhibit=False):
+    changes = {field: value for field, value in generated_state(previous).items()
+               if value != baseline.get(field) and (not layout_changed or field not in GEOMETRY_FIELDS)}
+    if data_changed:
+        new = generated_state(element)
+        data_fields = {"text", "spans", "rows"}
+        if measured_exhibit:
+            data_fields.update(GEOMETRY_FIELDS - {"z", "rotation"})
+        edited_rows = changes.get("rows")
+        changes = {field: value for field, value in changes.items()
+                   if field not in data_fields or new.get(field) == baseline.get(field)}
+        if measured_exhibit and isinstance(element, Table) and edited_rows and "rows" not in changes:
+            old_rows, new_rows = baseline.get("rows"), new["rows"]
+            if (isinstance(old_rows, list) and len(old_rows) == len(new_rows) == len(edited_rows)
+                    and all(isinstance(old, list) and len(old) == len(row) == len(edited)
+                            for old, row, edited in zip(old_rows, new_rows, edited_rows))):
+                merged = [row[:] for row in new_rows]
+                for i, row in enumerate(new_rows):
+                    for j, value in enumerate(row):
+                        if (row[0] == old_rows[i][0] and new_rows[0][j] == old_rows[0][j]
+                                and value == old_rows[i][j]):
+                            merged[i][j] = edited_rows[i][j]
+                if merged != new_rows:
+                    changes["rows"] = merged
+    if not changes:
+        return element
+    candidate = {**element.model_dump(mode="json"), **changes, "edited": True}
+    try:
+        return type(element).model_validate(candidate)
+    except ValidationError:
+        candidate = {**element.model_dump(mode="json"),
+                     **{key: value for key, value in changes.items() if key not in GEOMETRY_FIELDS}, "edited": True}
+        return type(element).model_validate(candidate)

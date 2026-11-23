@@ -10,7 +10,7 @@ from pydantic import Field, ValidationError
 
 from app.domain import Chart, Contract, Identifier, Text
 from app.evidence import CURRENCY_HINTS, NUMBER, NUMERIC_CLAIM, UNIT_HINTS, contains, key, value, verified_observations
-from app.visuals import GraphVisual, MatrixVisual, QuantitativeVisual, ScatterVisual, ScheduleVisual
+from app.visuals import GraphVisual, MatrixVisual, QuantitativeVisual, ScatterVisual, ScheduleVisual, weighted_average
 
 
 class ValueBinding(Contract):
@@ -165,7 +165,7 @@ def exhibit_bindings(content, sources, source_ids, chart=None, planned_annotatio
                 result = sum(amounts[:1]) / sum(amounts[1:])
             case "weighted-average":
                 scores, weights = amounts[::2], amounts[1::2]
-                result = sum(score * weight for score, weight in zip(scores, weights)) / sum(weights)
+                result = weighted_average(scores, weights)
             case "min":
                 result = min(amounts)
             case "max":

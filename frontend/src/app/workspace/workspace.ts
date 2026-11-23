@@ -58,7 +58,7 @@ export class Workspace implements OnDestroy {
   readonly exhibit = computed(() => {
     const spec = this.editor.current()?.spec;
     const visual = spec?.content.visual;
-    return visual && (visual.rows || visual.points || visual.nodes || visual.items) ? spec : null;
+    return visual ? spec : null;
   });
   readonly displayedSlide = computed(() => this.preview()?.document.slides.find(slide => slide.id === this.editor.current()?.id) ?? this.editor.current());
   readonly canvasArea = viewChild<ElementRef<HTMLElement>>('canvasArea');

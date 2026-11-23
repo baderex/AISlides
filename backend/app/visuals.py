@@ -1,6 +1,7 @@
 """Coordinate-free exhibit contracts shared by planning and slide generation."""
 
 import re
+from decimal import Decimal
 from typing import Annotated, Generic, Literal, TypeVar, get_args
 
 from pydantic import Field, model_validator
@@ -178,6 +179,11 @@ class CategoricalHeatmap(MatrixGrid[Label]):
     type: Literal["heatmap"]
     variant: None = None
     levels: list[Label] = Field(min_length=2, max_length=6, description="Distinct categories from lowest to highest.")
+
+
+def weighted_average(scores, weights):
+    weights = [Decimal(str(w)) for w in weights]
+    return sum(Decimal(str(score)) * w for score, w in zip(scores, weights)) / sum(weights)
 
 
 class MatrixVisual(MatrixGrid[Label | Number]):

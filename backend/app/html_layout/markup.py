@@ -1,16 +1,22 @@
 """Schema and declarative layout language used by the slide designer."""
+from functools import lru_cache
 from typing import Literal
 import xml.etree.ElementTree as ET
 
-from pydantic import Field, ValidationInfo, model_validator
+from pydantic import Field, ValidationInfo, create_model, model_validator
 
-from app.domain import Color, Contract, Identifier, Layout
+from app.domain import Color, Contract, Identifier, Layout, Series, ShortText
+from app.evidence import EvidenceObservation
+from app.visuals import VISUAL_MODELS, VisualType
 
 
 class PagePlan(Contract):
     title: str = Field(min_length=1, max_length=160)
     layout: Layout = "summary"
     direction: str = Field(min_length=1, max_length=1800, description="Specific exhibit, composition and information to communicate")
+    exhibit: VisualType | Literal["workbook-chart"] | None = None
+    image_query: str = Field(default="", max_length=380)
+    image_prompt: str = Field(default="", max_length=400)
 
 
 class HtmlPlan(Contract):
@@ -27,6 +33,8 @@ class HtmlPlan(Contract):
     def requested_count(self, info: ValidationInfo):
         if info.context and len(self.slides) != info.context["slide_count"]:
             raise ValueError(f"Return exactly {info.context['slide_count']} slides")
+        if (info.context or {}).get("requires_chart_workbook") and not any(s.exhibit == "workbook-chart" for s in self.slides):
+            raise ValueError("Assign workbook-chart to a slide presenting the requested editable data series.")
         return self
 
 
@@ -36,17 +44,40 @@ class PageMarkup(Contract):
     markup: str = Field(description="One XML page containing composed visual content", max_length=30000)
 
 
+class WorkbookData(Contract):
+    chart: Literal["bar", "column", "line", "pie", "stacked_column"]
+    categories: list[ShortText] = Field(min_length=1, max_length=16)
+    series: list[Series] = Field(min_length=1, max_length=5)
+    value_prefix: str = Field(default="", max_length=8)
+    value_suffix: str = Field(default="", max_length=8)
+    show_values: bool = False
+
+
+@lru_cache
+def page_schema(exhibit):
+    if not exhibit:
+        return PageMarkup
+    data_type = WorkbookData if exhibit == "workbook-chart" else VISUAL_MODELS[exhibit]
+    return create_model("ExhibitPage", __base__=PageMarkup, exhibit_data=(data_type, ...),
+                        illustrative=(bool, False), observations=(list[EvidenceObservation], Field(default_factory=list, max_length=96)))
+
+
 PLAN = """Art-direct an editable slide deck from the supplied brief. Follow its requested count, aspect,
 audience, wording, data, and slide order. Vary compositions and derive exhibit conclusions and calculations
-from the supplied facts. Use the cover title requested. Image generation is disabled; design original
-editable vector illustrations when required. Choose legible contrasting colors including muted and surface.
+from the supplied facts. Use the cover title requested. Select exhibit for structured figures, scorecards,
+comparisons, schedules or diagrams so their inputs remain editable together. Use decision-matrix for a
+weighted scorecard or weighted choice, heatmap for retention grids, waterfall for bridges, and workbook-chart for ordinary
+bar, column, pie and line charts, especially when an editable chart workbook is requested. Leave exhibit
+null for free layouts. Use image_query only for requested, enabled web photos and image_prompt only
+for enabled generated imagery. Prefer available uploaded images. Choose legible contrasting colors.
 Write each direction as an instruction to a slide designer, including what must be drawn."""
 
 DESIGN = """You are the slide designer. Create ONLY the requested slide as XML in the markup property.
 The XML compiles to HTML with CSS flex layout and browser-measured editable native PowerPoint objects.
 Compose it directly from the brief, plan and slide number. Prefer a shallow flex layout with the main
-exhibit directly under the page or a row with grow="1". Use the supplied matrix, waterfall, Gantt,
-Sankey and sequence components for those exhibits. Draw custom geometry only when needed.
+exhibit directly under the page or a row with grow="1". Put the planned primary exhibit in an exhibit
+frame. Matrix, waterfall, Gantt, Sankey and sequence primitives are also available for supplemental
+visuals and free layouts. Draw custom geometry only when needed.
 Include the headline, exhibit, direct labels, takeaway, and any required source note in the XML.
 On covers preserve the requested title and tagline. Use concise, precise language and avoid filler.
 Do not add slide metadata labels for decoration. All vector illustrations are built from native primitives.
@@ -58,6 +89,10 @@ Containers and drawing panels can use grow=positive relative flex weight on pare
 pixels or percentages, pad, gap, bg (opaque background exported as shape), justify=start|center|end|between,
 align=start|center|end|stretch. Default cross-axis stretch. Allocate grow=1 to the principal exhibit.
 Use <space grow="1"/> or <rule color="accent" h="2"/> sparingly.
+For a planned exhibit, include precisely one <exhibit grow="1"/> where its data visualization belongs.
+Return the matching exhibit_data separately. The renderer derives scores, dimensions and data labels.
+Supply exact observations and cited source_ids for quantitative inputs. Set illustrative only for data
+explicitly identified as illustrative. Leave room below the exhibit for the evidence footer.
 Use <picture asset="uploaded-id" alt="Description" grow="1"/> for a relevant supplied picture.
 Only use IDs in available_pictures. The original image retains its aspect ratio and is editable.
 <text size="32" font="display" color="ink" bold="true" align="left">Text</text>. Size in CSS px, 12–100;
@@ -88,7 +123,7 @@ largest region to the visual. Design within the canvas width in the request and 
 different compositions across slides. Use only factual statements supported by the brief and supplied references. Cite used reference IDs in source_ids. Never imply that an option being evaluated is already in use. Keep the page under 100 editable objects. XML-escape
 angle brackets and ampersands in text. Use slide numbers or section labels only when informative."""
 
-CONTAINER_CHILDREN = "row col drawing text picture matrix waterfall gantt sankey sequence rule space"
+CONTAINER_CHILDREN = "row col drawing text picture exhibit matrix waterfall gantt sankey sequence rule space"
 TAGS = dict(page=CONTAINER_CHILDREN, row=CONTAINER_CHILDREN, col=CONTAINER_CHILDREN,
             drawing="box label arrow poly", matrix="tr", tr="td", waterfall="bar",
             gantt="task", sankey="flow", sequence="message")

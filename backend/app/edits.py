@@ -142,6 +142,8 @@ def apply(document, proposal, *, locked_theme=False):
                     slide.background = rules.cover_background
                 else:
                     slide.background = colors.get(slide.background, slide.background)
+                if slide.spec and (region := slide.spec.html_region) and region.background:
+                    region.background = colors.get(region.background, region.background)
                 for element in inherited_elements(slide.elements):
                     for attr in ("fill", "color", "border", "header_fill", "header_color", "label_color"):
                         value = getattr(element, attr, None)

@@ -108,6 +108,15 @@
           </aside>
           <div class="canvas-area" #canvasArea>
             @if (preview()) { <div class="preview-strip">Previewing proposed edits</div> }
+            @if (displayedSlide()?.warnings; as warnings) {
+              @if (warnings.length === 1) { <p class="slide-warnings" role="status">{{ warnings[0] }}</p> }
+              @if (warnings.length > 1) {
+                <details class="slide-warnings">
+                  <summary>{{ warnings[0] }} (+{{ warnings.length - 1 }})</summary>
+                  @for (warning of warnings.slice(1); track $index) { <p>{{ warning }}</p> }
+                </details>
+              }
+            }
             @if (editor.element(); as element) {
               @if (canEdit() && !preview()) {
                 <div class="element-toolbar" aria-label="Selected element controls">

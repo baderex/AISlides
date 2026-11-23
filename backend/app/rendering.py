@@ -306,10 +306,11 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
         if isinstance(el, Image) and el.asset_id not in assets and not bundled_icon(el.asset_id):
             warnings.append(f"Missing image: {el.alt or el.asset_id}")
         if isinstance(el, Table):
-            for row in range(min(2, len(el.rows))):
-                fill, ink, header = el.row_style(row)
-                if contrast(ink, fill) < 4.5:
-                    warnings.append("Low table header contrast." if header else "Low table cell contrast.")
+            for row, cells in enumerate(el.rows):
+                if any(text.strip() and contrast(*el.cell_style(row, col)) < 4.5 for col, text in enumerate(cells)):
+                    warning = "Low table header contrast." if row == 0 and el.header_fill else "Low table cell contrast."
+                    if warning not in warnings:
+                        warnings.append(warning)
         if isinstance(el, Chart) and el.palette and contrast(el.label_color, slide.background) < 4.5:
             warnings.append("Low chart label contrast.")
         if isinstance(el, Text):

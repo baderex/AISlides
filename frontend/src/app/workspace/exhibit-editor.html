@@ -1,4 +1,4 @@
-<form class="dialog-form" (ngSubmit)="apply.emit({visual, recipe, illustrative})">
+<form class="dialog-form" (ngSubmit)="submit()">
   @if ((spec().available_recipes?.length ?? 0) > 1) {
     <label>Composition
       <select class="field" [(ngModel)]="recipe" [ngModelOptions]="model">
@@ -9,6 +9,12 @@
     </label>
   }
   <div class="values">
+    @if (useStructuredData) {
+      <label>Exhibit data (JSON)
+        <textarea class="field" rows="14" spellcheck="false" [(ngModel)]="structuredData" [ngModelOptions]="model"></textarea>
+      </label>
+      @if (dataError) { <p class="error" role="alert">{{ dataError }}</p> }
+    }
     @if (visual.type === 'waterfall' || visual.type === 'tornado') {
       <label>{{ visual.type === 'waterfall' ? visual.start_label : 'Baseline' }}
         <input class="field" type="number" step="any" [(ngModel)]="visual.baseline" [ngModelOptions]="model" />

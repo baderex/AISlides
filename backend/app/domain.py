@@ -371,6 +371,12 @@ Recipe = Literal[
 ]
 
 
+class ExhibitRegion(ElementBase):
+    """Browser-measured slot and the generated objects that belong to it."""
+    background: Color | None = None
+    member_ids: list[Identifier] = Field(default_factory=list, max_length=100)
+
+
 class SlideSpec(Contract):
     plan: dict[str, JsonValue]
     content: dict[str, JsonValue]
@@ -388,6 +394,7 @@ class SlideSpec(Contract):
     generated_notes: str = Field(default="", max_length=7000)
     value_bindings: list[dict[str, JsonValue]] = Field(default_factory=list, max_length=150)
     available_recipes: list[Recipe] = Field(default_factory=list, max_length=3)
+    html_region: ExhibitRegion | None = None
 
 
 class Slide(Contract):

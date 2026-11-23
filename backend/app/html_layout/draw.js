@@ -1,7 +1,7 @@
 // Trusted browser renderer. Model output only enters the DOM as validated geometry, colors or text.
 payload => {
   "use strict";
-  const {theme, pages, width, pictures = {}} = payload;
+  const {theme, pages, width, pictures = {}, logo} = payload;
   const number = (v, fallback, lo=0, hi=2000) => {
     const n = Number(v ?? fallback);
     if (!Number.isFinite(n) || n < lo || n > hi) throw Error("Invalid dimension/value: " + v);
@@ -13,8 +13,7 @@ payload => {
     if (!/^#[a-f0-9]{6}$/i.test(c)) throw Error("Expected a theme color or #RRGGBB: " + chosen);
     return c;
   };
-  const font = name => name === "mono" ? "Consolas" : name === "display" &&
-    ["Georgia","Aptos","Consolas","Arial"].includes(theme.display) ? theme.display : "Arial";
+  const font = name => name === "display" ? theme.display : name === "mono" && !theme.lockFont ? "Consolas" : theme.font || "Arial";
   const bool = x => x === "true" || x === "1";
   const align = value => ["left","right","center"].includes(value) ? value : "left";
   const flexAlign = value => ({start:"flex-start",end:"flex-end",between:"space-between",center:"center",stretch:"stretch"})[value];
@@ -260,7 +259,8 @@ payload => {
     image.alt = attrs.alt || "";
     image.src = asset.src;
   }
-  const widgets={drawing,matrix,waterfall,gantt,sankey,sequence,picture};
+  const widgets={drawing,matrix,waterfall,gantt,sankey,sequence,picture,
+    exhibit:box=>mark(el("div",box,{position:"absolute",inset:"0"}),"exhibit")};
   // Unlike ordinary text, a drawing has no intrinsic CSS size before it is painted.
   // Let an unsized flex ancestor share available space when its exhibit would collapse.
   function expandCollapsedPanel(panel, slide) {
@@ -284,6 +284,7 @@ payload => {
     if(a.h) style.height=cssLength(a.h);
     if(tag==="page") Object.assign(style,{height:"100%",width:"100%"});
     const box=el("div",parent,style);
+    if (a.bg) box.dataset.surface=color(a.bg);
     if(a.bg && tag!=="page" && tag!=="rule") {
       const bg=mark(el("div",box,{position:"absolute",inset:"0",backgroundColor:color(a.bg)}),"shape");
       bg.dataset.shape="rect";
@@ -291,6 +292,7 @@ payload => {
     if(["page","row","col"].includes(tag)) {
       Object.assign(box.style,{display:"flex",flexDirection:tag==="row"?"row":"column",padding:px(number(a.pad,tag==="page"?36:0)),
         gap:px(number(a.gap,tag==="page"?14:8)),alignItems:flexAlign(a.align)||"stretch",justifyContent:flexAlign(a.justify)||"flex-start"});
+      if (tag==="page" && (payload.hasExhibit || logo)) box.style.paddingBottom=px(Math.max(logo?52:32,parseFloat(box.style.paddingBottom)));
       children.forEach(c=>render(c,box,pending));
     } else if(tag==="text") {
       const copy=mark(el("div",box,{...textStyle(a),position:"relative"}),"text");copy.textContent=t;
@@ -316,6 +318,10 @@ payload => {
       if (box.offsetWidth < 15 || box.offsetHeight < 16) expandCollapsedPanel(box, slide);
     }
     for (const panel of pending) panel.paint();
+    if (logo) {
+      const footer=el("div",slide,pos(width-94,674,62,32));
+      picture(footer,[],{asset:logo,alt:"Brand logo"},62,32);
+    }
     const rect=slide.getBoundingClientRect();
     for(const n of slide.querySelectorAll("[data-node]")) {
       const r=n.getBoundingClientRect();

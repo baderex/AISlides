@@ -358,6 +358,8 @@ input[type=color]:disabled { cursor: default; opacity: .5; }
 .zoom-value { min-width: 38px; }
 .element-toolbar, .preview-strip { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-height: 37px; padding: 3px 8px; border-bottom: 1px solid var(--line); background: #fcfbff; }
 .preview-strip { min-height: 29px; color: #5945c9; font-size: 12px; font-weight: 650; }
+.slide-warnings { margin: 0; padding: 6px 12px; max-height: 7rem; overflow-y: auto; background: #fff6dc; color: #654719; font-size: 13px; }
+.slide-warnings summary { cursor: pointer; }
 .element-toolbar input[type=number], .element-toolbar select { border: 1px solid var(--line); border-radius: 5px; font-size: 12px; min-height: 25px; padding: 1px 4px; }
 .element-toolbar input[type=number] { width: 49px; }
 .element-toolbar .icon-button, .element-toolbar .toolbar-button { min-height: 27px; }

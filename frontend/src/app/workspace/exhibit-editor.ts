@@ -34,12 +34,32 @@ export class ExhibitEditor implements OnInit {
   visual!: ExhibitVisual;
   recipe!: ExhibitRecipe;
   illustrative = false;
+  structuredData = '';
+  dataError = '';
+  useStructuredData = false;
   readonly model = {standalone: true};
 
   ngOnInit() {
     this.visual = structuredClone(this.spec().content.visual!);
     this.recipe = this.spec().recipe;
     this.illustrative = this.spec().content.illustrative_exhibit ?? false;
+    this.useStructuredData = !(this.visual.rows || this.visual.points || this.visual.nodes || this.visual.items);
+    if (this.useStructuredData) this.structuredData = JSON.stringify(this.visual, null, 2);
+  }
+
+  submit() {
+    let visual = this.visual;
+    if (this.useStructuredData) {
+      try {
+        visual = JSON.parse(this.structuredData);
+        if (visual?.type !== this.visual.type) throw new Error();
+      } catch {
+        this.dataError = 'Enter valid JSON and keep the exhibit type.';
+        return;
+      }
+    }
+    this.dataError = '';
+    this.apply.emit({visual, recipe: this.recipe, illustrative: this.illustrative});
   }
 
   labelWithUnit(label?: string, unit?: string | null) {

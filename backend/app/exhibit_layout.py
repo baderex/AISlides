@@ -14,13 +14,13 @@ from app.domain import ConnectorAnchor, Line, Shape, Table, Text, TextSpan, disp
 from app.lucide import ICON_NAMES
 from app.rendering import longest_word_width, physical, slide_icon, text_height
 from app.visuals import (CodeVisual, FlowVisual, GraphVisual, MatrixVisual, QuantitativeVisual,
-                         ScatterVisual, ScheduleVisual, SequenceVisual, SwimlaneVisual, VennVisual)
+                         ScatterVisual, ScheduleVisual, SequenceVisual, SwimlaneVisual, VennVisual, weighted_average)
 
 
 class ExhibitCanvas:
     """Map exhibit-local geometry into the slide body or a template slot."""
 
-    def __init__(self, document, slide, bounds, *, highlight_band=None, recipe="standard"):
+    def __init__(self, document, slide, bounds, *, highlight_band=None, recipe="standard", score_bars=False):
         self.document, self.slide = document, slide
         self.x, self.y, self.w, self.h = bounds
         self.theme = document.theme
@@ -35,6 +35,7 @@ class ExhibitCanvas:
         self.marks = {}
         self.highlight_band = highlight_band
         self.recipe = recipe
+        self.score_bars = score_bars
 
     def box(self, x, y, w, h):
         return dict(x=self.x + x * self.w, y=self.y + y * self.h, w=w * self.w, h=h * self.h)
@@ -307,18 +308,36 @@ def matrix(c, v):
     inks = [[None] * len(headers)]
     low = blend(c.slide.background, c.accent, .10)
     high = blend(c.slide.background, c.accent, .93)
+    scores = []
     for i, row in enumerate(v.rows, 1):
         selected = row.label == v.recommended
         cells = [f"{row.label} ★" if selected else row.label,
                  *[value if isinstance(value, str) else fmt(value) for value in row.cells]]
         if weighted:
-            cells.append(fmt(round(sum(value * weight for value, weight in zip(row.cells, weights)), 3)))
+            score = weighted_average(row.cells, v.weights)
+            scores.append(score)
+            cells.append(fmt(score))
         rows.append(cells)
         colors = [None, *[blend(low, high, fraction(value)) for value in row.cells]] if heat else [None] * len(cells)
         fills.append(colors)
         inks.append([readable(c.ink, fill) if fill else None for fill in colors])
         c.mark(row.label, .98, (i + .5) * (.84 if show_key else .98) / (len(v.rows) + 1))
-    c.slide.elements.append(Table(**c.box(0, 0, 1, .84 if show_key else .98), rows=rows, fill=c.slide.background,
+    if scores and v.recommended:
+        leaders = [row.label for row, score in zip(v.rows, scores) if score == max(scores)]
+        if v.recommended not in leaders:
+            c.slide.warnings.append(f"Review the recommendation for {v.recommended}. "
+                                    f"The highest weighted score is now {fmt(max(scores))} ({', '.join(leaders)}).")
+    if scores and c.score_bars:
+        lower, upper = min(0, *values), max(0, *values)
+        span = upper - lower or 1
+        zero = .805 + .19 * (-lower / span)
+        row_height = .98 / len(rows)
+        for i, score in enumerate(scores):
+            length = .19 * float(score) / span
+            c.shape(min(zero, zero + length), (i + 1.44) * row_height, abs(length), .12 * row_height,
+                    c.accent, element_key=f"{v.type}:score-bar:{v.rows[i].label}")
+    table_width = .79 if weighted and c.score_bars else 1
+    c.slide.elements.append(Table(**c.box(0, 0, table_width, .84 if show_key else .98), rows=rows, fill=c.slide.background,
                                   color=c.ink, size=max(9, min(15, 96 / len(rows))), font=c.theme.font,
                                   header_fill=c.accent, header_color=readable("#FFFFFF", c.accent),
                                   focus_rows=[i for i, row in enumerate(v.rows, 1)
@@ -838,7 +857,8 @@ def exhibit_callouts(visual):
     return []
 
 
-def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned_annotations=(), recipe="standard"):
+def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned_annotations=(), recipe="standard",
+                    score_bars=False):
     visual, details = content.visual, content.decorations
     x, y, w, h = bounds
     annotations = list(annotations) or planned_annotations
@@ -894,7 +914,7 @@ def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned
         frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted, element_key="exhibit:footer")
     width = w * .72 if notes else w
     body = ExhibitCanvas(document, slide, (x, y + h * upper, width, h * (1 - lower - upper)),
-                         highlight_band=details.highlight_band if details else None, recipe=recipe)
+                         highlight_band=details.highlight_band if details else None, recipe=recipe, score_bars=score_bars)
     DRAW[type(visual)](body, visual)
     if notes:
         rail = ExhibitCanvas(document, slide, (x, body.y, w, body.h))

@@ -22,7 +22,7 @@ from app.evidence import EVIDENCE_GUIDANCE, EvidenceObservation, resolve_headlin
 from app.export_review import ReviewBusy, ReviewUnavailable, renderer
 from app.imagery import image_configured, render_image, source_web_image
 from app import html_layout
-from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, PageMarkup
+from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, page_schema
 from app.master_artwork import master_artwork
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
 from app.previews import put_preview
@@ -350,6 +350,38 @@ def image_ids(assets, context):
     return images
 
 
+def generate_slide_image(job_id, token, index, owner_id, prompt, ai, context):
+    if not image_configured():
+        raise ProviderError("The image provider is unavailable.")
+    config = settings()
+    if ai.usage.get("images", 0) >= config.image_limit_per_job:
+        raise ProviderError("The illustration limit for this presentation has been reached.")
+    if config.ai_job_cost_budget > 0 and ai.usage["estimated_cost"] + config.image_cost_usd > config.ai_job_cost_budget:
+        raise ProviderError("The estimated job budget has no room for this illustration.")
+    key = render_image(job_id, token, index, owner_id, prompt)
+    if key and key not in context.get("generated_images", []):
+        context["generated_images"] = [*context.get("generated_images", []), key]
+        ai.usage["images"] = ai.usage.get("images", 0) + 1
+        ai.usage["estimated_cost"] = round(ai.usage["estimated_cost"] + config.image_cost_usd, 6)
+    return key
+
+
+def prepare_html_image(job_id, token, index, part, item, context, ai, web_research):
+    try:
+        if part.image_query and web_research and context["intent"].get("web_images_requested"):
+            found = source_web_image(job_id, token, index, item.owner_id, part.image_query)
+            if found is None:
+                return None
+            source, _ = found
+            return {"asset_id":source.asset_id, "description":source.title, "source":source.model_dump(mode="json")}
+        if part.image_prompt and item.request.get("generate_images"):
+            key = generate_slide_image(job_id, token, index, item.owner_id, part.image_prompt, ai, context)
+            return {"asset_id":key, "description":part.image_prompt} if key else None
+    except ProviderError as error:
+        return {"warning":str(error)}
+    return {"skipped":True}
+
+
 def advance(job_id: str, token: str):
     with Session() as db:
         job = db.get(Job, job_id)
@@ -534,12 +566,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             return "research", "waiting", "WAITING_FOR_USER", events, None, None
         context["web_research_enabled"] = web_research
         if context.get("layout_engine") == "auto":
-            # These paths bind template slots, place actual image assets, or verify quantitative
-            # exhibits against retrieved observations. They still require the native compositor.
-            native = (ai.provider == "demo" or brand or (skill and skill.theme.brand_kit)
-                      or item.request.get("generate_images")
-                      or inferred_intent.get("requires_chart_workbook")
-                      or (web_research and inferred_intent.get("web_images_requested"))
+            # Preserve master placeholders and the focused-research/claim reconciliation pipeline.
+            native = (ai.provider == "demo" or brand
                       or (data_driven and (web_research or any(not a.media_type.startswith("image/") for a in assets))))
             context["layout_engine"] = "native" if native else "html"
         after_research = "html_plan" if context.get("layout_engine") == "html" else "design"
@@ -606,12 +634,19 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             return None
         plan = ai.structured(HtmlPlan, HTML_PLAN, {
             **inputs(item, context), "slide_count":requested_slide_count(context), "aspect":document.aspect_ratio,
-            "visual_direction":direction,
+            "visual_direction":direction, "requires_chart_workbook":bool(inferred_intent.get("requires_chart_workbook")),
+            "web_images":bool(web_research and inferred_intent.get("web_images_requested")),
+            "generate_images":bool(item.request.get("generate_images") and image_configured()),
+            "brand_theme":skill.theme.model_dump(mode="json") if skill and skill.theme.brand_kit else None,
             "available_pictures":{a.id:a.name for a in assets if a.media_type.startswith("image/")},
         }, "outline", reference_sheet(assets) if settings().llm_vision_enabled else None)
         context["html_plan"] = plan.model_dump(mode="json")
         document.title = plan.title
         document.theme = document.theme.model_copy(update=plan.model_dump(include={"background","ink","accent","muted","surface"}))
+        if skill and skill.theme.brand_kit:
+            document.theme.design = skill.theme.design
+            document.theme = apply_brand_kit(document.theme, skill.theme)
+        document.sources = [Source.model_validate(s) for s in context["sources"]]
         attach_slide_sources(document, context)
         events.extend([("design.completed", "HTML/CSS layout and palette ready.", {}),
                        ("outline.completed", "Slide outline ready.", {"outline":{"title":plan.title,
@@ -623,7 +658,15 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if index == len(plan.slides):
             return completed(document, ai.usage, index)
         part = plan.slides[index]
-        theme = plan.model_dump(exclude={"slides", "title"})
+        theme = document.theme.model_dump(include={"background","ink","accent","muted","surface","font"})
+        theme["display"] = plan.display
+        kit = document.theme.brand_kit
+        if kit:
+            theme["roleAliases"] = {getattr(plan, role).lower():role for role in kit.protected
+                                    if role in {"background","ink","muted","accent","surface"}
+                                    and getattr(plan, role).lower() != theme[role].lower()}
+        if kit and document.theme.design and "heading_font" in kit.protected:
+            theme["display"] = document.theme.design.heading_font
         pictures = {a.id:a.name for a in assets if a.media_type.startswith("image/")}
         if not inferred_intent.get("reuse_uploaded_images"):
             for prior in document.slides:
@@ -631,23 +674,42 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                     if isinstance(element, Image):
                         pictures.pop(element.asset_id, None)
         previous = context.get("layout_retry", {})
+        media = context.get("html_media", {})
+        if stage == "html_slide" and not media and (part.image_query or part.image_prompt):
+            media = prepare_html_image(job_id, token, index, part, item, context, ai, web_research)
+            if media is None:
+                return None
+            context["html_media"] = media
+            return "html_slide", state, "GENERATING", events, None, None
+        if media.get("asset_id"):
+            pictures[media["asset_id"]] = media["description"]
+        schema = page_schema(part.exhibit)
         if stage == "html_slide":
             if not start_status(job_id, token, "GENERATING", "slide.started", f"Designing slide {index+1}: {part.title}.", index=index):
                 return None
             request = {**inputs(item, context), "slide":part.model_dump(), "slide_number":index+1,
-                       "available_pictures":pictures,
+                       "available_pictures":pictures, "required_picture":media.get("asset_id"),
                        "outline":[p.title for p in plan.slides], "theme":theme, "deck_title":document.title,
                        "aspect":document.aspect_ratio, "width":html_layout.WIDTH[document.aspect_ratio]}
             if previous:
                 request.update(previous=previous["markup"], correction=previous["error"])
-            candidate = ai.structured(PageMarkup, HTML_DESIGN, request, "html-slide")
+                if "exhibit_data" in previous:
+                    request["previous_exhibit_data"] = previous["exhibit_data"]
+            candidate = ai.structured(schema, HTML_DESIGN, request, "html-slide")
             context["html_candidate"] = candidate.model_dump(mode="json")
             return "html_measure", state, "REVIEWING", events, None, None
-        candidate = PageMarkup.model_validate(context["html_candidate"])
+        candidate = schema.model_validate(context["html_candidate"])
         try:
+            if media.get("source"):
+                credit = Source.model_validate(media["source"])
+                if credit.id not in {s.id for s in document.sources}:
+                    document.sources.append(credit)
+                candidate.source_ids = list(dict.fromkeys([credit.id, *candidate.source_ids]))[:20]
             if set(candidate.source_ids) - {source.id for source in document.sources}:
                 raise ValueError("Cite only source IDs supplied with this brief.")
-            slide, png = html_layout.compose(candidate.markup, part.title, theme, document.aspect_ratio, pictures)
+            observations = verified_observations(getattr(candidate, "observations", []), document.sources)
+            slide, png = html_layout.compose(candidate.markup, part.title, theme, document.aspect_ratio, pictures,
+                                             document, part, candidate, list(observations), media.get("asset_id"))
         except (ValueError, ET.ParseError) as error:
             attempt = previous.get("attempt", 0) + 1
             issue = str(error)[:800]
@@ -655,11 +717,16 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 context.pop("layout_retry", None)
                 raise ProviderError(f"Could not fit slide {index+1} after three layouts: {issue}") from error
             context["layout_retry"] = {"attempt":attempt,"markup":candidate.markup,"error":issue}
+            if part.exhibit:
+                context["layout_retry"]["exhibit_data"] = candidate.exhibit_data.model_dump(mode="json")
             context.pop("html_candidate")
             return "html_slide", state, "GENERATING", [("slide.revised", "Adjusting the slide to fit its layout.", {"index":index})], None, None
         context.pop("layout_retry", None)
         context.pop("html_candidate")
+        context.pop("html_media", None)
         slide.notes, slide.source_ids, slide.layout = candidate.notes, candidate.source_ids, part.layout
+        if media.get("warning"):
+            slide.warnings = [media["warning"], *slide.warnings][:30]
         document.slides.append(slide)
         context["progress_index"] = index+1
         context["_preview_bytes"] = png
@@ -934,20 +1001,13 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             part.key_message = content.title
         warning = ""
         try:
-            if not image_configured():
-                raise ProviderError("The image provider is unavailable.")
-            if settings().ai_job_cost_budget > 0 and ai.usage["estimated_cost"] + settings().image_cost_usd > settings().ai_job_cost_budget:
-                raise ProviderError("The estimated job budget has no room for this illustration.")
             prompt = content.image_prompt
             if document.theme.design:
                 prompt += " Deck imagery direction: " + document.theme.design.imagery
-            key = render_image(job_id, token, index, item.owner_id, prompt)
+            key = generate_slide_image(job_id, token, index, item.owner_id, prompt, ai, context)
             if not key:
                 return None
             content.image_asset_id = key
-            context["generated_images"] = [*context.get("generated_images", []), key]
-            ai.usage["images"] = ai.usage.get("images", 0) + 1
-            ai.usage["estimated_cost"] = round(ai.usage["estimated_cost"] + settings().image_cost_usd, 6)
         except ProviderError as error:
             warning = str(error)
         images = image_ids(assets, context)
