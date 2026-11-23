@@ -1,4 +1,5 @@
 import io
+from types import SimpleNamespace
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
@@ -11,10 +12,11 @@ from sqlalchemy import select
 from app.db import Job, Session
 from app.domain import Document, Shape
 from app.html_layout import compose
+from app.html_layout.markup import PagePlan
 from app.main import app
 from app.providers import Intelligence, ProviderError
 from app.queue import claim
-from app.workflow import advance
+from app.workflow import advance, html_slide_inputs
 
 
 PALETTE = dict(background="#FAF9F5", ink="#17283C", accent="#16856B", muted="#58677A", surface="#FFFFFF",
@@ -23,6 +25,21 @@ MATRIX = """<page><text font="display" size="70">FORM</text><row grow="1" align=
   <col w="100%" align="center"><row w="100%"><matrix grow="1" widths="70,30">
   <tr><td>Capability</td><td>Level</td></tr><tr><td>Inspection</td><td align="right" bold="true">4</td></tr>
   </matrix></row></col></row></page>"""
+
+
+def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
+    item = SimpleNamespace(request={"prompt": "Compare error correction methods"})
+    sources = [{"id": key, "excerpt": key * 200} for key in ("brief", "history", "hardware")]
+    context = {"sources": sources, "brief_source_id": "brief", "research": {
+        "summary": "Deck-wide findings", "uncertainties": ["Dates are estimates"],
+        "observations": [{"source_id": key, "quote": key} for key in ("history", "hardware")]}}
+    plan = PagePlan(title="Hardware", direction="Explain the current demonstration", source_ids=["hardware"])
+    request = html_slide_inputs(item, context, plan)
+    assert request["sources"] == [sources[0], sources[2]]
+    assert request["research"] == {"uncertainties": ["Dates are estimates"], "observations": [{"source_id": "hardware"}]}
+    for ids in (None, ["missing"]):
+        assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": ids}))["sources"] == sources
+    assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": []}))["sources"] == sources[:1]
 
 
 def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeypatch):
@@ -37,7 +54,11 @@ def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeyp
         if schema.__name__ == "HtmlPlan":
             return schema(title="Inspection", **PALETTE, slides=[dict(title="Inspection", direction="Show the table")])
         if schema.__name__ == "PageMarkup":
-            return schema(markup=MATRIX if "correction" in data else "<page><script/></page>")
+            return schema(markup="<page><script/></page>", notes="Keep these presenter notes.")
+        if schema.__name__ == "LayoutMarkup":
+            assert data["previous"] == "<page><script/></page>" and "correction" in data
+            assert {"research", "sources", "outline", "previous_exhibit_data"}.isdisjoint(data)
+            return schema(markup=MATRIX)
         raise AssertionError(f"Unexpected legacy generation request: {schema.__name__}")
 
     monkeypatch.setattr(Intelligence, "structured", model)
@@ -72,9 +93,10 @@ def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeyp
     assert item["status"] == "COMPLETED" and item["slide_count"] == 1
     assert reviewed == ["<page><script/></page>", MATRIX]
     assert interruptions == [True]
-    assert calls.count("HtmlPlan") == 1 and calls.count("PageMarkup") == 2
+    assert calls.count("HtmlPlan") == calls.count("PageMarkup") == calls.count("LayoutMarkup") == 1
     saved = item["document"]
     slide = saved["slides"][0]
+    assert slide["notes"] == "Keep these presenter notes."
     title, table = slide["elements"]
     assert title["single_line"] and table["css"]["columns"][0] > .69
     table["rows"][1][0] = "Updated inspection"

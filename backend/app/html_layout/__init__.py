@@ -11,7 +11,7 @@ from app.config import settings
 from app.db import uid
 from app.domain import Document, ExhibitRegion, Slide, Theme
 from app.html_layout.exhibits import attach_region
-from app.html_layout.markup import parse_markup
+from app.html_layout.markup import MarkupError, parse_markup
 from app.html_layout.review import readability_warnings
 from app.providers import ProviderError
 from app.rendering import preview
@@ -47,7 +47,7 @@ def picture_previews(root, allowed):
             continue
         key = node["a"].get("asset")
         if key not in allowed:
-            raise ValueError("Use a picture ID from available_pictures.")
+            raise MarkupError("Use a picture ID from available_pictures.")
         if key not in pictures:
             with Image.open(io.BytesIO(Storage().get(key))) as source:
                 width, height = source.size
@@ -94,7 +94,7 @@ def compose(markup, title, theme, aspect, available_pictures=(), document=None, 
     page_data = {"title":title, "body":parse_markup(markup)}
     pictures = picture_previews(page_data["body"], available_pictures)
     if required_picture and required_picture not in pictures:
-        raise ValueError("Include the assigned picture using its exact asset ID.")
+        raise MarkupError("Include the assigned picture using its exact asset ID.")
     document = document or Document(title=title, aspect_ratio=aspect, theme=Theme(**{
         k: v for k, v in theme.items() if k in Theme.model_fields}))
     theme = dict(theme)
@@ -102,7 +102,7 @@ def compose(markup, title, theme, aspect, available_pictures=(), document=None, 
     logo = document.theme.brand_kit.logo_asset_id if document.theme.brand_kit else None
     if logo:
         if logo in pictures:
-            raise ValueError("The brand logo is placed automatically. Remove its picture tag.")
+            raise MarkupError("The brand logo is placed automatically. Remove its picture tag.")
         pictures.update(picture_previews({"tag":"picture","a":{"asset":logo},"children":[]}, {logo}))
     width = WIDTH[aspect]
     with sync_playwright() as playwright:
@@ -123,10 +123,10 @@ def compose(markup, title, theme, aspect, available_pictures=(), document=None, 
             except BrowserError as error:
                 if page.is_closed() or not browser.is_connected():
                     raise ProviderError("Chromium closed while measuring the slide. Retry the saved checkpoint.") from error
-                raise ValueError(str(error).split("\n")[0][:600]) from error
+                raise MarkupError(str(error).split("\n")[0][:600]) from error
             regions = [node for node in raw["elements"] if node["type"] == "exhibit"]
             if len(regions) != int(bool(plan and plan.exhibit)):
-                raise ValueError("Use exactly one exhibit frame for a planned exhibit, and none otherwise.")
+                raise MarkupError("Use exactly one exhibit frame for a planned exhibit, and none otherwise.")
             raw["elements"] = [node for node in raw["elements"] if node["type"] != "exhibit"]
             slide = Slide.model_validate(raw)
             if candidate:

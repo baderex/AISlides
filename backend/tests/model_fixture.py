@@ -102,7 +102,7 @@ def model_response(schema: str, data: dict) -> dict:
                     "muted": "#485564", "surface": "#EFF5F2", "display": "Georgia",
                     "slides": [{"title": s["title"], "layout": s["layout"], "direction": s["purpose"]} for s in slides]}
         return {"title": title, "narrative": "Frame the opportunity, explain the mechanics, and highlight practical next steps.", "slides": slides}
-    if schema == "PageMarkup":
+    if schema in {"PageMarkup", "LayoutMarkup"}:
         slide = data["slide"]
         content = ('<matrix><tr><td>Classical bits</td><td>Quantum bits</td></tr>'
                    '<tr><td>Binary values</td><td>Superposition</td></tr></matrix>'

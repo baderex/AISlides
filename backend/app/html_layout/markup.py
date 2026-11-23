@@ -14,6 +14,7 @@ class PagePlan(Contract):
     title: str = Field(min_length=1, max_length=160)
     layout: Layout = "summary"
     direction: str = Field(min_length=1, max_length=1800, description="Specific exhibit, composition and information to communicate")
+    source_ids: list[Identifier] | None = Field(default=None, max_length=60)
     exhibit: VisualType | Literal["workbook-chart"] | None = None
     image_query: str = Field(default="", max_length=380)
     image_prompt: str = Field(default="", max_length=400)
@@ -38,10 +39,17 @@ class HtmlPlan(Contract):
         return self
 
 
-class PageMarkup(Contract):
+class LayoutMarkup(Contract):
+    markup: str = Field(description="One XML page containing composed visual content", max_length=30000)
+
+
+class MarkupError(ValueError):
+    """The page XML can be repaired without changing its evidence or exhibit data."""
+
+
+class PageMarkup(LayoutMarkup):
     source_ids: list[Identifier] = Field(default_factory=list, max_length=20)
     notes: str = Field(default="", max_length=3500)
-    markup: str = Field(description="One XML page containing composed visual content", max_length=30000)
 
 
 @lru_cache
@@ -61,7 +69,9 @@ weighted scorecard or weighted choice, heatmap for retention grids, waterfall fo
 bar, column, pie and line charts, especially when an editable chart workbook is requested. Leave exhibit
 null for free layouts. Use image_query only for requested, enabled web photos and image_prompt only
 for enabled generated imagery. Prefer available uploaded images. Choose legible contrasting colors.
-Write each direction as an instruction to a slide designer, including what must be drawn."""
+Write each direction as an instruction to a slide designer, including what must be drawn. For each slide,
+list the source_ids needed to support its claims or data. Use exact IDs from sources. Use an empty list
+for a slide that needs no source material."""
 
 DESIGN = """You are the slide designer. Create ONLY the requested slide as XML in the markup property.
 The XML compiles to HTML with CSS flex layout and browser-measured editable native PowerPoint objects.
@@ -126,17 +136,17 @@ def parse_markup(value):
     if value.startswith("```"):
         value = value.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     if "<!" in value or "<?" in value:
-        raise ValueError("Markup declarations are unsupported")
+        raise MarkupError("Markup declarations are unsupported")
     root = ET.fromstring(value)
     if root.tag != "page" or len(list(root.iter())) > 300:
-        raise ValueError("Expected one page with at most 300 nodes")
+        raise MarkupError("Expected one page with at most 300 nodes")
     def clean(node, depth):
         if depth > 12 or any(child.tag not in TAGS.get(node.tag, "").split() for child in node):
-            raise ValueError(f"Unexpected nesting inside {node.tag}")
+            raise MarkupError(f"Unexpected nesting inside {node.tag}")
         if (node.tag not in TEXT and (node.text or "").strip()) or any((c.tail or "").strip() for c in node):
-            raise ValueError("All visible copy must be in a text, label or td")
+            raise MarkupError("All visible copy must be in a text, label or td")
         if node.tag in TAGS and node.tag not in {"row","col"} and not len(node):
-            raise ValueError(f"Empty {node.tag}")
+            raise MarkupError(f"Empty {node.tag}")
         return {"tag":node.tag, "a":node.attrib, "t":(node.text or "").strip(),
                 "children":[clean(c, depth + 1) for c in node]}
     return clean(root, 0)

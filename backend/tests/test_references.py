@@ -17,7 +17,7 @@ from app.composition import Intent, Outline, ResearchBrief, ResearchQueries, Sli
 from app.config import Settings, settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
 from app.domain import Source
-from app.html_layout.markup import HtmlPlan, PageMarkup
+from app.html_layout.markup import HtmlPlan, LayoutMarkup, PageMarkup
 from app.main import app
 from app.providers import Intelligence
 from app.questions import Clarification
@@ -313,7 +313,7 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
                              "title":"Example", "layout":"editorial", "direction":"Place the illustration",
                              "image_prompt":"An abstract blue shape Deck imagery direction: Restrained editorial imagery coordinated with the deck palette."}]},
         }
-        if schema is PageMarkup:
+        if schema in (PageMarkup, LayoutMarkup):
             asset = data["required_picture"]
             assert asset in data["available_pictures"]
             markup = f'<page><picture asset="{asset}" alt="Blue shape"/></page>' if "correction" in data else "<page><text>Missing image</text></page>"
