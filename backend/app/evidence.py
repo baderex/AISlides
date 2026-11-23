@@ -10,6 +10,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError, WithJsonSchema
 
 from app.domain import Contract, Identifier, display_value
+from app.source_sections import markdown_tables, table_cells
 
 NUMBER = r"[+\-−]?\s*[$€£¥]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 QUARTER = r"Q[1-4]"
@@ -70,7 +71,8 @@ class EvidenceObservation(Contract):
 EVIDENCE_GUIDANCE = (
     " Extract numerical observations into observations, including source ID, metric, exact period, scope, amount, "
     "unit, currency, and the shortest exact supporting quote. For a Markdown table quote one complete data row, "
-    "using its exact column header as metric and its year or category cell as period. For a ranked table use the "
+    "using its exact column header as metric and its year or category cell as period. Copy explicit currency and "
+    "units from the cell, column header, or adjacent table caption; never infer scale from magnitude. For a ranked table use the "
     "asset symbol or entity cell as period and the verbatim snapshot date as scope. Never paraphrase scope. Use a JSON number for amount: "
     "for $33.83bn use amount 33.83, currency '$', unit 'bn'. For −6.3% use amount -6.3 and unit '%'. "
     "Prioritize up to 16 observations relevant to the brief. Summarize conflicts and gaps in uncertainties. "
@@ -131,56 +133,109 @@ def recover_observation_amount(row):
     return {**row, "amount": amount, "currency": currency or prefix, "unit": unit or suffix}
 
 
+CURRENCY_MARKERS = re.compile(r"(?<!\w)(?:USD|EUR|GBP|JPY|SAR|AED|CAD|AUD|NZD|CHF|CNY|HKD|SGD|INR|KRW|"
+                              r"SEK|NOK|DKK|ZAR|BRL|MXN)(?!\w)|[$€£¥]", re.I)
+UNIT_MARKERS = re.compile(r"(?<!\w)(?:thousands?|millions?|billions?|trillions?|percent(?:age)?|bn|tn)(?!\w)|%", re.I)
+SHORT_SCALES = re.compile(r"(?<!\w)[kmbt](?!\w)", re.I)
+TABLE_DENOMINATION = re.compile(
+    r"\b(?:(?:all\s+)?(?:figures|amounts|values|numbers|data)\s+"
+    r"(?:(?:shown|reported|expressed)\s+)?(?:(?:are|is)\s+)?in\b|(?:currency|units?)\s*[:=])", re.I)
+
+
+def denomination_markers(text, unit_hint="", *, explicit=False):
+    currencies = {currency_code(match[0]) for match in CURRENCY_MARKERS.finditer(text)}
+    units = {canonical_unit(match[0]) for match in UNIT_MARKERS.finditer(text)}
+    if explicit:
+        units.update(canonical_unit(match[0]) for match in SHORT_SCALES.finditer(text))
+    else:
+        # "Series B" is a label, while "$m" and "USD m" explicitly denominate a value.
+        for marker in CURRENCY_MARKERS.finditer(text):
+            if scale := re.match(r"\s*([kmbt])(?!\w)", text[marker.end():], re.I):
+                units.add(canonical_unit(scale[1]))
+    if explicit and unit_hint and re.fullmatch(r"[A-Za-z]{1,8}", unit_hint) and re.search(
+            rf"(?<!\w){re.escape(unit_hint)}(?!\w)", text, re.I):
+        units.add(canonical_unit(unit_hint))
+    return currencies, units
+
+
+def caption_denominations(text, unit_hint=""):
+    """Only a local denomination declaration can supply units missing from a cell."""
+    currencies, units = set(), set()
+    for line in text.splitlines():
+        parts = [line, *re.findall(r"\(([^()]*)\)", line)]
+        parts.extend(re.split(r"[.;]", line[match.end():], maxsplit=1)[0]
+                     for match in TABLE_DENOMINATION.finditer(line))
+        for part in parts:
+            found_currencies, found_units = denomination_markers(part, unit_hint, explicit=True)
+            remainder = CURRENCY_MARKERS.sub("", SHORT_SCALES.sub("", UNIT_MARKERS.sub("", part)))
+            if unit_hint:
+                remainder = re.sub(rf"(?<!\w){re.escape(unit_hint)}(?!\w)", "", remainder, flags=re.I)
+            remainder = re.sub(r"\b(?:in|of)\b|[\s\W_]", "", remainder, flags=re.I)
+            if not remainder:
+                currencies.update(found_currencies)
+                units.update(found_units)
+    return currencies, units
+
+
+def table_amount(cell, header, context, unit_hint=""):
+    parsed = display_amount(cell, unit_hint)
+    if not parsed:
+        return None
+    amount, currency, unit = parsed
+    currencies, units = denomination_markers(header, unit_hint)
+    caption_currencies, caption_units = caption_denominations(header + "\n" + context, unit_hint)
+    currencies.update(caption_currencies)
+    units.update(caption_units)
+    if currency:
+        currencies.add(currency_code(currency))
+    if unit:
+        units.add(unit)
+    # Explicit disagreement is not an invitation to guess which denomination is intended.
+    if len(currencies) > 1 or len(units) > 1:
+        return None
+    return amount, next(iter(currencies), ""), next(iter(units), "")
+
+
 def table_observation(row, excerpt, *, extract_labels):
     # Require the verbatim data row under its own Markdown header and separator.
     quote = row.quote.strip()
     if not quote.startswith("|") or "\n" in quote:
         return None
-    header = []
-    previous = []
-    heading = ""
-    for line in excerpt.splitlines():
-        line = line.strip()
-        if not (line.startswith("|") and line.endswith("|")):
-            header = previous = []
-            if line.startswith("#"):
-                heading = line.lstrip("#").strip()
+    matches = []
+    for table in markdown_tables(excerpt):
+        if quote not in table.rows:
             continue
-        cells = [cell.strip() for cell in line[1:-1].split("|")]
-        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
-            header = previous if len(previous) == len(cells) else []
-        elif line == quote and len(header) == len(cells):
-            labels = [cell.casefold() for cell in header]
-            metric = row.metric.casefold()
-            if labels.count(metric) != 1:
-                return None
-            column = labels.index(metric)
-            parsed = display_amount(cells[column], row.unit)
-            if not parsed:
-                return None
-            amount, currency, unit = parsed
-            if amount != row.amount or currency_code(currency) != currency_code(row.currency) or unit != canonical_unit(row.unit):
-                return None
-            categories = [cell for i, cell in enumerate(cells) if i != column and
-                          (i == 0 or labels[i] in {"name", "symbol", "category", "period", "year"})]
-            period = row.period
-            scope = row.scope
-            if period.casefold() not in (cell.casefold() for cell in categories):
-                # Researchers sometimes put the snapshot date in period. Read the entity from the same row.
-                if not extract_labels or not contains(heading, period):
-                    return None
-                period = next((cells[labels.index(k)] for k in ("symbol", "name", "category")
-                               if labels.count(k) == 1 and labels.index(k) != column), "")
-                scope = heading
-            if scope and not contains(f"{heading} {line}", scope):
-                if not extract_labels or not heading:
-                    return None
-                scope = heading
-            if not 0 < len(period) <= 40 or len(scope) > 80:
-                return None
-            return row.model_copy(update={"scope": scope, "period": period})
-        previous = cells
-    return None
+        header, cells = table_cells(table.header), table_cells(quote)
+        labels = [cell.casefold() for cell in header]
+        metric = row.metric.casefold()
+        if labels.count(metric) != 1:
+            continue
+        column = labels.index(metric)
+        context = "\n".join((table.before, table.after))
+        categories = [cell for i, cell in enumerate(cells) if i != column and
+                      (i == 0 or labels[i] in {"name", "symbol", "category", "period", "year"})]
+        period, scope = row.period, row.scope
+        if period.casefold() not in (cell.casefold() for cell in categories):
+            # Researchers sometimes put the snapshot date in period. Read the entity from the same row.
+            if not extract_labels or not contains(context, period):
+                continue
+            period = next((cells[labels.index(k)] for k in ("symbol", "name", "category")
+                           if labels.count(k) == 1 and labels.index(k) != column), "")
+            scope = table.heading or next((line for line in context.splitlines() if contains(line, row.period)), "")
+        if scope and not contains(f"{context} {quote}", scope):
+            if not extract_labels or not table.heading:
+                continue
+            scope = table.heading
+        if not 0 < len(period) <= 40 or len(scope) > 80:
+            continue
+        parsed = table_amount(cells[column], header[column], context, row.unit)
+        if not parsed:
+            return None
+        amount, currency, unit = parsed
+        if amount != row.amount or currency != currency_code(row.currency) or unit != canonical_unit(row.unit):
+            return None
+        matches.append(row.model_copy(update={"scope": scope, "period": period}))
+    return matches[0] if matches and len({(match.scope, match.period) for match in matches}) == 1 else None
 
 
 def verified_observations(observations, sources, *, extract_table_labels=False, prose_check=None):
