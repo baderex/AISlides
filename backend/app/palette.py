@@ -1,7 +1,7 @@
 """Resolve categorical and semantic paints against the surface where they will be used."""
 import colorsys
 from functools import lru_cache
-from math import dist
+from math import dist, hypot
 
 from app.render_geometry import contrast
 
@@ -36,7 +36,19 @@ def visible_tone(color, background, minimum=3):
     return next(tone for i in range(21) if contrast(tone := blend(color, end, i / 20), background) >= minimum)
 
 
-def categorical_palette(theme, background, count=5):
+@lru_cache(maxsize=2048)
+def series_distinguishable(first, second):
+    """Require a visible lightness or chroma step, including near black.
+
+    OKLab distance alone overstates the usefulness of small dark-neutral steps
+    for thin chart marks. These are conservative chart heuristics, not text
+    contrast requirements.
+    """
+    a, b = oklab(first), oklab(second)
+    return dist(a, b) >= .10 and (contrast(first, second) >= 1.5 or hypot(a[1]-b[1], a[2]-b[2]) >= .06)
+
+
+def categorical_palette(theme, background, count=5, *, distinct=False):
     seeds = [theme.accent, *(theme.design.chart_colors if theme.design else [])]
     restricted = theme.constraints.palette if theme.constraints else []
     if theme.design and theme.brand_kit and "chart_colors" in theme.brand_kit.protected:
@@ -44,11 +56,40 @@ def categorical_palette(theme, background, count=5):
     restrained = (theme.constraints and theme.constraints.restrained or
                   theme.design and len(set(theme.design.chart_colors)) <= 2)
     return list(_series(tuple(c.upper() for c in seeds), tuple(c.upper() for c in restricted),
-                        background.upper(), count, bool(restrained)))
+                        background.upper(), count, bool(restrained), distinct))
+
+
+def _distinct_series(candidates, seeds, count):
+    """Find up to five separated series without spending the palette on near duplicates."""
+    best = candidates[:1]
+    budget = 2048
+
+    def choose(selected, remaining):
+        nonlocal best, budget
+        if not budget:
+            return None
+        budget -= 1
+        if len(selected) > len(best):
+            best = selected
+        if len(selected) == count:
+            return selected
+        eligible = [c for c in remaining if all(series_distinguishable(c, other) for other in selected)]
+        if len(selected) + len(eligible) <= len(best):
+            return None
+        distances = {c: min(dist(oklab(c), oklab(other)) for other in selected) for c in eligible}
+        ranked = sorted(eligible, key=lambda c: (c in seeds and distances[c] >= .12, distances[c]), reverse=True)
+        for index, shade in enumerate(ranked):
+            if result := choose([*selected, shade], ranked[index+1:]):
+                return result
+            if not budget:
+                break
+        return None
+
+    return tuple(choose(best, candidates[1:]) or best)
 
 
 @lru_cache(maxsize=256)
-def _series(seeds, restricted, background, count, restrained):
+def _series(seeds, restricted, background, count, restrained, distinct=False):
     if restricted:
         candidates = list(dict.fromkeys(c for c in (*seeds, *restricted) if c in restricted and contrast(c, background) >= 3))
     else:
@@ -57,11 +98,17 @@ def _series(seeds, restricted, background, count, restrained):
             (hue + i / 12) % 1, light, max(.5, min(.8, saturation))))
             for light in (.42, .64) for i in range(12)]
         if restrained:
+            shares = [i / 40 for i in range(1, 41)] if distinct else (.15, .3, .45, .6, .75, .9, 1)
             variants = [blend(seed, end, share) for seed in seeds for end in ("#000000", "#FFFFFF")
-                        for share in (.15, .3, .45, .6, .75, .9, 1)]
+                        for share in shares]
         candidates = list(dict.fromkeys(visible_tone(c, background) for c in [*seeds, *variants]))
     if not candidates:
         return (max(restricted, key=lambda c: contrast(c, background)),)
+    # Authored locked colors must remain unchanged; validation reports when
+    # they cannot distinguish the requested series. Numbered pies can reuse
+    # tones, so only ordinary multi-series charts request this stricter choice.
+    if distinct and not restricted:
+        return _distinct_series(candidates, seeds, count)
     result = [candidates.pop(0)]
     while candidates and len(result) < count:
         distances = {c: min(dist(oklab(c), oklab(other)) for other in result) for c in candidates}
