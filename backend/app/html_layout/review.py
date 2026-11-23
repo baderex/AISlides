@@ -1,9 +1,10 @@
 """Review the measured composition and compare its editable export with the preview."""
 from collections import Counter
 from dataclasses import dataclass
+from math import isfinite
 
 from app.domain import Chart, Image, Line, Shape, Table, Text
-from app.html_layout.markup import parse_markup
+from app.html_layout.markup import DRAWING_TAGS, parse_markup
 from app.render_geometry import segment_crosses
 from app.rendering import (TEXT_LEADING, TEXT_SCALE, connector_points, flattened, physical,
                            raster_text, validate_slide)
@@ -92,6 +93,122 @@ def design_memory(slides):
     return {"patterns_used":dict(Counter(item["pattern"] for item in summaries)), "recent":summaries[-3:]}
 
 
+def drawing_content(node):
+    """Keep a drawing's relationships without pinning its layout coordinates.
+
+    Named/labeled boxes and directed connectors are content. Anonymous rectangles
+    may be decoration, so changes to them go through the workflow's comparison
+    with the previous reviewed geometry. Ambiguous connections retain the stricter
+    coordinate signature instead of guessing which entities they join.
+    """
+    children = node["children"]
+    geometry = {"id", "x", "y", "w", "h", "x1", "y1", "x2", "y2",
+                "from", "to", "head", "points", "form"}
+    strict = tuple((child["tag"], child["t"], tuple(sorted(
+        (k, v) for k, v in child["a"].items() if k in geometry))) for child in children)
+
+    def value(raw):
+        result = float(str(raw).removesuffix("%"))
+        if not isfinite(result) or not 0 <= result <= 100:
+            raise ValueError("Invalid drawing coordinate")
+        return result
+
+    def frame(child):
+        return tuple(value(child["a"].get(k, 0)) for k in ("x", "y", "w", "h"))
+
+    def distance(point, bounds):
+        x, y, w, h = bounds
+        return max(x-point[0], point[0]-x-w, 0)**2 + max(y-point[1], point[1]-y-h, 0)**2
+
+    def copy(child):
+        return child["t"] if child["a"].get("role") == "code" else " ".join(child["t"].split())
+
+    def form(child):
+        shape = child["a"].get("form", "rect")
+        return "rect" if shape == "round" else shape
+
+    try:
+        boxes = [child for child in children if child["tag"] == "box"]
+        labels = [child for child in children if child["tag"] == "label"]
+        bounds, label_bounds = [frame(child) for child in boxes], [frame(child) for child in labels]
+        owners = {}
+        for i, (x, y, w, h) in enumerate(label_bounds):
+            containers = [j for j, box in enumerate(bounds) if distance((x+w/2, y+h/2), box) == 0]
+            if containers:
+                smallest = min(bounds[j][2] * bounds[j][3] for j in containers)
+                owners[i], = [j for j in containers if bounds[j][2] * bounds[j][3] == smallest]
+        references = [("node", child["a"].get("id", ""), form(child),
+                       tuple(sorted(copy(labels[i]) for i, owner in owners.items() if owner == j)))
+                      for j, child in enumerate(boxes)]
+        identified = {j for j, child in enumerate(boxes) if child["a"].get("id") or j in owners.values()}
+        if len({references[j] for j in identified}) != len(identified):
+            raise ValueError("Ambiguous drawing nodes")
+        content = Counter(references[j] for j in identified)
+        endpoint_labels = set()
+
+        def endpoint(child, end):
+            attrs = child["a"]
+            point = tuple(value(attrs.get(k + ("1" if end == "from" else "2"), 0)) for k in ("x", "y"))
+            if anchor := attrs.get(end):
+                key, side = anchor.split(":")
+                owner, = [j for j, box in enumerate(boxes) if box["a"].get("id") == key]
+                if side not in {"top", "right", "bottom", "left"} or distance(point, bounds[owner]) > 4:
+                    raise ValueError("Anchor and visible endpoint disagree")
+                return references[owner], point
+            # Prefer visible endpoint labels; this also covers freeform diagrams
+            # with no node boxes, such as Browser -> Server.
+            near = [(distance(point, box), i) for i, box in enumerate(label_bounds)]
+            if near and min(d for d, _ in near) <= 100:
+                nearest = min(d for d, _ in near)
+                i, = [i for d, i in near if abs(d-nearest) < .0001]
+                endpoint_labels.add(i)
+                return ("label", copy(labels[i]), references[owners[i]] if i in owners else ()), point
+            near = [(distance(point, bounds[j]), j) for j in identified]
+            if near and min(d for d, _ in near) <= 100:
+                nearest = min(d for d, _ in near)
+                j, = [j for d, j in near if abs(d-nearest) < .0001]
+                return references[j], point
+            raise ValueError("Unresolved drawing endpoint")
+
+        edges = []
+        for child in children:
+            if child["tag"] == "arrow":
+                start, a = endpoint(child, "from")
+                end, b = endpoint(child, "to")
+                if start == end:
+                    raise ValueError("Ambiguous freeform loop")
+                edge = ("edge", start, end, child["a"].get("head") != "false")
+                content[edge] += 1
+                edges.append((edge, a, b))
+            elif child["tag"] == "poly":
+                points = [tuple(value(v) for v in pair.split(",")) for pair in child["a"]["points"].split()]
+                left, top = min(p[0] for p in points), min(p[1] for p in points)
+                scale = max(max(p[0] for p in points)-left, max(p[1] for p in points)-top)
+                content[("polygon", tuple((round((x-left)/scale, 6), round((y-top)/scale, 6))
+                                           for x, y in points))] += 1
+        for j, child in enumerate(boxes):
+            if j not in identified and form(child) != "rect":
+                content[("shape", form(child))] += 1
+        for i, child in enumerate(labels):
+            if i in owners or i in endpoint_labels:
+                continue
+            x, y, w, h = label_bounds[i]
+            point, near = (x+w/2, y+h/2), []
+            for edge, a, b in edges:
+                dx, dy = b[0]-a[0], b[1]-a[1]
+                along = ((point[0]-a[0])*dx + (point[1]-a[1])*dy) / (dx*dx + dy*dy)
+                separation = (point[0]-a[0]-along*dx)**2 + (point[1]-a[1]-along*dy)**2
+                if 0 < along < 1 and separation <= (h/2+4)**2:
+                    near.append((separation, edge))
+            if near:
+                nearest = min(d for d, _ in near)
+                edge, = {edge for d, edge in near if abs(d-nearest) < .0001}
+                content[("edge-label", copy(child), edge)] += 1
+        return tuple(sorted(content.items(), key=repr))
+    except (ValueError, KeyError, ZeroDivisionError, IndexError):
+        return (("geometry", strict),)
+
+
 def markup_content(markup):
     """A visual alternative must retain copy, assigned media and diagram data."""
     content = Counter()
@@ -102,19 +219,14 @@ def markup_content(markup):
         node = pending.pop()
         pending.extend(node["children"])
         if node["tag"] == "drawing":
-            # Bind each label and shape to its local geometry and each arrowhead to
-            # its ordered endpoints. A bag of strings cannot distinguish A → B from B → A.
-            geometry = {"id", "x", "y", "w", "h", "x1", "y1", "x2", "y2",
-                        "from", "to", "head", "points", "form"}
-            content[("drawing", tuple((child["tag"], child["t"], tuple(sorted(
-                (k, v) for k, v in child["a"].items() if k in geometry)))
-                for child in node["children"]))] += 1
+            if drawing := drawing_content(node):
+                content[("drawing", drawing)] += 1
         if node["t"]:
             content[("copy", node["t"] if node["a"].get("role") == "code" else " ".join(node["t"].split()))] += 1
         if node["tag"] == "matrix":
             rows = tuple(tuple(cell["t"] for cell in row["children"]) for row in node["children"])
             content[("matrix", rows)] += 1
-        attributes = tuple(sorted((k, v) for k, v in node["a"].items() if k in data_attrs))
+        attributes = tuple(sorted((k, v) for k, v in node["a"].items() if k in data_attrs)) if node["tag"] not in DRAWING_TAGS else ()
         if attributes:
             content[(node["tag"], attributes)] += 1
         if node["tag"] in {"waterfall", "gantt", "sequence", "sankey"}:
