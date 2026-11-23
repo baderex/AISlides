@@ -17,6 +17,7 @@ from app.domain import Chart
 from app.main import app
 from app.providers import Intelligence, ProviderError
 from app.rendering import chart_marks, contrast
+from app.render_geometry import available_family, fallback_family
 from test_workflow import create, work
 
 
@@ -55,7 +56,8 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     saved = client.get(path).json()
     assert saved["status"] == "FAILED"
     theme = saved["document"]["theme"]
-    assert theme["design"]["heading_font"] == "Georgia"
+    expected_face = available_family("Georgia") or fallback_family("Georgia")
+    assert theme["design"]["heading_font"] == expected_face
     assert client.post(path + "/generate").status_code == 202
     work()
     result = client.get(path).json()
@@ -64,7 +66,7 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     cover, trend, results = result["document"]["slides"]
     assert [s["layout"] for s in (cover, trend, results)] == ["cover", "chart", "research"]
     assert cover["background"] == "#191817"
-    assert next(el for el in cover["elements"] if el.get("text") == cover["title"])["font"] == "Georgia"
+    assert next(el for el in cover["elements"] if el.get("text") == cover["title"])["font"] == expected_face
     chart = next(el for el in trend["elements"] if el["type"] == "chart")
     table = next(el for el in results["elements"] if el["type"] == "table")
     assert table["rows"] == rows and table["fill"] == "#F7F2E8"
