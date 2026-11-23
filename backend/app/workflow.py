@@ -25,11 +25,11 @@ from app.export_review import ReviewBusy, ReviewUnavailable, compare_slide_expor
 from app.imagery import image_configured, render_image, source_web_image
 from app import html_layout
 from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, LayoutMarkup, MarkupError, page_schema
-from app.html_layout.markup import EXHIBIT_DESIGN, ExhibitFrameCopy, RecoveredExhibitFrame
+from app.html_layout.markup import EXHIBIT_DESIGN, ExhibitFrameCopy, RecoveredExhibitFrame, preview_lines
 from app.html_layout.review import design_memory, evaluate_quality, markup_content
 from app.master_artwork import master_artwork
 from app.source_sections import source_packet, terms, web_passage
-from app.presentations import asset_sources, referenced_images
+from app.presentations import asset_sources, draft_payload, referenced_images
 from app.providers import ProviderError
 from app.questions import Choice, Clarification, Option, standard_options
 from app.rendering import flattened
@@ -854,6 +854,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                         request["previous_exhibit_data"] = previous["exhibit_data"]
                 candidate = ai.structured(schema, EXHIBIT_DESIGN if part.exhibit else HTML_DESIGN, request, "html-slide")
             context["html_candidate"] = candidate.model_dump(mode="json")
+            if not previous and (lines := preview_lines(candidate.markup)):
+                events.append(("slide.draft", "Preparing the first layout.", {"index": index, "lines": lines}))
             return "html_measure", state, "REVIEWING", events, None, None
         candidate = schema.model_validate(context["html_candidate"])
         best = context.get("html_best")
@@ -884,6 +886,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                         or candidate.model_dump(exclude={"markup"}) != retained.model_dump(exclude={"markup"})):
                     raise MarkupError("Retain the earlier composition's content, diagram relationships, notes and sources.")
             slide, png = measure(candidate)
+            message = "Reviewing the revised layout." if previous or context.get("coverage_repair") else "Reviewing the first layout."
+            if not start_status(job_id, token, "REVIEWING", "slide.draft", message,
+                                **draft_payload(index, slide.model_dump(mode="json"))):
+                return None
             quality = evaluate_quality(slide, document.slides[:index])
             if quality.hard:
                 raise fit_error(quality.hard)
@@ -1296,6 +1302,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if fixed:
             events.append(("slide.revised", f"Adjusted text fit in {fixed} elements on slide {index + 1}.",
                            {"index": index, "text_elements": fixed}))
+        adjusted = slide.model_dump(mode="json", exclude={"spec"})
+        if adjusted["elements"] != context["draft"]["elements"] or slide.spec and slide.spec.recipe != original_recipe:
+            message = " ".join(event[1] for event in events if event[0] == "slide.revised") or "Reviewing the adjusted layout."
+            if not start_status(job_id, token, "REVIEWING", "slide.draft", message, index=index, slide=adjusted):
+                return None
         part = OutlineItem.model_validate(context["outline"]["slides"][index])
         issues = review_slide_content(ai, slide, part, item, context, png=png if use_vision else None)
         issues.extend(w for w in slide.warnings if w.startswith(("Text may overflow", "Some exhibit cells", "Chart labels")))
@@ -1358,4 +1369,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         stage, status = "review", "REVIEWING"
     else:
         raise ValueError(f"Unknown checkpoint {stage}")
+    if stage == "review":
+        message = "Reviewing the revised draft." if context.get("review_attempted") or context.get("coverage_repair") else "Reviewing the first draft."
+        events.append(("slide.draft", message, draft_payload(context.get("progress_index", len(document.slides)), context["draft"])))
     return stage, state, status, events, changed, version

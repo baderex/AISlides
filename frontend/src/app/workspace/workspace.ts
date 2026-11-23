@@ -5,7 +5,7 @@ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Api, errorMessage } from '../api';
 import { Dialog } from '../dialog';
 import { icons, StudioIcon } from '../icons';
-import { Answer, EditPreview, ExportReview, Presentation, Question, Slide, StudioEvent, Version } from '../models';
+import { Answer, EditPreview, ExportReview, Presentation, Question, ReviewDraft, Slide, StudioEvent, Version } from '../models';
 import { SlideCanvas } from './canvas';
 import { Editor, baseGeometry } from './editor';
 import { ExhibitChange, ExhibitEditor } from './exhibit-editor';
@@ -65,11 +65,50 @@ export class Workspace implements OnDestroy {
     return visual ? spec : null;
   });
   readonly visibleSlides = computed(() => this.preview()?.document.slides ?? this.editor.document()?.slides ?? []);
+  readonly plannedTitles = computed(() => {
+    if (this.preview() || this.item()?.status === 'COMPLETED') return [];
+    return this.item()?.planned_slide_titles ??
+      this.events().find(event => event.type === 'outline.completed')?.payload.outline?.slides.map(slide => slide.title) ?? [];
+  });
+  private streamedDraft = signal<{id: number; draft: ReviewDraft; previous?: Slide} | null>(null);
+  private comparisonEvent = signal<number | null>(null);
+  private reviewEvent = computed(() => Math.max(this.item()?.slide_update_id ?? 0, this.streamedDraft()?.id ?? 0));
+  readonly previousDraft = computed(() => {
+    if (!this.displayedSlot()?.draft?.slide) return undefined;
+    const streamed = this.streamedDraft();
+    return streamed && streamed.id > (this.item()?.slide_update_id ?? 0) ? streamed.previous : this.item()?.previous_review_slide;
+  });
+  readonly comparingDraft = computed(() => !!this.previousDraft() && this.comparisonEvent() === this.reviewEvent());
+  readonly followingReview = signal(true);
+  readonly reviewDraft = computed(() => {
+    const item = this.item(), streamed = this.streamedDraft();
+    if (!item || item.status === 'COMPLETED' || this.preview()) return undefined;
+    return streamed && streamed.id > (item.slide_update_id ?? 0) ? streamed.draft : item.review_draft;
+  });
+  readonly slideSlots = computed(() => {
+    const slides = this.visibleSlides();
+    const titles = this.plannedTitles(), draft = this.reviewDraft();
+    return Array.from({length: Math.max(slides.length, titles.length)}, (_, index) => {
+      const revision = draft?.index === index ? draft : undefined;
+      const slide = revision ? revision.slide : slides.at(index);
+      return {title: slide?.title ?? titles[index], slide, draft: revision};
+    });
+  });
+  private pendingIndex = signal<number | null>(null);
   private previewSlideId = signal<string | null>(null);
-  readonly displayedSlide = computed(() => this.preview()
-    ? this.visibleSlides().find(slide => slide.id === this.previewSlideId()) ?? this.visibleSlides()[0]
-    : this.editor.current());
-  readonly displayedPosition = computed(() => this.visibleSlides().findIndex(slide => slide.id === this.displayedSlide()?.id) + 1);
+  readonly displayedIndex = computed(() => this.preview()
+    ? Math.max(0, this.visibleSlides().findIndex(slide => slide.id === this.previewSlideId()))
+    : this.pendingIndex() ?? Math.max(0, this.activeIndex()));
+  readonly displayedSlot = computed(() => this.slideSlots().at(this.displayedIndex()));
+  readonly displayedSlide = computed(() => this.comparingDraft() ? this.previousDraft() : this.displayedSlot()?.slide);
+  readonly savedSlideSelected = computed(() => !!this.displayedSlide() && !this.displayedSlot()?.draft && !this.preview());
+  readonly canEditSlide = computed(() => this.canEdit() && this.savedSlideSelected());
+  readonly reviewFeedback = computed(() => {
+    const draft = this.displayedSlot()?.draft;
+    if (!draft) return '';
+    const revision = this.events().filter(event => event.type === 'slide.revised' && event.payload.index === draft.index).at(-1);
+    return this.item()?.review_feedback || revision?.payload.issue || revision?.payload.issues?.join(' ') || '';
+  });
   readonly canvasArea = viewChild<ElementRef<HTMLElement>>('canvasArea');
   readonly agentScroll = viewChild<ElementRef<HTMLElement>>('agentScroll');
   private exhibitEditor = viewChild(ExhibitEditor);
@@ -139,6 +178,10 @@ export class Workspace implements OnDestroy {
     this.events.set([]);
     this.questions.set([]);
     this.preview.set(null);
+    this.pendingIndex.set(null);
+    this.streamedDraft.set(null);
+    this.comparisonEvent.set(null);
+    this.followingReview.set(true);
     this.editor.active.set(null);
     this.editor.selected.set(null);
     this.editor.document.set(null);
@@ -157,8 +200,18 @@ export class Workspace implements OnDestroy {
       if (this.stream !== stream) return;
       const event = JSON.parse(message.data) as StudioEvent;
       if (event.id <= (this.events().at(-1)?.id ?? 0)) return;
+      if (event.type === 'slide.draft' && event.payload.index !== undefined) {
+        const {index, message, slide, lines} = event.payload;
+        if (event.id > (this.item()?.slide_update_id ?? 0)) {
+          const previous = this.reviewDraft();
+          this.streamedDraft.set({id: event.id, draft: {index, message, slide, lines}, previous: previous?.index === index ? previous.slide : undefined});
+          if (this.followingReview() && !this.canEdit()) this.pendingIndex.set(index);
+        }
+        // The timeline needs only the description, even for a long deck with many revisions.
+        event.payload = {index, message};
+      }
       this.events.update(items => [...items.slice(-499), event]);
-      if (['generation', 'question', 'slide', 'agent'].some(prefix => event.type.startsWith(prefix))) this.scheduleRefresh();
+      if (['generation', 'question', 'outline', 'slide', 'agent'].some(prefix => event.type.startsWith(prefix))) this.scheduleRefresh();
       this.scrollAgent(false);
     };
   }
@@ -175,6 +228,16 @@ export class Workspace implements OnDestroy {
       const batch = current.status === 'WAITING_FOR_USER' ? await this.api.questions(id) : null;
       if (this.sequence !== sequence || id !== this.id) return false;
       if (!this.editor.dirty()) this.editor.accept(current.document, reset);
+      if (current.review_draft && this.followingReview() && !this.editor.dirty() &&
+          (reset || !this.canEdit()) && (current.slide_update_id ?? 0) >= (this.streamedDraft()?.id ?? 0)) {
+        this.pendingIndex.set(current.review_draft.index);
+      }
+      const pending = this.pendingIndex();
+      if (pending !== null && current.review_draft?.index !== pending) {
+        const slide = current.document.slides[pending];
+        if (slide) this.editor.activate(slide.id);
+        if (slide || pending >= (current.planned_slide_titles?.length ?? 0)) this.pendingIndex.set(null);
+      }
       this.item.set(this.editor.dirty() && this.item() ? {...current, revision: this.item()!.revision} : current);
       const questions = batch?.waiting ? batch.questions : [];
       const openingQuestions = questions.length > 0 && this.questions().length === 0;
@@ -290,7 +353,7 @@ export class Workspace implements OnDestroy {
 
   async chat() {
     const text = this.instruction.trim();
-    if (text.length < 3 || !this.canEdit()) return;
+    if (text.length < 3 || !this.canEdit() || (this.chatScope === 'slide' && !this.savedSlideSelected())) return;
     await this.action(async () => {
       await this.persist();
       const current = this.editor.current()?.id;
@@ -305,9 +368,25 @@ export class Workspace implements OnDestroy {
     });
   }
 
-  selectThumbnail(id: string) {
-    if (this.preview()) this.previewSlideId.set(id);
-    else this.editor.activate(id);
+  selectThumbnail(index: number) {
+    const {slide, draft} = this.slideSlots()[index];
+    this.comparisonEvent.set(null);
+    this.followingReview.set(false);
+    this.pendingIndex.set(slide && !draft ? null : index);
+    if (!slide || draft) return;
+    if (this.preview()) this.previewSlideId.set(slide.id);
+    else this.editor.activate(slide.id);
+  }
+
+  followReview() {
+    this.followingReview.set(true);
+    this.comparisonEvent.set(null);
+    const draft = this.reviewDraft();
+    if (draft) this.pendingIndex.set(draft.index);
+  }
+
+  compareDraft() {
+    this.comparisonEvent.set(this.comparingDraft() ? null : this.reviewEvent());
   }
 
   async applyPreview() {
@@ -455,7 +534,7 @@ export class Workspace implements OnDestroy {
       return;
     }
     const target = event.target as HTMLElement | null;
-    if (this.modal() || this.preview() || target?.matches('input, textarea, select, [contenteditable]') || !this.canEdit()) return;
+    if (this.modal() || target?.matches('input, textarea, select, [contenteditable]') || !this.canEditSlide()) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
       event.preventDefault();
       if (event.shiftKey) this.editor.redo(); else this.editor.undo();

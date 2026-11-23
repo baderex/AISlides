@@ -46,8 +46,50 @@ def summary(item):
             "aspect_ratio": item.document["aspect_ratio"], "thumbnail": (item.document["slides"] or [None])[0]}
 
 
-def details(item):
-    return {**summary(item), "document": read_document(item.document).model_dump(mode="json"), "request": item.request}
+def draft_payload(index, slide):
+    return {"index": index, "slide": {key: value for key, value in slide.items() if key != "spec"}}
+
+
+def details(db, item):
+    result = {**summary(item), "document": read_document(item.document).model_dump(mode="json"), "request": item.request}
+    if item.status not in {"GENERATING", "REVIEWING", "CREATED", "FAILED", "CANCELLED"}:
+        return result
+    job = latest_job(db, item.id)
+    if not job:
+        return result
+    context = job.context
+    plan = context.get("html_plan") or context.get("outline")
+    if not plan:
+        return result
+    result["planned_slide_titles"] = [part["title"] for part in plan["slides"]]
+    updates = list(db.scalars(select(StudioEvent).where(StudioEvent.job_id == job.id,
+                       StudioEvent.type.in_(("slide.draft", "slide.completed"))).order_by(StudioEvent.id.desc()).limit(2)))
+    update = updates[0] if updates else None
+    result["slide_update_id"] = update.id if update else 0
+    if update and update.type == "slide.draft":
+        result["review_draft"] = update.payload
+        prior = updates[1] if len(updates) > 1 else None
+        previous_slide = None
+        if prior and prior.type == "slide.draft" and prior.payload["index"] == update.payload["index"]:
+            previous_slide = prior.payload.get("slide")
+        elif context.get("draft"):
+            previous_slide = draft_payload(update.payload["index"], context["draft"])["slide"]
+        if previous_slide and (slide := update.payload.get("slide")) and (
+                slide["background"] != previous_slide["background"] or slide["elements"] != previous_slide["elements"]):
+            result["previous_review_slide"] = previous_slide
+    elif draft := context.get("draft"):
+        # Recover a renderable draft from jobs saved before preview events existed.
+        index = context.get("progress_index", result["slide_count"])
+        result["review_draft"] = {**draft_payload(index, draft), "message": "Saved draft"}
+    elif markup := (context.get("html_candidate") or context.get("layout_retry") or {}).get("markup"):
+        from app.html_layout.markup import preview_lines
+        if lines := preview_lines(markup):
+            result["review_draft"] = {"index": context.get("progress_index", result["slide_count"]),
+                                      "message": "Saved draft copy", "lines": lines}
+    if "review_draft" in result:
+        result["review_feedback"] = (job.error or (context.get("layout_retry") or {}).get("error")
+                                     or " ".join(context.get("review_issues", [])))
+    return result
 
 
 def assets_for(db, owner_id, ids):

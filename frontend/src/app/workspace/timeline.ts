@@ -9,7 +9,7 @@ type TimelineEntry =
 
 const ROUTINE_EVENTS = new Set([
   'generation.started', 'generation.paused', 'generation.resumed', 'question.requested',
-  'agent.started', 'agent.progress', 'slide.started', 'slide.revised', 'slide.completed',
+  'agent.started', 'agent.progress', 'slide.started', 'slide.draft', 'slide.revised', 'slide.completed',
 ]);
 
 function isRoutine(event: StudioEvent): boolean {

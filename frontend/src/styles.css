@@ -349,6 +349,11 @@ input[type=color]:disabled { cursor: default; opacity: .5; }
 .canvas-stage { display: grid; align-items: safe center; justify-items: safe center; flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: 15px; }
 .canvas-frame { width: max(140px, calc(min(100%, 1100px) * var(--zoom, 1))); box-shadow: 0 8px 30px #26214024; }
 .canvas-frame.portrait { width: max(140px, calc(min(100%, 65dvh) * var(--zoom, 1))); }
+.planned-slide { background: white; }
+.canvas-frame.planned-slide { display: grid; place-items: center; padding: 6%; text-align: center; color: var(--muted); }
+.planned-slide h2 { font-size: clamp(16px, 2vw, 26px); overflow-wrap: anywhere; }
+.planned-slide p { margin-top: 6px; font-size: 13px; }
+.planned-slide .draft-copy { justify-self: stretch; align-self: stretch; min-height: 0; overflow: auto; text-align: start; }
 .canvas-empty { text-align: center; color: var(--muted); padding: 16px; border-radius: 12px; }
 .canvas-empty h2 { font-size: 21px; }
 .canvas-empty p { font-size: 13px; margin: 5px 0 10px; }

@@ -362,7 +362,7 @@ def create_presentation(data: CreatePresentation, owner_id: str = owner):
         emit(db, item, "conversation.user", data.prompt)
         if data.generate:
             job_id = queue_generation(db, item).id
-        result = details(item)
+        result = details(db, item)
     if data.generate:
         notify(job_id)
     return result
@@ -371,7 +371,7 @@ def create_presentation(data: CreatePresentation, owner_id: str = owner):
 @api.get("/presentations/{item_id}")
 def presentation(item_id: str, owner_id: str = owner):
     with Session() as db:
-        return details(item_for(db, item_id, owner_id))
+        return details(db, item_for(db, item_id, owner_id))
 
 
 @api.patch("/presentations/{item_id}")
@@ -386,7 +386,7 @@ def save_presentation(item_id: str, data: Save, owner_id: str = owner):
                 raise HTTPException(422, "A branded presentation uses the original template aspect ratio.")
         validate_document_assets(db, owner_id, data.document)
         persist(db, item, data.document, data.label)
-        return details(item)
+        return details(db, item)
 
 
 @api.delete("/presentations/{item_id}", status_code=204, response_class=Response)
@@ -423,7 +423,7 @@ def duplicate(item_id: str, owner_id: str = owner):
         db.add(item)
         db.flush()
         persist(db, item, doc, "Duplicated presentation")
-        return details(item)
+        return details(db, item)
 
 
 @api.post("/presentations/{item_id}/generate", status_code=202)
@@ -453,7 +453,7 @@ def cancel(item_id: str, owner_id: str = owner):
         job.lease_owner = None
         item.status, item.updated = "CANCELLED", now()
         emit(db, item, "generation.cancelled", "Generation stopped. Completed slides were kept.", job)
-        return details(item)
+        return details(db, item)
 
 
 @api.get("/jobs/{job_id}")
@@ -529,7 +529,7 @@ def save_slide(item_id: str, slide_id: str, data: SaveSlide, owner_id: str = own
         document = read_document(document.model_dump(mode="json"))
         validate_document_assets(db, owner_id, document)
         persist(db, item, document, "Slide edit")
-        return details(item)
+        return details(db, item)
 
 
 @api.post("/presentations/{item_id}/slides/{slide_id}/exhibit", response_model=Slide)
@@ -647,7 +647,7 @@ def restore(item_id: str, revision: int, expected: int, owner_id: str = owner):
         if not saved:
             raise HTTPException(404, "Version not found.")
         persist(db, item, read_document(saved.document), f"Restored version {revision}")
-        return details(item)
+        return details(db, item)
 
 
 @api.post("/presentations/{item_id}/skill", status_code=201)
@@ -695,7 +695,7 @@ def apply_chat(item_id: str, data: ApplyEdit, owner_id: str = owner):
         validate_document_assets(db, owner_id, updated)
         persist(db, item, updated, "AI-assisted edit")
         emit(db, item, "conversation.assistant", "Applied the proposed slide edits.")
-        return details(item)
+        return details(db, item)
 
 
 def download(raw, media_type, title, extension):

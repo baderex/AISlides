@@ -237,3 +237,17 @@ def parse_markup(value):
     if sum(1 for _ in root.iter()) > 300:
         raise MarkupError("Expected one page with at most 300 nodes")
     return parsed
+
+
+def preview_lines(markup):
+    """Read draft copy while Chromium is preparing its slide geometry."""
+    try:
+        root = parse_markup(markup)
+    except (MarkupError, ET.ParseError):
+        return []
+    def lines(node):
+        if node["t"]:
+            yield node["t"]
+        for child in node["children"]:
+            yield from lines(child)
+    return list(lines(root))

@@ -58,13 +58,30 @@ def test_guided_workflow_and_native_export():
     answers = {"answers": [{"question_id": "audience", "option_ids": ["executive"]},
                            {"question_id": "visual_direction", "option_ids": ["editorial"]}]}
     assert client.post(f"{path}/answers", json=answers).status_code == 202
-    work(5)
+    work(3)
+    planned = client.get(path).json()
+    assert planned["status"] == "GENERATING" and planned["slide_count"] == 0
+    outline = next(event["payload"]["outline"] for event in fetch_events(planned["id"], 0)
+                   if event["type"] == "outline.completed")
+    assert planned["planned_slide_titles"] == [slide["title"] for slide in outline["slides"]]
+    work(1)
+    reviewing = client.get(path).json()
+    assert reviewing["status"] == "REVIEWING" and reviewing["slide_count"] == 0
+    assert reviewing["review_draft"]["index"] == 0 and reviewing["review_draft"]["slide"]["elements"]
+    stopped = client.post(f"{path}/cancel").json()
+    assert stopped["planned_slide_titles"] == planned["planned_slide_titles"]
+    assert stopped["review_draft"] == reviewing["review_draft"]
+    assert client.post(f"{path}/generate").status_code == 202
+    work(1)
     partial = client.get(path).json()
     assert partial["slide_count"] == 1
+    assert partial["planned_slide_titles"] == planned["planned_slide_titles"]
     assert partial["status"] == "GENERATING"
+    assert "review_draft" not in partial
     work()
     final = client.get(path).json()
     assert final["slide_count"] == 3 and final["status"] == "COMPLETED"
+    assert "planned_slide_titles" not in final
     assert final["document"]["theme"]["font"] == "Manrope"
     assert final["document"]["theme"]["design"]["heading_font"] == "Source Serif 4"
     stream = fetch_events(final["id"], 0)

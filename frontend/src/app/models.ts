@@ -105,7 +105,11 @@ export interface CreatePresentation {
   prompt: string; aspect_ratio: Aspect;
   skill_id: string | null; asset_ids: string[]; research: boolean | null; generate_images: boolean; generate: boolean;
 }
-export interface Presentation extends PresentationSummary { document: Deck; request: CreatePresentation }
+export interface ReviewDraft { index: number; message: string; slide?: Slide; lines?: string[] }
+export interface Presentation extends PresentationSummary {
+  document: Deck; request: CreatePresentation; planned_slide_titles?: string[];
+  slide_update_id?: number; review_draft?: ReviewDraft; previous_review_slide?: Slide; review_feedback?: string;
+}
 export interface Skill {
   id: string; schema_version: 1; name: string; category: string; description: string; tags: string[]; formats: Aspect[];
   audience: string; instructions: string; recipes: Layout[]; theme: Theme; preview: 'strategy' | 'pitch' | 'research' | 'product' | 'data' | 'education';
@@ -122,7 +126,7 @@ export interface Asset { id: string; name: string; media_type: string; size: num
 export interface Version { revision: number; label: string; created: string }
 export interface StudioEvent {
   id: number; type: string; timestamp: string; job_id: string | null; presentation_id: string;
-  payload: { message: string; slide_id?: string; index?: number; outline?: {title: string; slides: { title: string }[]}; sources?: Source[]; uncertainties?: string[]; warnings?: string[] };
+  payload: { message: string; slide_id?: string; index?: number; slide?: Slide; lines?: string[]; issue?: string; issues?: string[]; outline?: {title: string; slides: { title: string }[]}; sources?: Source[]; uncertainties?: string[]; warnings?: string[] };
 }
 interface QuestionBase { id: string; title: string; description: string; required: boolean; allow_custom_answer: boolean }
 export interface Option { id: string; label: string; description: string; swatch: string | null }

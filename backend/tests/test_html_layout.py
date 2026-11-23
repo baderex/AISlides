@@ -14,6 +14,7 @@ from app.db import Job, PresentationRecord, Session
 from app.deck_design import baseline_rules, DeckDesignSpec
 from app.design import style_chart
 from app.domain import Chart, Document, Shape, Theme
+from app.events import fetch_events
 from app.export_review import compare_rasters
 from app.powerpoint import to_pptx
 from app.html_layout import compose
@@ -433,6 +434,16 @@ def test_hard_visual_defects_require_a_valid_repair(monkeypatch, repair_valid, e
     assert result["status"] == ("COMPLETED" if repair_valid else "FAILED")
     assert result["slide_count"] == int(repair_valid)
     assert len(attempts) == (2 if repair_valid else 3)
+    drafts = [event["payload"] for event in fetch_events(result["id"], 0) if event["type"] == "slide.draft"]
+    assert drafts[0]["lines"] == ["Coverage"]
+    layouts = [draft["slide"] for draft in drafts if "slide" in draft]
+    assert len(layouts) == len(attempts)
+    if repair_valid and not export_only:
+        assert layouts[0]["elements"][0]["color"] != layouts[-1]["elements"][0]["color"]
+    if not repair_valid:
+        assert len(result["planned_slide_titles"]) == 1
+        assert result["review_draft"]["slide"] == layouts[-1]
+        assert "contrast" in result["review_feedback"]
 
 
 @pytest.mark.parametrize("improves", [True, False])

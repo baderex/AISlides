@@ -7,7 +7,7 @@
         <div><h1>{{ presentation.title }}</h1><div class="workspace-status"><span [class.ready]="presentation.status === 'COMPLETED'" [class.failed]="presentation.status === 'FAILED'"></span><span>{{ statusLabel() }}</span> @if (canEdit()) { · <span role="status">{{ saving() ? 'Saving…' : saveFailed() ? 'Save failed' : editor.dirty() ? 'Unsaved changes' : 'Saved' }}</span> }</div></div>
       </div>
       <div class="workspace-actions">
-        <button type="button" class="button" [disabled]="!editor.current()" (click)="presenting.set(true)"><lucide-icon [img]="i.MonitorPlay" [size]="16" /><span>Present</span></button>
+        <button type="button" class="button" [disabled]="!savedSlideSelected()" (click)="presenting.set(true)"><lucide-icon [img]="i.MonitorPlay" [size]="16" /><span>Present</span></button>
         <button type="button" class="icon-button version-button" title="Version history" aria-label="Version history" (click)="versionsOpen()"><lucide-icon [img]="i.History" [size]="18" /></button>
         <button type="button" class="button save-button" [disabled]="!canEdit() || !editor.dirty() || busy()" (click)="save()"><lucide-icon [img]="i.Save" [size]="16" /> <span>Save</span></button>
         <button type="button" class="primary" [disabled]="!editor.current()" (click)="modal.set('export')"><lucide-icon [img]="i.Download" [size]="17" /><span>Export</span></button>
@@ -46,7 +46,7 @@
             <form class="chat-form" (ngSubmit)="chat()">
               <textarea name="instruction" [(ngModel)]="instruction" rows="2" maxlength="2000" aria-label="Ask for a slide edit" placeholder="Ask the agent to edit your slides…"></textarea>
               <div><select name="scope" [(ngModel)]="chatScope" aria-label="Edit scope"><option value="slide">This slide</option><option value="deck">Entire deck</option></select>
-                <button type="submit" class="primary" aria-label="Send edit request" [disabled]="busy() || instruction.trim().length < 3"><lucide-icon [img]="i.ArrowUp" [size]="17" /></button>
+                <button type="submit" class="primary" aria-label="Send edit request" [disabled]="busy() || instruction.trim().length < 3 || (chatScope === 'slide' && !savedSlideSelected())"><lucide-icon [img]="i.ArrowUp" [size]="17" /></button>
               </div>
             </form>
           } @else if (!canEdit()) {
@@ -64,13 +64,13 @@
           <button type="button" class="icon-button" title="Undo" aria-label="Undo" [disabled]="!canEdit() || !editor.history().length || !!preview()" (click)="editor.undo()"><lucide-icon [img]="i.Undo2" [size]="17" /></button>
           <button type="button" class="icon-button" title="Redo" aria-label="Redo" [disabled]="!canEdit() || !editor.future().length || !!preview()" (click)="editor.redo()"><lucide-icon [img]="i.Redo2" [size]="17" /></button>
           <span class="tool-divider"></span>
-          <button type="button" class="toolbar-button" [disabled]="!canEdit() || !editor.current() || !!preview()" (click)="addText()"><lucide-icon [img]="i.Type" [size]="17" /><span>Text</span></button>
-          <button type="button" class="toolbar-button" [disabled]="!canEdit() || !editor.current() || !!preview()" (click)="addShape()"><lucide-icon [img]="i.Square" [size]="16" /><span>Shape</span></button>
+          <button type="button" class="toolbar-button" [disabled]="!canEditSlide()" (click)="addText()"><lucide-icon [img]="i.Type" [size]="17" /><span>Text</span></button>
+          <button type="button" class="toolbar-button" [disabled]="!canEditSlide()" (click)="addShape()"><lucide-icon [img]="i.Square" [size]="16" /><span>Shape</span></button>
           <input #imageInput type="file" hidden accept=".png,.jpg,.jpeg,.webp" (change)="addImage($event)" />
-          <button type="button" class="toolbar-button" [disabled]="!canEdit() || !editor.current() || !!preview()" (click)="imageInput.click()"><lucide-icon [img]="i.ImagePlus" [size]="17" /><span>Image</span></button>
+          <button type="button" class="toolbar-button" [disabled]="!canEditSlide()" (click)="imageInput.click()"><lucide-icon [img]="i.ImagePlus" [size]="17" /><span>Image</span></button>
           @if (displayedSlide(); as slide) {
-            <label class="color-tool" title="Slide background"><input aria-label="Slide background" type="color" [value]="slide.background" [disabled]="!canEdit() || !!preview()" (change)="editBackground($any($event.target).value)" /><span>Background</span></label>
-            @if (canEdit() && !preview() && slide.elements.length) {
+            <label class="color-tool" title="Slide background"><input aria-label="Slide background" type="color" [value]="slide.background" [disabled]="!canEditSlide()" (change)="editBackground($any($event.target).value)" /><span>Background</span></label>
+            @if (canEditSlide() && slide.elements.length) {
               <select class="element-picker" aria-label="Select slide element" [value]="editor.selected() ?? ''"
                 (change)="editor.selected.set($any($event.target).value || null)">
                 <option value="">Elements</option>
@@ -81,7 +81,7 @@
             }
           }
           <div class="toolbar-end">
-            @if (canEdit() && !preview() && exhibit()) {
+            @if (canEditSlide() && exhibit()) {
               <button type="button" class="toolbar-button" [disabled]="busy()" (click)="openExhibit()">Edit exhibit</button>
             }
             <button type="button" class="icon-button" title="Snap to grid" aria-label="Snap to grid" [attr.aria-pressed]="snap()" [class.toggled]="snap()" (click)="snap.set(!snap())"><lucide-icon [img]="i.SquareDashed" [size]="18" /></button>
@@ -91,15 +91,19 @@
         <div class="editing-body">
           <aside class="thumbnail-rail" aria-label="Slides">
             <div class="thumbnail-heading"><strong>Slides</strong><button type="button" class="icon-button" aria-label="Add slide" title="Add slide" [disabled]="!canEdit() || !!preview()" (click)="editor.addSlide()"><lucide-icon [img]="i.Plus" [size]="17" /></button></div>
-            @for (slide of visibleSlides(); track slide.id; let index = $index) {
-              <button class="thumbnail" type="button" [class.active]="slide.id === displayedSlide()?.id" [attr.aria-pressed]="slide.id === displayedSlide()?.id"
-                [attr.aria-label]="'Slide ' + (index + 1) + ': ' + slide.title" [attr.draggable]="canEdit() && !preview()"
-                (click)="selectThumbnail(slide.id)" (dragstart)="setDragSlide(slide.id)" (dragover)="$event.preventDefault()" (drop)="dropSlide($event, index)">
-                <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" [artwork]="artwork(slide)" />
-                <span><b>{{ index + 1 }}</b>{{ slide.title }}</span>
+            @for (slot of slideSlots(); track (plannedTitles().length ? $index : slot.slide?.id); let index = $index) {
+              <button class="thumbnail" type="button" [class.active]="index === displayedIndex()" [attr.aria-pressed]="index === displayedIndex()"
+                [attr.aria-label]="'Slide ' + (index + 1) + ': ' + slot.title + (slot.draft ? ', draft' : slot.slide ? '' : ', planned')" [attr.draggable]="canEdit() && !preview() && !!slot.slide && !slot.draft"
+                (click)="selectThumbnail(index)" (dragstart)="slot.slide && setDragSlide(slot.slide.id)" (dragover)="$event.preventDefault()" (drop)="slot.slide && !slot.draft && dropSlide($event, index)">
+                @if (slot.slide; as slide) {
+                  <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" [artwork]="artwork(slide)" />
+                } @else {
+                  <div class="slide-canvas planned-slide" [style.aspect-ratio]="presentation.aspect_ratio.replace(':', '/')"></div>
+                }
+                <span><b>{{ index + 1 }}</b>{{ slot.draft ? 'Draft · ' : '' }}{{ slot.title }}</span>
               </button>
             }
-            @if (editor.current() && canEdit() && !preview()) {
+            @if (canEditSlide()) {
               <div class="thumbnail-controls">
                 <button type="button" class="icon-button" title="Move slide up" aria-label="Move slide up" [disabled]="activeIndex() < 1" (click)="moveCurrent(-1)"><lucide-icon [img]="i.ArrowUp" [size]="15" /></button>
                 <button type="button" class="icon-button" title="Move slide down" aria-label="Move slide down" [disabled]="activeIndex() >= (editor.document()?.slides?.length ?? 0) - 1" (click)="moveCurrent(1)"><lucide-icon [img]="i.ArrowDown" [size]="15" /></button>
@@ -107,10 +111,21 @@
                 <button type="button" class="icon-button" title="Delete slide" aria-label="Delete slide" (click)="editor.removeSlide()"><lucide-icon [img]="i.Trash2" [size]="15" /></button>
               </div>
             }
-            @if (!visibleSlides().length) { <p class="quiet thumb-empty">Slides will appear here.</p> }
+            @if (!slideSlots().length) { <p class="quiet thumb-empty">Slides will appear here.</p> }
           </aside>
           <div class="canvas-area" #canvasArea>
             @if (preview()) { <div class="preview-strip">Previewing proposed edits</div> }
+            @if (displayedSlot()?.draft; as draft) {
+              <div class="preview-strip">
+                <span role="status">Slide {{ draft.index + 1 }} · {{ comparingDraft() ? 'Previous draft' : draft.message }}</span>
+                @if (previousDraft()) {
+                  <button type="button" class="toolbar-button" (click)="compareDraft()">{{ comparingDraft() ? 'Show latest draft' : 'Show previous draft' }}</button>
+                }
+              </div>
+              @if (reviewFeedback(); as feedback) {
+                <details class="slide-warnings"><summary>Review feedback</summary><p>{{ feedback }}</p></details>
+              }
+            }
             @if (displayedSlide()?.warnings; as warnings) {
               @if (warnings.length === 1) { <p class="slide-warnings" role="status">{{ warnings[0] }}</p> }
               @if (warnings.length > 1) {
@@ -121,7 +136,7 @@
               }
             }
             @if (editor.element(); as element) {
-              @if (canEdit() && !preview()) {
+              @if (canEditSlide()) {
                 <div class="element-toolbar" aria-label="Selected element controls">
                   @if (element.type === 'text') {
                     <button type="button" class="toolbar-button" (click)="openText(element.id)"><lucide-icon [img]="i.Type" [size]="15" /> Edit text</button>
@@ -145,9 +160,18 @@
               @if (displayedSlide(); as slide) {
                 <div class="canvas-frame" [style.--zoom]="zoom() / 100" [class.portrait]="presentation.aspect_ratio === '1:1'">
                   <studio-canvas [slide]="slide" [aspect]="presentation.aspect_ratio" [artwork]="artwork(slide)"
-                    [editable]="canEdit() && !preview()" [selected]="editor.selected()" [snap]="snap()"
+                    [editable]="canEditSlide()" [selected]="editor.selected()" [snap]="snap()"
                     (selection)="editor.selected.set($event)" (textEdit)="openText($event)"
                     (transform)="editor.updateElement($event.id, $event.change)" />
+                </div>
+              } @else if (displayedSlot(); as slot) {
+                <div class="canvas-frame planned-slide" [style.--zoom]="zoom() / 100" [class.portrait]="presentation.aspect_ratio === '1:1'"
+                  [style.aspect-ratio]="presentation.aspect_ratio.replace(':', '/')">
+                  @if (slot.draft?.lines; as lines) {
+                    <div class="draft-copy">@for (line of lines; track $index) { <p>{{ line }}</p> }</div>
+                  } @else {
+                    <div><h2>{{ slot.title }}</h2><p role="status">{{ presentation.status === 'FAILED' || presentation.status === 'CANCELLED' ? 'Planned slide · Generation stopped' : 'Awaiting slide content' }}</p></div>
+                  }
                 </div>
               } @else {
                 <div class="canvas-empty">
@@ -159,7 +183,11 @@
               }
             </div>
             <div class="canvas-status">
-              <span>{{ displayedPosition() }} / {{ visibleSlides().length }}</span>
+              <span>{{ displayedSlot() ? displayedIndex() + 1 : 0 }} / {{ slideSlots().length }}</span>
+              @if (plannedTitles().length && !canEdit()) {
+                <button type="button" class="toolbar-button" [attr.aria-pressed]="followingReview()"
+                  (click)="followingReview() ? followingReview.set(false) : followReview()">{{ followingReview() ? 'Following live review' : 'Follow live review' }}</button>
+              }
               <span class="tool-divider"></span>
               <button type="button" class="icon-button" aria-label="Zoom out" (click)="zoomBy(-10)" [disabled]="zoom() <= 25"><lucide-icon [img]="i.Minus" [size]="16" /></button>
               <button type="button" class="zoom-value" aria-label="Reset zoom" (click)="zoom.set(100)">{{ zoom() }}%</button>
@@ -263,7 +291,7 @@
     <div class="menu-list">
       <button type="button" [disabled]="!editor.current() || busy()" (click)="duplicate()"><lucide-icon [img]="i.Copy" [size]="19" /><span><strong>Duplicate presentation</strong></span></button>
       <button type="button" [disabled]="!editor.current() || busy()" (click)="saveSkill()"><lucide-icon [img]="i.Layers3" [size]="19" /><span><strong>Save as a skill</strong></span></button>
-      @if (editor.current(); as slide) {
+      @if (savedSlideSelected() && editor.current(); as slide) {
         <a target="_blank" rel="noopener noreferrer" [href]="slidePreview(slide.id)"><lucide-icon [img]="i.Maximize" [size]="19" /><span><strong>Open slide preview</strong></span></a>
       }
       <button type="button" class="danger-text" (click)="modal.set('delete')"><lucide-icon [img]="i.Trash2" [size]="19" /><span><strong>Delete presentation</strong></span></button>
