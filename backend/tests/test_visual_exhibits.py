@@ -365,6 +365,19 @@ def test_native_pdf_conversion_can_preserve_the_exhibit_evidence_annotation():
     assert "ending-total" in reader.pages[0]["/Annots"][0].get_object()["/Contents"]
 
 
+def test_sequence_local_actions_return_to_the_same_lifeline():
+    part = OutlineItem(title="Prepare the verifier", layout="process")
+    content = SlideContent(title=part.title, visual={"type":"sequence-diagram", "participants":["SPA","Server"],
+        "messages":[{"source":0, "target":0, "label":"Generate verifier"}, {"source":0, "target":1, "label":"Authorize"}]})
+    deck = Document(title=part.title, aspect_ratio="1:1")
+    slide = build_slide(part, content, deck, 0, set())
+    lines = {el.element_key:el for el in slide.elements if isinstance(el, Line)}
+    outgoing, returning = (lines["sequence:message:0:" + suffix] for suffix in ("out","connector"))
+    assert (outgoing.direction, returning.direction, returning.arrows) == ("right", "left", "end")
+    assert outgoing.x == returning.x and outgoing.y < returning.y
+    assert lines["sequence:message:1:connector"].direction == "right"
+
+
 @mark.parametrize("kind", ["ranked-bar", "waterfall", "decision-matrix", "architecture", "roadmap", "sankey"])
 def test_semantic_recipe_candidates_change_layout_and_share_element_ids(kind):
     part = OutlineItem(title="Compare the exhibit layouts", layout=VISUAL_LAYOUTS[kind])

@@ -10,14 +10,14 @@ from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 from sqlalchemy import select
 
-from app.db import Job, Session
+from app.db import Job, PresentationRecord, Session
 from app.deck_design import baseline_rules, DeckDesignSpec
 from app.design import style_chart
 from app.domain import Chart, Document, Shape, Theme
 from app.export_review import compare_rasters
 from app.powerpoint import to_pptx
 from app.html_layout import compose
-from app.html_layout.markup import PagePlan
+from app.html_layout.markup import MarkupError, PagePlan, parse_markup
 from app.main import app
 from app.providers import Intelligence, ProviderError
 from app.queue import claim
@@ -43,6 +43,19 @@ def test_divider_in_end_aligned_column_uses_available_width():
     assert full.x + full.w == pytest.approx(short.x + short.w)
 
 
+def test_col_geometry_exports_as_native_shapes_and_a_directed_connector():
+    slide, _ = compose('<page><col grow="1"><text>Browser SPA</text>'
+                       '<box id="spa" x="5" y="30" w="20" h="20"/>'
+                       '<box id="api" x="75" y="30" w="20" h="20"/>'
+                       '<arrow x1="25" y1="40" x2="75" y2="40" from="spa:right" to="api:left"/>'
+                       '</col></page>', "Architecture", PALETTE, "1:1")
+    title, spa, api, arrow = slide.elements
+    assert title.text == "Browser SPA" and arrow.arrows == "end"
+    assert (arrow.start_anchor.shape_id, arrow.end_anchor.shape_id) == (spa.id, api.id)
+    with pytest.raises(MarkupError, match="Unexpected <script> inside <col>"):
+        parse_markup("<page><col><script/></col></page>")
+
+
 def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     item = SimpleNamespace(request={"prompt": "Compare error correction methods"})
     sources = [{"id": key, "excerpt": key * 200} for key in ("brief", "history", "hardware")]
@@ -56,6 +69,46 @@ def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     for ids in (None, ["missing"]):
         assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": ids}))["sources"] == sources
     assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": []}))["sources"] == sources[:1]
+
+
+def test_retry_legacy_architecture_checkpoint_keeps_diagram_and_finished_cover(monkeypatch):
+    client = TestClient(app)
+    path = create(client, "A square OAuth deck", aspect_ratio="1:1", research=False)
+    visual = {"type":"architecture", "nodes":[{"id":key, "label":label} for key, label in
+              [("spa","Browser SPA"), ("auth","Authorization endpoint"), ("token","Token endpoint"), ("api","API")]],
+              "edges":[{"source":a, "target":b, "label":label} for a,b,label in [
+                  ("spa","auth","Redirect"), ("auth","spa","Authorization code"), ("spa","token","Code and verifier"),
+                  ("token","spa","Access token"), ("spa","api","Bearer token")]]}
+    with Session.begin() as db:
+        job = db.scalar(select(Job))
+        item = db.get(PresentationRecord, job.presentation_id)
+        item.status = "FAILED"
+        source = {"id":"spec", "title":"PKCE", "excerpt":"The client submits the verifier."}
+        item.document = {**item.document, "slides":[{"id":"cover", "title":"OAuth", "elements":[]}], "sources":[source]}
+        job.state, job.checkpoint = "failed", "html_slide"
+        job.context = {"layout_engine":"html", "sources":[source], "intent":{}, "progress_index":1,
+                       "usage":{"input":68016,"output":13059,"estimated_cost":.24},
+                       "html_plan":{"title":"OAuth", "slides":[{"title":"OAuth","direction":"Cover"},
+                           {"title":"Architecture", "direction":"Show the endpoints", "exhibit":"architecture"}]},
+                       "layout_retry":{"attempt":2, "error":"Use exactly one exhibit frame for a planned exhibit, and none otherwise.",
+                                       "markup":"<page><col><text>Public client</text></col></page>", "exhibit_data":visual}}
+    calls = []
+    def recover(self, schema, task, data, stage, image=None):
+        calls.append(schema.__name__)
+        assert data["exhibit_data"] == visual and "outline" not in data and self.usage["attempt_start_tokens"] == 81075
+        return schema(caption="Public client", sources=[1], notes="Protocol reference")
+    monkeypatch.setattr(Intelligence, "structured", recover)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    assert client.post(path + "/generate").status_code == 202
+    work()
+    item = client.get(path).json()
+    assert calls == ["RecoveredExhibitFrame"]
+    assert item["status"] == "COMPLETED"
+    cover, diagram = item["document"]["slides"]
+    assert cover["id"] == "cover" and diagram["source_ids"] == ["spec"] and diagram["notes"] == "Protocol reference"
+    arrows = [el for el in diagram["elements"] if el.get("arrows") == "end"]
+    assert [el["direction"] for el in arrows] == ["right", "left", "right", "left", "right"]
+    assert len({el["y"] for el in arrows}) == len(arrows)
 
 
 def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeypatch):

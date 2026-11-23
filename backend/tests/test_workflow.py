@@ -194,6 +194,31 @@ def test_cancel_retry_and_expired_worker_fencing():
     assert client.get(path).json()["status"] == "WAITING_FOR_USER"
 
 
+def test_manual_retry_renews_only_the_attempt_token_allowance(monkeypatch):
+    from app.config import settings
+
+    client = TestClient(app)
+    path = create(client, "Create one slide for engineers about PKCE in a technical style.", research=False)
+    with Session.begin() as db:
+        job = db.scalar(select(Job))
+        job.state = "failed"
+        job.context = {**job.context, "usage": {"input": 68016, "output": 13059, "estimated_cost": .24}}
+    monkeypatch.setattr(settings(), "ai_job_token_budget", 16000)
+    assert client.post(path + "/generate").status_code == 202
+    work(1)
+    assert client.post(path + "/generate").status_code == 202
+    with Session() as db:
+        job = db.scalar(select(Job))
+        assert job.checkpoint == "clarify"
+        usage = job.context["usage"]
+        assert (usage["input"], usage["output"], usage["attempt_start_tokens"]) == (68026, 13069, 81075)
+        assert usage["by_stage"]["analyze"]["calls"] == 1
+    client.post(path + "/cancel")
+    assert client.post(path + "/generate").status_code == 202
+    with Session() as db:
+        assert db.scalar(select(Job)).context["usage"] == usage
+
+
 def test_atomic_claim():
     client = TestClient(app)
     create(client)

@@ -31,7 +31,7 @@
             <studio-timeline [events]="events()" />
             @if (questions().length) { <studio-questions [questions]="questions()" [busy]="busy()" (submitted)="sendAnswers($event)" /> }
             @if (['FAILED', 'CANCELLED'].includes(presentation.status)) {
-              <button type="button" class="button retry-button" [disabled]="busy()" (click)="retry()"><lucide-icon [img]="i.Redo2" [size]="16" /> {{ presentation.status === 'FAILED' ? 'Retry generation' : 'Resume generation' }}</button>
+              <button type="button" class="button retry-button" [disabled]="busy()" (click)="retry()"><lucide-icon [img]="i.Redo2" [size]="16" /> {{ presentation.status === 'FAILED' ? 'Retry generation with fresh token allowance' : 'Resume generation' }}</button>
             }
             @if (preview(); as proposal) {
               <section class="proposal"><strong>Proposed edits</strong><p>{{ proposal.proposal.summary }}</p>

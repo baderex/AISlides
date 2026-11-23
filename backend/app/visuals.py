@@ -373,8 +373,8 @@ class ScheduleVisual(VisualBase):
 
 
 class Message(Contract):
-    source: Index
-    target: Index
+    source: Index = Field(description="Zero-based index of the sending participant")
+    target: Index = Field(description="Zero-based recipient index, equal to source for a local action")
     label: Label
     kind: Literal["call", "return"] = "call"
 
@@ -386,8 +386,8 @@ class SequenceVisual(VisualBase):
 
     @model_validator(mode="after")
     def valid_messages(self):
-        if any(max(m.source, m.target) >= len(self.participants) or m.source == m.target for m in self.messages):
-            raise ValueError("messages must connect two different named participants")
+        if any(max(m.source, m.target) >= len(self.participants) for m in self.messages):
+            raise PydanticCustomError("participant_index", "use zero-based indices from the participants list")
         return self
 
 

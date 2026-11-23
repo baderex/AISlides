@@ -24,6 +24,7 @@ from app.export_review import ReviewBusy, ReviewUnavailable, compare_slide_expor
 from app.imagery import image_configured, render_image, source_web_image
 from app import html_layout
 from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, LayoutMarkup, MarkupError, page_schema
+from app.html_layout.markup import EXHIBIT_DESIGN, ExhibitFrameCopy, RecoveredExhibitFrame
 from app.html_layout.review import design_memory, evaluate_quality, markup_content
 from app.master_artwork import master_artwork
 from app.presentations import asset_sources, referenced_images
@@ -632,18 +633,44 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 saved = context["html_candidate"]
                 request.update(previous=saved["markup"], correction=previous["error"])
                 try:
-                    repair = ai.structured(LayoutMarkup,
-                        "Repair the supplied slide XML using the renderer's correction. Return one complete <page> "
-                        "in markup. Preserve all copy, figures, pictures and source notes. Use the deck_design roles, "
-                        "canvas width and a 720px height. Adjust layout, contrast, gap or padding as requested. "
-                        "Include one exhibit for a planned exhibit and the exact asset ID for a required picture. "
-                        "XML-escape text and close every tag.", request, "html-slide")
-                    candidate = schema.model_validate({**saved, "markup": repair.markup})
+                    if part.exhibit and "html_best" not in context:
+                        copy = ai.structured(ExhibitFrameCopy,
+                            "The slide title, picture and native exhibit will be placed automatically. Extract the "
+                            "remaining required supporting text from the prior composition into lead and caption. "
+                            "Retain any source note. Omit labels already in the exhibit. Return plain text.",
+                            {"title":part.title, "previous":saved["markup"], "exhibit_data":saved["exhibit_data"]},
+                            "html-slide")
+                        markup = copy.markup(part.title, required_picture)
+                    else:
+                        repair = ai.structured(LayoutMarkup,
+                            "Repair the supplied slide XML using the renderer's correction. Return one complete <page> "
+                            "in markup. Preserve all copy, figures, pictures and source notes. Use the deck_design roles, "
+                            "canvas width and a 720px height. Adjust layout, contrast, gap or padding as requested. "
+                            "Include one exhibit for a planned exhibit and the exact asset ID for a required picture. "
+                            "Put box, label, arrow and poly in drawing. Use text for flex copy. XML-escape text and "
+                            "close every tag.", request, "html-slide")
+                        markup = repair.markup
+                    candidate = schema.model_validate({**saved, "markup": markup})
                 except ProviderError:
                     if "html_best" not in context:
                         raise
                     context["html_candidate"] = context["html_best"]["candidate"]
                     return "html_measure", state, "REVIEWING", events, None, None
+            elif ("exhibit_data" in previous and part.exhibit not in {*NUMERIC_VISUAL_TYPES, "workbook-chart"}
+                  and previous["error"].startswith(("Use exactly one exhibit frame", "Unexpected nesting inside",
+                                                    "Cite only source IDs"))):
+                # Older workers saved the XML and exhibit but discarded the rest of the response.
+                sources = html_slide_inputs(item, context, part)["sources"]
+                recovered = ai.structured(RecoveredExhibitFrame,
+                    "Recover the supporting text and notes for this saved editable diagram. The title and all "
+                    "diagram labels will be rendered automatically. Keep any essential qualification concise. "
+                    "Choose source numbers for supported claims. Omit color legends and raw source IDs from copy.",
+                    {"title":part.title, "previous":previous["markup"], "exhibit_data":previous["exhibit_data"],
+                     "sources":[{"number":i, "title":s["title"], "excerpt":s.get("excerpt", "")}
+                                for i, s in enumerate(sources, 1)], "source_count":len(sources)}, "html-slide")
+                candidate = schema(markup=recovered.markup(part.title, required_picture), notes=recovered.notes,
+                                   source_ids=[sources[i-1]["id"] for i in recovered.sources],
+                                   exhibit_data=previous["exhibit_data"])
             else:
                 request.update(html_slide_inputs(item, context, part),
                                outline=[p.title for p in plan.slides], deck_title=document.title)
@@ -651,7 +678,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                     request.update(previous=previous["markup"], correction=previous["error"])
                     if "exhibit_data" in previous:
                         request["previous_exhibit_data"] = previous["exhibit_data"]
-                candidate = ai.structured(schema, HTML_DESIGN, request, "html-slide")
+                candidate = ai.structured(schema, EXHIBIT_DESIGN if part.exhibit else HTML_DESIGN, request, "html-slide")
             context["html_candidate"] = candidate.model_dump(mode="json")
             return "html_measure", state, "REVIEWING", events, None, None
         candidate = schema.model_validate(context["html_candidate"])
@@ -660,6 +687,14 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             observations = verified_observations(getattr(page, "observations", []), document.sources)
             return html_layout.compose(page.markup, part.title, theme, document.aspect_ratio, pictures,
                                        document, part, page, list(observations), required_picture)
+
+        def fit_error(issues):
+            message = " ".join(issues)
+            if part.exhibit and previous and not best:
+                # A markup-only repair cannot change labels or topology inside the native exhibit.
+                return ValueError("Give the exhibit the main frame. Simplify exhibit_data labels and grouping "
+                                  "while preserving the required information and connections. " + message)
+            return MarkupError(message)
 
         try:
             if media.get("source"):
@@ -674,13 +709,13 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             slide, png = measure(candidate)
             quality = evaluate_quality(slide, document.slides)
             if quality.hard:
-                raise MarkupError(" ".join(quality.hard))
+                raise fit_error(quality.hard)
             score = quality.penalty
             if renderer():
                 try:
                     issues, difference = compare_slide_export(document, slide, png, Storage().get, brand)
                     if any(issue.startswith("Export fit:") for issue in issues):
-                        raise MarkupError(" ".join(issues))
+                        raise fit_error(issues)
                     quality.soft.extend(issues)
                     score += difference + len(issues)
                 except (ReviewBusy, ReviewUnavailable) as error:
@@ -706,16 +741,16 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             else:
                 attempt = previous.get("attempt", 0) + 1
                 issue = str(error)[:800]
-                if attempt >= 3:
-                    context.pop("layout_retry", None)
-                    raise ProviderError(f"Slide {index+1} failed visual review after three layouts: {issue}") from error
                 retry = {"attempt":attempt, "error":issue}
                 if not isinstance(error, (MarkupError, ET.ParseError)):
                     retry["markup"] = candidate.markup
                     if part.exhibit:
                         retry["exhibit_data"] = candidate.exhibit_data.model_dump(mode="json")
-                    context.pop("html_candidate")
+                    if attempt < 3:
+                        context.pop("html_candidate")
                 context["layout_retry"] = retry
+                if attempt >= 3:
+                    raise ProviderError(f"Slide {index+1} failed visual review after three layouts: {issue}") from error
                 events.append(("slide.revised", "Revising the slide after visual review.", {"index":index, "issue":issue}))
                 return "html_slide", state, "GENERATING", events, None, None
         context.pop("html_best", None)

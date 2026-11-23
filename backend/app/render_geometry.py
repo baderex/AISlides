@@ -534,6 +534,21 @@ def dashed_segments(points, scale):
             start += 8 * scale
 
 
+def segment_crosses(start, end, rect):
+    # Intersect the segment's parameter interval with the interior of each axis.
+    first, last = 0., 1.
+    for axis in range(2):
+        distance = end[axis] - start[axis]
+        low, high = rect[axis], rect[axis + 2]
+        if distance == 0:
+            if not low < start[axis] < high:
+                return False
+        else:
+            a, b = sorted(((low - start[axis]) / distance, (high - start[axis]) / distance))
+            first, last = max(a, first), min(b, last)
+    return first < last
+
+
 def connector_points(line, x, y, width, height, nodes):
     start, end = line.endpoints(width, height)
     points = [(x + start[0], y + start[1]), (x + end[0], y + end[1])]

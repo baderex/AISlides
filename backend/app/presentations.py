@@ -88,11 +88,23 @@ def queue_generation(db, item, *, restart_failed=False):
         if not restart_failed or job.state not in {"failed", "cancelled"}:
             raise Conflict("This presentation already has a completed generation. Duplicate it to start a new deck.")
         admit_ai(db, item.owner_id)
+        message = "Generation queued again from its saved checkpoint."
+        if job.state == "failed":
+            context = dict(job.context)
+            if usage := context.get("usage"):
+                context["usage"] = {**usage, "attempt_start_tokens": usage["input"] + usage["output"]}
+            retry = context.get("layout_retry", {})
+            if retry:
+                context["layout_retry"] = {**retry, "attempt": 0}
+            if job.checkpoint == "html_measure" and "html_candidate" not in context and retry.get("attempt", 0) >= 3:
+                job.checkpoint = "html_slide"
+            job.context = context
+            message = "Retrying from the saved checkpoint with a fresh token allowance."
         job.state, job.error, job.cancelled = "queued", None, False
         job.lease = None
         job.lease_owner = None
         item.status = "CREATED"
-        emit(db, item, "generation.resumed", "Generation queued again from its saved checkpoint.", job)
+        emit(db, item, "generation.resumed", message, job)
         return job
     admit_ai(db, item.owner_id)
     job = Job(presentation_id=item.id, context={"layout_engine":"auto"})

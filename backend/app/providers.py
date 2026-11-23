@@ -50,6 +50,7 @@ VALIDATION_HINTS = {
     "decision_scope": "keep the future gate condition in if_missed",
     "phase_quantities": "use dates in period only; describe milestones without inventing quantities",
     "visual_choice": "use the planned visual type and variant",
+    "participant_index": "use zero-based indices from the participants list",
     "row_highlight": "set highlight to an exact row label or null",
 }
 
@@ -234,6 +235,8 @@ class Intelligence:
     def structured(self, schema: type[BaseModel], task: str, data: dict, stage: str = "planning", image: str | None = None):
         outline_fields = ("slide_count", "requires_chart_workbook", "available_pictures", "reuse_uploaded_images")
         validation_context = {k: data[k] for k in outline_fields if k in data} if stage == "outline" else None
+        if stage == "html-slide" and "source_count" in data:
+            validation_context = {"source_count": data["source_count"]}
         required_exhibit = data.get("required_exhibit") if stage == "slide" else None
         visual_choice = data.get("visual_choice") if required_exhibit == "visual" else None
         if required_exhibit:
@@ -287,15 +290,19 @@ class Intelligence:
             if correction:
                 prompt += f"\nThe previous response failed validation. Correct these issues: {correction}. Return one complete JSON object."
             estimate = max(1000, (len(content) + len(prompt) + schema_chars) // 3)
-            used = self.usage["input"] + self.usage["output"]
+            total = self.usage["input"] + self.usage["output"]
+            used = total - self.usage.get("attempt_start_tokens", 0)
             remaining = s.ai_job_token_budget - used - estimate
             if remaining < 256 or (truncated_at is not None and remaining <= truncated_at):
+                if estimate + 256 > s.ai_job_token_budget:
+                    raise ProviderError(
+                        f"The {stage} request alone needs approximately {estimate:,} input tokens and room for a "
+                        f"reply. Shorten the request or increase AI_JOB_TOKEN_BUDGET ({s.ai_job_token_budget:,})."
+                    )
                 raise ProviderError(
-                    f"The job reached its configured token budget. It has used {used:,} of {s.ai_job_token_budget:,} "
-                    f"tokens ({self.usage['input']:,} input, {self.usage['output']:,} output). "
+                    f"This attempt has used {used:,} of {s.ai_job_token_budget:,} tokens (AI_JOB_TOKEN_BUDGET). "
                     f"The next {stage} request needs an estimated {estimate:,} input tokens plus room for the reply. "
-                    "Retry keeps prior usage. To continue, increase AI_JOB_TOKEN_BUDGET for the worker "
-                    "and resume from the saved checkpoint."
+                    f"Total usage across attempts is {total:,} tokens."
                 )
             if s.ai_job_cost_budget > 0 and self.usage["estimated_cost"] >= s.ai_job_cost_budget:
                 raise ProviderError("The job reached its configured cost budget.")

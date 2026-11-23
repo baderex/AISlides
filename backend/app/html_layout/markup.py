@@ -1,5 +1,6 @@
 """Schema and declarative layout language used by the slide designer."""
 from functools import lru_cache
+from itertools import groupby
 from typing import Literal
 import xml.etree.ElementTree as ET
 
@@ -60,6 +61,37 @@ def page_schema(exhibit):
     data_type = WorkbookData if exhibit == "workbook-chart" else VISUAL_MODELS[exhibit]
     return create_model("ExhibitPage", __base__=PageMarkup, exhibit_data=(data_type, ...),
                         illustrative=(bool, False), observations=(list[EvidenceObservation], Field(default_factory=list, max_length=96)))
+
+
+class ExhibitFrameCopy(Contract):
+    lead: str = Field(default="", max_length=320)
+    caption: str = Field(default="", max_length=320)
+
+    def markup(self, title, picture):
+        page = ET.Element("page")
+        ET.SubElement(page, "text", role="headline").text = title
+        if self.lead:
+            ET.SubElement(page, "text", role="body").text = self.lead
+        region = ET.SubElement(page, "row", grow="1") if picture else page
+        ET.SubElement(region, "exhibit", grow="3")
+        if picture:
+            ET.SubElement(region, "picture", asset=picture, grow="1")
+        if self.caption:
+            ET.SubElement(page, "text", role="footnote").text = self.caption
+        return ET.tostring(page, encoding="unicode")
+
+
+class RecoveredExhibitFrame(ExhibitFrameCopy):
+    notes: str = Field(default="", max_length=3500)
+    sources: list[int] = Field(default_factory=list, max_length=20,
+                               description="One-based positions of supporting sources in the supplied list")
+
+    @model_validator(mode="after")
+    def known_sources(self, info: ValidationInfo):
+        count = (info.context or {}).get("source_count")
+        if any(index < 1 or count is not None and index > count for index in self.sources):
+            raise ValueError("Choose source numbers from the supplied list.")
+        return self
 
 
 PLAN = """Art-direct an editable slide deck from the supplied brief. Follow its requested count, aspect,
@@ -133,6 +165,26 @@ TAGS = dict(page=CONTAINER_CHILDREN, row=CONTAINER_CHILDREN, col=CONTAINER_CHILD
             drawing="box label arrow poly", matrix="tr", tr="td", waterfall="bar",
             gantt="task", sankey="flow", sequence="message")
 TEXT = {"text","label","td"}
+DRAWING_TAGS = frozenset(TAGS["drawing"].split())
+
+EXHIBIT_DESIGN = """Create the requested slide using its native editable exhibit. Put all nodes,
+connections, protocol labels, table cells or code lines in exhibit_data. The renderer draws that
+data inside one empty exhibit frame. Use this XML layout in markup:
+<page><text role="headline">Slide title</text><exhibit grow="1"/><text role="body">Takeaway</text></page>
+Preserve the requested title and source notes. Limit any takeaway to a short sentence. Put
+explanations in presenter notes. Describe protocol semantics accurately. Keep each graph node
+and edge label short. Put details shared by multiple nodes in the supporting copy.
+When the outline over-specifies a diagram, preserve the original brief's requirements and
+combine related checks or outcomes so the labels fit. Use zero-based participants in sequences.
+For annotated code, use at most 12 lines. Define helper functions in the notes. Leave unit
+empty on diagrams and code listings.
+The renderer chooses connector colors. Omit color legends for these automatic styles.
+If required_picture is supplied, use a row containing the exhibit and a picture with the exact
+asset ID. Keep the main region large enough for its labels. Use deck_design palette and type roles.
+Use the planned exhibit type and only supplied evidence. Put full source IDs in source_ids. The
+renderer prints source titles automatically. For quantitative
+data, include supporting observations and mark illustrative data only when identified as such.
+Escape ampersands and angle brackets in XML text."""
 
 
 def parse_markup(value):
@@ -145,12 +197,35 @@ def parse_markup(value):
     if root.tag != "page" or len(list(root.iter())) > 300:
         raise MarkupError("Expected one page with at most 300 nodes")
     def clean(node, depth):
-        if depth > 12 or any(child.tag not in TAGS.get(node.tag, "").split() for child in node):
-            raise MarkupError(f"Unexpected nesting inside {node.tag}")
+        if depth > 12:
+            raise MarkupError("Layout exceeds 12 nesting levels. Use a shallower page.")
         if (node.tag not in TEXT and (node.text or "").strip()) or any((c.tail or "").strip() for c in node):
             raise MarkupError("All visible copy must be in a text, label or td")
+        if node.tag in {"page", "row", "col"}:
+            # A run of percentage-positioned primitives shares one drawing coordinate system.
+            children = []
+            for child in node:
+                if child.tag == "label" and not {"x", "y", "w", "h"}.intersection(child.attrib):
+                    child.tag = "text"
+                    child.attrib.setdefault("role", "label")
+            for drawing, run in groupby(node, key=lambda child: child.tag in DRAWING_TAGS):
+                if drawing:
+                    panel = ET.Element("drawing", grow="1")
+                    panel.extend(run)
+                    children.append(panel)
+                else:
+                    children.extend(run)
+            node[:] = children
+        allowed = TAGS.get(node.tag, "").split()
+        for child in node:
+            if child.tag not in allowed:
+                hint = f"Allowed children: {', '.join(allowed)}." if allowed else "This element cannot contain child tags."
+                raise MarkupError(f"Unexpected <{child.tag}> inside <{node.tag}>. {hint}")
         if node.tag in TAGS and node.tag not in {"row","col"} and not len(node):
             raise MarkupError(f"Empty {node.tag}")
         return {"tag":node.tag, "a":node.attrib, "t":(node.text or "").strip(),
                 "children":[clean(c, depth + 1) for c in node]}
-    return clean(root, 0)
+    parsed = clean(root, 0)
+    if sum(1 for _ in root.iter()) > 300:
+        raise MarkupError("Expected one page with at most 300 nodes")
+    return parsed

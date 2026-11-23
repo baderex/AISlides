@@ -4,23 +4,9 @@ from dataclasses import dataclass
 
 from app.domain import Chart, Image, Line, Shape, Table, Text
 from app.html_layout.markup import parse_markup
+from app.render_geometry import segment_crosses
 from app.rendering import (TEXT_LEADING, TEXT_SCALE, connector_points, flattened, physical,
                            raster_text, validate_slide)
-
-
-def segment_crosses(start, end, rect):
-    # Intersect the segment's parameter interval with the interior of each axis.
-    first, last = 0., 1.
-    for axis in range(2):
-        distance = end[axis] - start[axis]
-        low, high = rect[axis], rect[axis + 2]
-        if distance == 0:
-            if not low < start[axis] < high:
-                return False
-        else:
-            a, b = sorted(((low - start[axis]) / distance, (high - start[axis]) / distance))
-            first, last = max(a, first), min(b, last)
-    return first < last
 
 
 def text_rects(label, frame, width, height):

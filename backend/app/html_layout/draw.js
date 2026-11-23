@@ -304,6 +304,8 @@ payload => {
       children.forEach(c=>render(c,box,pending));
     } else if(tag==="text") {
       const copy=mark(el("div",box,{...textStyle(a),position:"relative"}),"text");copy.textContent=t;
+      // Let a wrapped headline grow within a column before allocating the remaining space to its exhibit.
+      if(parent.style.flexDirection === "column") box.style.minHeight="min-content";
       if(a.h || a.grow) copy.dataset.checkParent="true";
       if(!a.grow && !a.h) box.style.flexShrink="0";
     } else if(tag==="rule") {
