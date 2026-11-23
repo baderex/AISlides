@@ -158,6 +158,19 @@ def denomination_markers(text, unit_hint="", *, explicit=False):
     return currencies, units
 
 
+def metric_base(label):
+    """Remove only an explicit denomination suffix, never a category or reporting scope."""
+    match = re.search(r"\s*\(([^()]*)\)\s*$", label)
+    if not match:
+        return label
+    suffix = match[1]
+    currencies, units = denomination_markers(suffix, explicit=True)
+    residual = CURRENCY_MARKERS.sub("", SHORT_SCALES.sub("", UNIT_MARKERS.sub("", suffix)))
+    if not (currencies or units) or re.search(r"[a-z0-9]", residual, re.I):
+        return label
+    return label[:match.start()].strip()
+
+
 def caption_denominations(text, unit_hint=""):
     """Only a local denomination declaration can supply units missing from a cell."""
     currencies, units = set(), set()
@@ -290,12 +303,21 @@ class EvidenceIndex:
         self.used_sources = set()
 
     def find(self, label, periods=()):
-        matches = sorted((metric for metric in self.metrics if contains(label, metric.label)),
-                         key=lambda metric: -len(metric.label))
+        # Exact metric names take precedence. A denomination-qualified source
+        # heading can also support a concise chart title (Revenue rather than
+        # Revenue (USD millions)), but conflicting units must remain ambiguous.
+        exact = [metric for metric in self.metrics if contains(label, metric.label)]
+        candidates = exact or [metric for metric in self.metrics
+                               if metric_base(metric.label) != metric.label
+                               and contains(label, metric_base(metric.label))]
+        matches = sorted(candidates, key=lambda metric: -len(metric.label))
         if not matches:
             return None
         name = matches[0].label
-        matches = [metric for metric in matches if key(metric.label) == key(name)]
+        matches = [metric for metric in matches if (
+            key(metric.label) == key(name) if exact
+            else key(metric_base(metric.label)) == key(metric_base(name))
+        )]
         scoped = [metric for metric in matches if metric.scope and contains(label, metric.scope)]
         if scoped:
             matches = scoped

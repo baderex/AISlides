@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import Field, ValidationError
 
 from app.domain import Chart, Contract, Identifier, Text
-from app.evidence import CURRENCY_HINTS, NUMBER, NUMERIC_CLAIM, UNIT_HINTS, contains, key, value, verified_observations
+from app.evidence import CURRENCY_HINTS, NUMBER, NUMERIC_CLAIM, UNIT_HINTS, contains, key, metric_base, value, verified_observations
 from app.visuals import GraphVisual, MatrixVisual, QuantitativeVisual, ScatterVisual, ScheduleVisual, weighted_average
 
 
@@ -148,7 +148,10 @@ def exhibit_bindings(content, sources, source_ids, chart=None, planned_annotatio
     bindings = {}
     for entry in values:
         amount = entry.value if isinstance(entry.value, str) else Decimal(str(entry.value))
-        matches = [row for row in observations if entry.metric and key(row.metric) == key(entry.metric)
+        matches = [row for row in observations if entry.metric
+                   and (key(row.metric) == key(entry.metric)
+                        or (metric_base(row.metric) != row.metric
+                            and key(metric_base(row.metric)) == key(entry.metric)))
                    and key(row.period) == key(entry.category)]
         families = {(row.amount, normalized_unit(row.currency + row.unit), key(row.scope)) for row in matches}
         match = next((row for row in matches if row.source_id in source_ids and (

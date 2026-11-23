@@ -1,10 +1,11 @@
 from types import SimpleNamespace
+from decimal import Decimal
 
 import pytest
 
 from app.composition import OutlineItem, SlideContent
 from app.domain import Chart, Slide, Source
-from app.evidence import EvidenceObservation, verified_observations
+from app.evidence import EvidenceIndex, EvidenceObservation, Metric, metric_base, verified_observations
 from app.exhibit_evidence import exhibit_bindings
 from app.source_sections import web_passage
 from app.workflow import review_slide_content, slide_inputs
@@ -196,3 +197,35 @@ def test_a_row_that_cannot_fit_is_omitted_without_truncating_its_number():
     passage = web_passage(text, "Show category cost", 70)
     assert len(passage) <= 70
     assert "$123" not in passage and not any(line.startswith("|") for line in passage.splitlines())
+
+
+
+def test_denomination_header_verifies_a_plain_series_name():
+    quote = "| 2025 | 7 |"
+    source = Source(id="revenue", title="Annual revenue",
+                    excerpt="| Year | Revenue (USD millions) |\n| --- | --- |\n" + quote)
+    row = observation(source, "Revenue (USD millions)", quote)
+    assert list(verified_observations([row], [source])) == [row]
+    chart = Chart(x=.1, y=.1, w=.8, h=.6, categories=["2025"],
+                  series=[{"name": "Revenue", "values": [7]}], value_prefix="$", value_suffix="m")
+    content = SlideContent(title="Revenue trend", source_ids=[source.id], exhibit_observations=[row])
+    binding, = exhibit_bindings(content, [source], [source.id], chart)
+    assert binding.status == "verified"
+    index = EvidenceIndex([Metric(row.metric, {"2025": Decimal("7")}, "$", "m", "", (source.id,))])
+    found = index.find("Revenue", ["2025"])
+    assert found and found.currency == "$" and found.unit == "m"
+
+
+def test_concise_metric_name_rejects_conflicting_denominations():
+    metrics = [
+        Metric("Revenue (USD millions)", {"2025": Decimal("7")}, "$", "m", "", ("usd",)),
+        Metric("Revenue (EUR thousands)", {"2025": Decimal("7")}, "€", "k", "", ("eur",)),
+    ]
+    index = EvidenceIndex(metrics)
+    assert index.find("Revenue", ["2025"]) is None
+    assert "Revenue (USD millions)" in index.conflicts or "Revenue (EUR thousands)" in index.conflicts
+    explicit = EvidenceIndex(metrics).find("Revenue (USD millions)", ["2025"])
+    assert explicit and explicit.currency == "$"
+    assert metric_base("Revenue (USD millions)") == "Revenue"
+    assert metric_base("Revenue (North region)") == "Revenue (North region)"
+    assert metric_base("Revenue (FY2025)") == "Revenue (FY2025)"
