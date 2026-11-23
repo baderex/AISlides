@@ -19,6 +19,7 @@ from app.auth import LOCAL_USER
 from app.config import Settings, settings
 from app.db import Asset, Job, PresentationRecord, Session, StudioEvent, uid
 from app.domain import Document, Slide, Source
+from app.edits import InsertSlide
 from app.imagery import render_image
 from app.main import app
 from app.previews import fingerprint
@@ -36,6 +37,36 @@ def draft(title="Draft"):
     response = client.patch(path, json={"revision": 0, "document": deck["document"]})
     assert response.status_code == 200, response.text
     return path, response.json()
+
+
+@pytest.mark.parametrize(("scope", "order"), [("one", ["Original", "New people slide", "Closing"]),
+                                             (None, ["Original", "Closing", "New people slide"])])
+def test_chat_add_slide_preserves_originals_through_preview_and_apply(monkeypatch, scope, order):
+    path, saved = draft()
+    document = saved["document"]
+    document["slides"].append({"id": "two", "title": "Closing"})
+    saved = client.patch(path, json={"revision": saved["revision"], "document": document}).json()
+    originals = saved["document"]["slides"]
+
+    def generate(self, schema, task, data, stage):
+        assert schema is InsertSlide
+        # Even a model that echoes the ID of the example slide cannot overwrite it.
+        return schema(op="insert_slide", slide=Slide(id="one", title="New people slide"))
+
+    monkeypatch.setattr("app.edits.Intelligence.structured", generate)
+    response = client.post(path + "/chat", json={"instruction": "add another slide for most influential people",
+                                                "slide_id": scope})
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert client.get(path).json()["document"]["slides"] == originals
+    slides = preview["document"]["slides"]
+    assert [s["title"] for s in slides] == order
+    assert [s for s in slides if s["id"] in {"one", "two"}] == originals
+    body = {key: preview[key] for key in ("proposal", "revision")}
+    applied = client.post(path + "/chat/apply", json=body)
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["document"]["slides"] == slides
+    assert client.post(path + "/chat/apply", json=body).status_code == 409
 
 
 def test_active_worker_outlives_initial_lease(monkeypatch):

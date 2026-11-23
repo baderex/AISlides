@@ -58,13 +58,18 @@ export class Workspace implements OnDestroy {
   });
   readonly canEdit = computed(() => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(this.item()?.status ?? '') || this.item()?.request.generate === false && this.item()?.status === 'CREATED');
   readonly showPlan = computed(() => this.item() !== null && (!this.canEdit() || this.events().some(event => event.job_id !== null)));
-  readonly sourceLinks = computed(() => this.editor.document()?.sources.filter(source => this.editor.current()?.source_ids.includes(source.id)) ?? []);
+  readonly sourceLinks = computed(() => this.editor.document()?.sources.filter(source => this.displayedSlide()?.source_ids.includes(source.id)) ?? []);
   readonly exhibit = computed(() => {
     const spec = this.editor.current()?.spec;
     const visual = spec?.content.visual;
     return visual ? spec : null;
   });
-  readonly displayedSlide = computed(() => this.preview()?.document.slides.find(slide => slide.id === this.editor.current()?.id) ?? this.editor.current());
+  readonly visibleSlides = computed(() => this.preview()?.document.slides ?? this.editor.document()?.slides ?? []);
+  private previewSlideId = signal<string | null>(null);
+  readonly displayedSlide = computed(() => this.preview()
+    ? this.visibleSlides().find(slide => slide.id === this.previewSlideId()) ?? this.visibleSlides()[0]
+    : this.editor.current());
+  readonly displayedPosition = computed(() => this.visibleSlides().findIndex(slide => slide.id === this.displayedSlide()?.id) + 1);
   readonly canvasArea = viewChild<ElementRef<HTMLElement>>('canvasArea');
   readonly agentScroll = viewChild<ElementRef<HTMLElement>>('agentScroll');
   private exhibitEditor = viewChild(ExhibitEditor);
@@ -288,9 +293,21 @@ export class Workspace implements OnDestroy {
     if (text.length < 3 || !this.canEdit()) return;
     await this.action(async () => {
       await this.persist();
-      this.preview.set(await this.api.chat(this.id, text, this.chatScope === 'slide' ? this.editor.current()?.id : undefined));
+      const current = this.editor.current()?.id;
+      const id = this.id;
+      const preview = await this.api.chat(id, text, this.chatScope === 'slide' ? current : undefined);
+      if (id !== this.id) return;
+      const existing = new Set(this.editor.document()?.slides.map(slide => slide.id));
+      const added = preview.document.slides.find(slide => !existing.has(slide.id));
+      this.previewSlideId.set(added?.id ?? current ?? null);
+      this.preview.set(preview);
       this.instruction = '';
     });
+  }
+
+  selectThumbnail(id: string) {
+    if (this.preview()) this.previewSlideId.set(id);
+    else this.editor.activate(id);
   }
 
   async applyPreview() {
@@ -298,10 +315,14 @@ export class Workspace implements OnDestroy {
       const proposal = this.preview();
       const before = this.editor.document();
       if (!proposal || !before) return;
-      const updated = await this.api.apply(this.id, proposal);
+      const id = this.id;
+      const updated = await this.api.apply(id, proposal);
+      if (id !== this.id) return;
       this.editor.history.update(items => [...items.slice(-39), before]);
       this.editor.future.set([]);
       this.editor.accept(updated.document);
+      const selected = this.previewSlideId();
+      if (selected) this.editor.activate(selected);
       this.item.set(updated);
       this.preview.set(null);
       this.notice.set('Proposed edits applied.');
