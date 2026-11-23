@@ -4,6 +4,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from app.design import ArtDirection, apply_brand_kit, enforce_constraints, explicit_constraints, style_chart, style_table
+from app.db import uid
 from app.domain import Chart, Contract, Group, Identifier, Slide, Table, Text, Theme
 from app.providers import Intelligence, ProviderError
 from app.slide_design import recompose_slide
@@ -22,12 +23,18 @@ class ReplaceSlide(Contract):
     slide: Slide
 
 
+class InsertSlide(Contract):
+    op: Literal["insert_slide"]
+    position: int | None = Field(default=None, ge=1, le=40, description="One-based position for the new slide.")
+    slide: Slide
+
+
 class Restyle(Contract):
     op: Literal["restyle"]
     theme: Theme
 
 
-Operation = Annotated[ChangeText | ReplaceSlide | Restyle, Field(discriminator="op")]
+Operation = Annotated[ChangeText | ReplaceSlide | InsertSlide | Restyle, Field(discriminator="op")]
 
 
 class EditProposal(Contract):
@@ -57,13 +64,36 @@ CONTENT_EDIT = re.compile(
     r"\b(?:add|rewrite|remove|replace|change|update|revise)\b[^,.;]{0,40}"
     r"\b(?:wording|titles?|text|copy|facts?|chart data|numbers?|claims?|figures?)\b", re.I
 )
+SINGLE_SLIDE_REQUEST = re.compile(
+    r"^\s*(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:add|insert|append|create|generate|make)\s+"
+    r"(?:(?:a|an|one|1|another|new|additional|more|extra)\s+)*slide\b"
+    r"(?=\s*(?:$|[.?!,:]|(?:about|for|on|with|that|covering|showing|explaining|before|after|at|to the deck)\b))", re.I
+)
 
 
 def propose(document, request):
     ai = Intelligence()
     slides = [s for s in document.slides if not request.slide_id or s.id == request.slide_id]
-    if not slides:
+    if request.slide_id and not slides:
         raise ValueError("No slide matches the selected scope.")
+    default_position = document.slides.index(slides[0]) + 2 if request.slide_id else len(document.slides) + 1
+    context = {
+        "instruction": request.instruction, "current_theme": document.theme.model_dump(),
+        "deck_title": document.title, "aspect_ratio": document.aspect_ratio,
+        "default_insertion_position": default_position,
+        "slide_titles_in_order": [s.title for s in document.slides],
+        "slides": [s.model_dump(mode="json", exclude={"spec"}) for s in slides[:12]],
+        "sources": [s.model_dump(mode="json") for s in document.sources],
+    }
+    if SINGLE_SLIDE_REQUEST.match(request.instruction):
+        if len(document.slides) >= 40:
+            raise ValueError("The presentation already contains the maximum of 40 slides.")
+        insertion = ai.structured(InsertSlide,
+            "Create one complete new slide with visible editable elements matching the deck's theme. "
+            "Ground its content in the supplied material. Omit position unless the user specifies a location.",
+            context, "edit")
+        proposal = EditProposal(summary=f"Add a slide titled “{insertion.slide.title}”.", operations=[insertion])
+        return prepare_insertions(proposal, default_position)
     constraints = explicit_constraints(request.instruction)
     if not request.slide_id and STYLE_EDIT.search(request.instruction) and not CONTENT_EDIT.search(request.instruction):
         direction = ai.structured(RestyleDirection,
@@ -77,20 +107,30 @@ def propose(document, request):
         theme = Theme.model_validate({**direction.model_dump(exclude={"summary"}), "profile": document.theme.profile})
         theme.constraints = constraints
         return EditProposal(summary=direction.summary, operations=[Restyle(op="restyle", theme=theme)])
-    proposal = ai.structured(EditProposal, "Propose structured slide edits. Limit changes to the requested scope. Reuse slide and element IDs. "
+    proposal = ai.structured(EditProposal, "Propose structured slide edits. Limit changes to the requested scope. Reuse IDs for existing content. "
+        "Use insert_slide whenever the user asks for additional slides. Give each new slide editable elements. "
+        "Omit position unless the user specifies a location. Adding slides alone must preserve every existing slide. "
         "Use change_text for targeted changes, replace_slide only when restructuring or regenerating a slide, and restyle only for a deck-level redesign. "
         "For a deck-level redesign supply complete design rules and choose a mood, spacing and cover treatment that "
         "reflect the requested style. The studio rebuilds eligible slide layouts from the original content. "
-        "Preserve edited elements when replacing a slide. Keep existing source and asset references grounded in this deck.", {
-        "instruction": request.instruction, "current_theme": document.theme.model_dump(),
-        "slides": [s.model_dump(mode="json", exclude={"spec"}) for s in slides[:12]],
-        "sources": [s.model_dump(mode="json") for s in document.sources]
-    }, "edit")
-    if request.slide_id and any(isinstance(op, Restyle) or op.slide_id != request.slide_id for op in proposal.operations):
+        "Preserve edited elements when replacing a slide. Keep existing source and asset references grounded in this deck.", context, "edit")
+    if request.slide_id and any(isinstance(op, Restyle) or
+            isinstance(op, (ChangeText, ReplaceSlide)) and op.slide_id != request.slide_id for op in proposal.operations):
         raise ProviderError("The model proposed changes outside the selected slide. Try a more specific edit.")
     for operation in proposal.operations:
         if isinstance(operation, Restyle):
             operation.theme.constraints = constraints
+    return prepare_insertions(proposal, default_position)
+
+
+def prepare_insertions(proposal, default_position):
+    for operation in proposal.operations:
+        if isinstance(operation, InsertSlide):
+            operation.slide.id = uid()
+            operation.slide.spec = None
+            if operation.position is None:
+                operation.position = default_position
+            default_position = operation.position + 1
     return proposal
 
 
@@ -108,6 +148,16 @@ def apply(document, proposal, *, locked_theme=False):
 
     slides = {slide.id: slide for slide in document.slides}
     for operation in proposal.operations:
+        if isinstance(operation, InsertSlide):
+            if operation.slide.id in slides:
+                raise ValueError("An inserted slide must have a new ID.")
+            ordered = list(slides.values())
+            position = operation.position or len(ordered) + 1
+            if position > len(ordered) + 1:
+                raise ValueError("The insertion position is outside the presentation.")
+            ordered.insert(position - 1, operation.slide.model_copy(deep=True))
+            slides = {slide.id: slide for slide in ordered}
+            continue
         if isinstance(operation, Restyle):
             if locked_theme:
                 raise ValueError("The PowerPoint master controls this deck's theme.")
