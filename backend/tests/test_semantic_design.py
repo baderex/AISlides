@@ -322,7 +322,7 @@ def test_deck_design_request_is_routed_to_a_theme_only_proposal(monkeypatch):
 
     monkeypatch.setattr(Intelligence, "__init__", lambda self: setattr(self, "provider", "compatible"))
     monkeypatch.setattr(Intelligence, "structured", redesign)
-    proposal = propose(None, deck, ChatRequest(instruction="Make the deck more luxurious and preserve its facts."))
+    proposal = propose(deck, ChatRequest(instruction="Make the deck more luxurious and preserve its facts."))
     operation, = proposal.operations
     assert isinstance(operation, Restyle)
     assert apply(deck, proposal).slides[0].spec.recipe == "closing_centered"

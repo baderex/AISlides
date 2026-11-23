@@ -22,7 +22,7 @@ from test_workflow import create, work
 
 
 @pytest.fixture(autouse=True)
-def avoid_office_render_in_demo_worker(monkeypatch):
+def avoid_office_render_in_worker(monkeypatch):
     monkeypatch.setattr("app.workflow.renderer", lambda: None)
 
 

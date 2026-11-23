@@ -59,10 +59,8 @@ CONTENT_EDIT = re.compile(
 )
 
 
-def propose(item, document, request):
+def propose(document, request):
     ai = Intelligence()
-    if ai.provider == "demo":
-        raise ProviderError("Conversational editing requires a configured live AI provider.")
     slides = [s for s in document.slides if not request.slide_id or s.id == request.slide_id]
     if not slides:
         raise ValueError("No slide matches the selected scope.")
@@ -156,7 +154,6 @@ def apply(document, proposal, *, locked_theme=False):
                     elif isinstance(element, Table) and (rules or element.row_rule):
                         style_table(element, theme, slide.background,
                                     preserve_palette=theme.profile == "consulting" or element.placeholder_idx is not None)
-            document.theme = theme
             continue
         slide = slides.get(operation.slide_id)
         if not slide:

@@ -34,13 +34,18 @@ def test_llm_settings_only_load_from_dotenv(monkeypatch, tmp_path):
     assert Settings(_env_file=dotenv).llm_api_key == "process-key"
 
 
+def test_retired_demo_url_is_unconfigured(monkeypatch):
+    monkeypatch.setattr(settings(), "llm_api_url", "demo")
+    with pytest.raises(ProviderError, match="LLM_API_URL"):
+        Intelligence()
+
+
 @pytest.mark.parametrize(("base", "endpoint"), [
     ("https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"),
     ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
     ("https://gateway.example.test/v1/chat/completions", "https://gateway.example.test/v1/chat/completions"),
 ])
 def test_chat_completions_use_the_configured_endpoint_model_and_key(monkeypatch, base, endpoint):
-    monkeypatch.setattr(settings(), "app_env", "development")
     monkeypatch.setattr(settings(), "llm_api_url", base)
     monkeypatch.setattr(settings(), "llm_model_id", "test-model")
     monkeypatch.setattr(settings(), "llm_api_key", "fixture-key")

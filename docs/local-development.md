@@ -28,9 +28,8 @@ Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env` and restar
 | OpenRouter | `https://openrouter.ai/api/v1` | OpenRouter key |
 | Ollama | `http://127.0.0.1:11434` | Optional |
 | OpenAI-compatible | Your API root | Optional, depending on the server |
-| Offline demo | `demo` | Leave blank |
 
-For OpenAI-compatible APIs, Anthropic and Ollama, you can also use the full endpoint URL. For native Ollama on a different port, use the full `/api/chat` URL and enter the installed model tag as `LLM_MODEL_ID`. Set `COMPATIBLE_STRUCTURED=true` when the compatible server supports the OpenAI JSON Schema response format. Leave `LLM_MODEL_ID` blank for the offline demo.
+For OpenAI-compatible APIs, Anthropic and Ollama, you can also use the full endpoint URL. For native Ollama on a different port, use the full `/api/chat` URL and enter the installed model tag as `LLM_MODEL_ID`. Set `COMPATIBLE_STRUCTURED=true` when the compatible server supports the OpenAI JSON Schema response format.
 
 Set `RESEARCH_API_KEY` in `.env` to make **Web research** checked by default in the studio. `RESEARCH_API_URL` defaults to `https://api.search.brave.com/res/v1/web/search` and also accepts `BRAVE_WEB_SEARCH` as an environment variable alias. If you override the URL, use a full endpoint that accepts Brave Search requests and returns the same response format. Optionally set `RESEARCH_CONTEXT_API_URL=https://api.search.brave.com/res/v1/llm/context` to try Brave Context first for detailed research and fall back to the Web Search endpoint if needed. Search uses snippets and titles, and references are linked to slides when selected by the model.
 
@@ -66,6 +65,6 @@ From a second backend terminal, start `python -m app.worker`. From `frontend`, r
 
 Run `python -m pytest` from `backend` with its virtual environment activated. From `frontend`, run `npm test` and `npm run build`. To run the browser suite after setup, run `npx playwright install chromium` and `npm run e2e`. For an installed Edge or Chrome browser, set `STUDIO_BROWSER_CHANNEL=msedge` or `chrome` and skip the Chromium install.
 
-Playwright starts the API, worker and Angular on ports 8000 and 4200 with temporary SQLite and file storage and the built-in demo provider. Free both ports before running it. `STUDIO_E2E_REUSE=1` allows Playwright to reuse an existing server at port 4200, and the suite writes to that server's workspace. To include the branded PowerPoint review browser test, set `POWERPOINT_RENDERER` in the shell that launches Playwright, even if the application already finds Impress.
+Playwright starts the API, worker and Angular on ports 8000 and 4200 with temporary SQLite and file storage and test-only model responses. Free both ports before running it. `STUDIO_E2E_REUSE=1` allows Playwright to reuse an existing server at port 4200, and the suite writes to that server's workspace. To include the branded PowerPoint review browser test, set `POWERPOINT_RENDERER` in the shell that launches Playwright, even if the application already finds Impress.
 
 With the default settings and backend working directory, SQLite uses `backend/data/app.db` and stored objects use `backend/data/uploads`. Stop both Python processes before copying `backend/data` for a consistent local backup.

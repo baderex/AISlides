@@ -40,8 +40,6 @@ def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeyp
             return schema(markup=MATRIX if "correction" in data else "<page><script/></page>")
         raise AssertionError(f"Unexpected legacy generation request: {schema.__name__}")
 
-    monkeypatch.setattr("app.providers.provider_for", lambda config: "compatible")
-    monkeypatch.setattr("app.providers.provider_configured", lambda config, provider: True)
     monkeypatch.setattr(Intelligence, "structured", model)
     interruptions = []
 
@@ -156,8 +154,6 @@ def test_northstar_html_edit_recalculates_flags_and_exports_workbook(monkeypatch
                       exhibit_data=dict(chart="column", categories=list(options),
                                         series=[dict(name=c, values=[v[i] for v in options.values()]) for i,c in enumerate(columns)]))
 
-    monkeypatch.setattr("app.providers.provider_for", lambda config: "compatible")
-    monkeypatch.setattr("app.providers.provider_configured", lambda config, provider: True)
     monkeypatch.setattr(Intelligence, "structured", model)
     client = TestClient(app)
     item = client.post("/api/v1/presentations", json={"prompt":"Compare three initiatives and include the editable chart workbook. " +

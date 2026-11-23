@@ -2,7 +2,7 @@
 
 A self-hosted presentation studio that turns prompts and references into editable slide decks. Angular handles the design workspace. FastAPI and a separate Python worker manage guided generation, saved versions and exports.
 
-New live prompt decks use HTML/CSS layout. The worker measures each slide in Chromium and saves its text, shapes, connectors, tables and pictures as editable studio objects. PowerPoint, PDF and the editor read that saved geometry. The native compositor serves PowerPoint templates, protected brand kits, generated or web-sourced pictures, charts requiring an embedded workbook, quantitative research with external evidence, and the offline demo.
+HTML/CSS is the default layout for new live prompt decks. Chromium measures the layout, and the worker saves editable text, shapes, connectors, tables, pictures and charts. Structured exhibits keep their source data for editing. The HTML path supports brand kits, generated or sourced pictures, and PowerPoint charts with embedded workbooks. The native compositor handles imported PowerPoint templates and quantitative decks using web research or uploaded documents.
 
 ## Run locally
 
@@ -15,7 +15,7 @@ python scripts/dev.py
 
 Open [the studio](http://localhost:4200) or [API documentation](http://localhost:8000/docs). Check services with `python scripts/check.py`.
 
-Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env`, then restart the API and worker. The example configuration uses OpenAI. For an offline walkthrough, set `LLM_API_URL=demo` in `backend/.env`, restart both services, and enter `Generate three slides about quantum computing.` Choose **Executive / Board** and **Editorial report**, then edit a slide and export PowerPoint.
+Set `LLM_API_URL`, `LLM_MODEL_ID` and `LLM_API_KEY` in `backend/.env`, then restart the API and worker. The example configuration uses OpenAI.
 
 ## Capabilities
 

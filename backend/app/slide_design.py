@@ -96,6 +96,16 @@ def snapshot_generated(slide):
         slide.spec.generated_elements = {element.id: generated_state(element) for element in slide.elements}
 
 
+def detach_missing_anchors(elements):
+    shape_ids = {element.id for element in elements if isinstance(element, Shape)}
+    for element in elements:
+        if isinstance(element, Line):
+            if element.start_anchor and element.start_anchor.shape_id not in shape_ids:
+                element.start_anchor = None
+            if element.end_anchor and element.end_anchor.shape_id not in shape_ids:
+                element.end_anchor = None
+
+
 def stable_ids(slide, namespace, recipe):
     seen = set()
     ids = {}
@@ -303,8 +313,6 @@ def recompose_slide(slide, document, index, *, keep_recipe, replacement_content=
         result = build_slide(part, content, deck_so_far, index, images, brand, recipe=recipe,
                              data_driven=spec.data_driven, image_ratio=spec.image_ratio,
                              web_image_ratio=spec.web_image_ratio, slide_id=slide.id, id_namespace=spec.id_namespace)
-        if result.spec is None:
-            return None
         if len(removed) > 1000:
             return None
         result.spec.deleted_ids = sorted(removed)
@@ -328,13 +336,7 @@ def recompose_slide(slide, document, index, *, keep_recipe, replacement_content=
         result.elements = new_elements
         if len(result.elements) > 100:
             return None
-        remaining = {e.id for e in result.elements if isinstance(e, Shape)}
-        for e in result.elements:
-            if isinstance(e, Line):
-                if e.start_anchor and e.start_anchor.shape_id not in remaining:
-                    e.start_anchor = None
-                if e.end_anchor and e.end_anchor.shape_id not in remaining:
-                    e.end_anchor = None
+        detach_missing_anchors(result.elements)
         if slide.background != spec.generated_background:
             result.background = slide.background
         if slide.notes != spec.generated_notes:

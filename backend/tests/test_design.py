@@ -50,7 +50,7 @@ def test_dark_financial_deck_reuses_direction_and_exports_native_exhibits(monkey
     monkeypatch.setattr(Intelligence, "structured", respond)
     client = TestClient(app)
     accounts = client.post("/api/v1/assets", files={"file": ("accounts.txt", str(rows).encode(), "text/plain")}).json()
-    path = create(client, "Three slides for investors about finance in dark luxury style.", asset_ids=[accounts["id"]])
+    path = create(client, "Three slides for investors about finance in dark luxury style.", native=True, asset_ids=[accounts["id"]])
     work()
     saved = client.get(path).json()
     assert saved["status"] == "FAILED"
@@ -150,7 +150,7 @@ def test_supplied_costs_and_decision_use_editable_exhibits(monkeypatch):
     client = TestClient(app)
     path = create(client, "Four slides for operations. Use only these supplied figures: monthly costs $100 ($70 labor, $30 tools) "
                          "and $60 ($35 labor, $25 tools). "
-                         "Allocate $1,000, $800, $300 and $200.", research=True)
+                         "Allocate $1,000, $800, $300 and $200.", research=True, native=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -208,7 +208,7 @@ def test_requested_cover_image_fits_and_is_used_once(monkeypatch):
         return structured(self, schema, task, data, stage, image)
 
     monkeypatch.setattr(Intelligence, "structured", respond)
-    path = create(client, "Create two editorial slides for buyers with the photo on the cover only.", asset_ids=[asset])
+    path = create(client, "Create two editorial slides for buyers with the photo on the cover only.", native=True, asset_ids=[asset])
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -240,7 +240,7 @@ def test_explicit_diagram_style_routes_comparison_to_native_branch(monkeypatch):
 
     monkeypatch.setattr(Intelligence, "structured", respond)
     client = TestClient(app)
-    path = create(client, "Create one diagram-friendly slide about a review workflow for operators.", aspect_ratio="1:1")
+    path = create(client, "Create one diagram-friendly slide about a review workflow for operators.", aspect_ratio="1:1", native=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -284,7 +284,7 @@ def test_swimlane_request_routes_to_editable_anchored_export(monkeypatch):
 
     monkeypatch.setattr(Intelligence, "structured", respond)
     client = TestClient(app)
-    path = create(client, "Create one slide with a swimlane diagram for developers.", aspect_ratio="1:1")
+    path = create(client, "Create one slide with a swimlane diagram for developers.", aspect_ratio="1:1", native=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"

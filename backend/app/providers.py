@@ -89,8 +89,6 @@ def validation_hint(error: ValidationError) -> str:
 
 
 def provider_for(s: Settings) -> str:
-    if s.app_env == "test" or s.llm_api_url == "demo":
-        return "demo"
     try:
         url = urlsplit(s.llm_api_url)
         port = url.port
@@ -112,8 +110,6 @@ def provider_for(s: Settings) -> str:
 
 
 def provider_configured(s: Settings, provider: str) -> bool:
-    if provider == "demo":
-        return s.app_env != "production"
     return bool(provider and s.llm_model_id and (s.llm_api_key or provider in {"ollama", "compatible"}))
 
 
@@ -250,9 +246,6 @@ class Intelligence:
         layout = (data.get("item") or {}).get("layout") if stage == "slide" and "visual" in schema.model_fields else None
         if layout:
             validation_context = {**(validation_context or {}), "layout": layout}
-        if self.provider == "demo":
-            from app.demo import demo_response
-            return schema.model_validate(demo_response(schema.__name__, data), context=validation_context)
         s = settings()
         if required_exhibit:
             contract = exhibit_response_schema(schema, required_exhibit, visual_choice)

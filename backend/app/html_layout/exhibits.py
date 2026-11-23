@@ -1,11 +1,11 @@
 """Place structured exhibits inside CSS frames, retaining their data for the editor."""
 from app.composition import OutlineItem, SlideContent
 from app.design import style_chart
-from app.domain import Chart, Line, Shape, Slide, SlideSpec
+from app.domain import Chart, Slide, SlideSpec
 from app.exhibit_evidence import STATUS_KEY, evidence_label, exhibit_bindings, with_badge
 from app.exhibit_layout import compose_exhibit
 from app.html_layout.review import readability_warnings
-from app.slide_design import generated_state, preserve_edits, recipe_options, stable_ids
+from app.slide_design import detach_missing_anchors, generated_state, preserve_edits, recipe_options, snapshot_generated, stable_ids
 
 
 def fill_region(document, slide, region, content, recipe, namespace, workbook=None):
@@ -50,8 +50,8 @@ def attach_region(document, slide, region, page, plan, observations):
                            generated_background=slide.background, generated_notes=slide.notes,
                            available_recipes=recipe_options(part, content, document) if visual else ["standard"],
                            value_bindings=[b.model_dump(mode="json") for b in bindings],
-                           generated_ids=[e.id for e in slide.elements],
-                           generated_elements={e.id: generated_state(e) for e in slide.elements})
+                           generated_ids=[e.id for e in slide.elements])
+    snapshot_generated(slide)
     return slide
 
 
@@ -89,12 +89,7 @@ def rebuild_region(document, draft, content, recipe):
         spec.generated_elements = baseline
         spec.recipe = recipe
         spec.available_recipes = recipe_options(OutlineItem.model_validate(spec.plan), content, document)
-        shapes = {e.id for e in slide.elements if isinstance(e, Shape)}
-        for line in (e for e in slide.elements if isinstance(e, Line)):
-            for field in ("start_anchor", "end_anchor"):
-                anchor = getattr(line, field)
-                if anchor and anchor.shape_id not in shapes:
-                    setattr(line, field, None)
+        detach_missing_anchors(slide.elements)
         slide.warnings = list(dict.fromkeys([*layer.warnings, *readability_warnings(document, slide)]))[:30]
         return Slide.model_validate(slide.model_dump())
     except ValueError:

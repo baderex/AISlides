@@ -17,14 +17,14 @@ from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
 from app.db import Job, PresentationRecord, Session, now
 from app.design import ArtDirection, DIRECTOR_PROMPT, apply_brand_kit, enforce_constraints, explicit_constraints, font_family, reference_sheet
-from app.domain import Image, Skill, Slide, Source, Theme, read_document
+from app.domain import Skill, Slide, Source, Theme, read_document
 from app.evidence import EVIDENCE_GUIDANCE, EvidenceObservation, resolve_headline, verified_observations
 from app.export_review import ReviewBusy, ReviewUnavailable, renderer
 from app.imagery import image_configured, render_image, source_web_image
 from app import html_layout
 from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, page_schema
 from app.master_artwork import master_artwork
-from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
+from app.presentations import asset_sources, assets_for, begin_write, emit, persist, referenced_images, skill_for
 from app.previews import put_preview
 from app.providers import Intelligence, ProviderError
 from app.questions import Choice, Clarification, Option, standard_options
@@ -350,19 +350,25 @@ def image_ids(assets, context):
     return images
 
 
-def generate_slide_image(job_id, token, index, owner_id, prompt, ai, context):
+def image_generation_blocker(usage):
     if not image_configured():
-        raise ProviderError("The image provider is unavailable.")
+        return "The image provider is unavailable."
     config = settings()
-    if ai.usage.get("images", 0) >= config.image_limit_per_job:
-        raise ProviderError("The illustration limit for this presentation has been reached.")
-    if config.ai_job_cost_budget > 0 and ai.usage["estimated_cost"] + config.image_cost_usd > config.ai_job_cost_budget:
-        raise ProviderError("The estimated job budget has no room for this illustration.")
+    if usage.get("images", 0) >= config.image_limit_per_job:
+        return "The illustration limit for this presentation has been reached."
+    if config.ai_job_cost_budget > 0 and usage["estimated_cost"] + config.image_cost_usd > config.ai_job_cost_budget:
+        return "The estimated job budget has no room for this illustration."
+    return None
+
+
+def generate_slide_image(job_id, token, index, owner_id, prompt, ai, context):
+    if reason := image_generation_blocker(ai.usage):
+        raise ProviderError(reason)
     key = render_image(job_id, token, index, owner_id, prompt)
     if key and key not in context.get("generated_images", []):
         context["generated_images"] = [*context.get("generated_images", []), key]
         ai.usage["images"] = ai.usage.get("images", 0) + 1
-        ai.usage["estimated_cost"] = round(ai.usage["estimated_cost"] + config.image_cost_usd, 6)
+        ai.usage["estimated_cost"] = round(ai.usage["estimated_cost"] + settings().image_cost_usd, 6)
     return key
 
 
@@ -461,6 +467,14 @@ def lock_presentation(db, job_id):
     ).with_for_update())
 
 
+def finish_slide(document, context, events, slide, png, index):
+    document.slides.append(slide)
+    context["progress_index"] = index + 1
+    context["_preview_bytes"] = png
+    events.append(("slide.completed", f"Slide {index + 1} is ready.",
+                   {"slide_id": slide.id, "index": index, "warnings": slide.warnings}))
+
+
 def completed(document, usage, count):
     message = ("The presentation was generated. Check the slide review notes before exporting."
                if any(slide.warnings for slide in document.slides) else "The presentation is ready to edit and export.")
@@ -494,27 +508,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         attach_slide_sources(document, context)
     web_image = context.get("web_image") if stage in {"review", "revise"} else None
     if web_image:
-        source = Source.model_validate(web_image["source"])
-        index = context.get("progress_index", len(document.slides))
-        part = OutlineItem.model_validate(context["outline"]["slides"][index])
-        previous = SlideContent.model_validate(context["slide_content"])
-        if accepts_web_image(part, previous, brand):
-            document.sources.append(source)
-        else:
-            # Recompose older drafts that switched to an editorial layout to fit the image.
-            context.pop("web_image")
-            web_image = None
-            previous.image_asset_id = None
-            previous.source_ids = [key for key in previous.source_ids if key != source.id]
-            context["slide_content"] = previous.model_dump(mode="json")
-            context["draft"] = build_slide(part, previous, document, index, image_ids(assets, context), brand,
-                                       data_driven=data_driven).model_dump(mode="json")
+        document.sources.append(Source.model_validate(web_image["source"]))
     events = []
     version = None
     changed = None
     state = "queued"
-    if stage == "plan" and not context.get("design_completed"):
-        stage = "design"
     if stage == "analyze":
         if not start_status(job_id, token, "ANALYZING", "agent.started", "Analyzing the request and reference materials."):
             return None
@@ -565,12 +563,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if web_research is None:
             return "research", "waiting", "WAITING_FOR_USER", events, None, None
         context["web_research_enabled"] = web_research
-        if context.get("layout_engine") == "auto":
+        if context["layout_engine"] == "auto":
             # Preserve master placeholders and the focused-research/claim reconciliation pipeline.
-            native = (ai.provider == "demo" or brand
+            native = (brand
                       or (data_driven and (web_research or any(not a.media_type.startswith("image/") for a in assets))))
             context["layout_engine"] = "native" if native else "html"
-        after_research = "html_plan" if context.get("layout_engine") == "html" else "design"
+        after_research = {"html": "html_plan", "native": "design"}[context["layout_engine"]]
         if after_research == "html_plan" and not web_research and not any(a.extracted.strip() for a in assets):
             events.append(("research.completed", "Using the supplied prompt as the slide brief.", {}))
             return after_research, "queued", "PLANNING", events, None, None
@@ -647,7 +645,6 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             document.theme.design = skill.theme.design
             document.theme = apply_brand_kit(document.theme, skill.theme)
         document.sources = [Source.model_validate(s) for s in context["sources"]]
-        attach_slide_sources(document, context)
         events.extend([("design.completed", "HTML/CSS layout and palette ready.", {}),
                        ("outline.completed", "Slide outline ready.", {"outline":{"title":plan.title,
                         "slides":[{"title":p.title} for p in plan.slides]}})])
@@ -669,10 +666,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             theme["display"] = document.theme.design.heading_font
         pictures = {a.id:a.name for a in assets if a.media_type.startswith("image/")}
         if not inferred_intent.get("reuse_uploaded_images"):
-            for prior in document.slides:
-                for element, *_ in flattened(prior.elements):
-                    if isinstance(element, Image):
-                        pictures.pop(element.asset_id, None)
+            for key in referenced_images(document.slides):
+                pictures.pop(key, None)
         previous = context.get("layout_retry", {})
         media = context.get("html_media", {})
         if stage == "html_slide" and not media and (part.image_query or part.image_prompt):
@@ -724,13 +719,9 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         context.pop("layout_retry", None)
         context.pop("html_candidate")
         context.pop("html_media", None)
-        slide.notes, slide.source_ids, slide.layout = candidate.notes, candidate.source_ids, part.layout
         if media.get("warning"):
             slide.warnings = [media["warning"], *slide.warnings][:30]
-        document.slides.append(slide)
-        context["progress_index"] = index+1
-        context["_preview_bytes"] = png
-        events.append(("slide.completed", f"Slide {index+1} is ready.", {"slide_id":slide.id,"index":index,"warnings":slide.warnings}))
+        finish_slide(document, context, events, slide, png, index)
         stage, status, changed = "html_slide", "GENERATING", document
     elif stage == "design":
         if not start_status(job_id, token, "PLANNING", "agent.started", "Choosing the deck typography, palette and visual rules."):
@@ -761,7 +752,6 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 rules = baseline.design.model_copy(update=brief)
             theme = baseline.model_copy(update={"design": rules})
         document.theme = theme
-        context["design_completed"] = True
         events.append(("design.completed", "Deck design system ready.", {"mood": theme.design.mood}))
         stage, status, changed = "plan", "PLANNING", document
     elif stage == "plan":
@@ -799,7 +789,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                         prompt, re.I) and not re.search(r"\b(no|omit|avoid|without)\s+(?:any\s+)?diagrams?\b", prompt, re.I))
         supplied_breakdown = len(re.findall(r"\([^()\n]*[$€£¥]\s*\d[^()\n]*[$€£¥]\s*\d[^()\n]*\)", prompt)) >= 2
         for part in outline.slides:
-            if not part.visual and ai.provider != "demo" and part.layout not in {"cover", "section", "quote"}:
+            if not part.visual and part.layout not in {"cover", "section", "quote"}:
                 part.visual = named_visual(f"{part.title} {part.topic} {part.purpose}")
             if part.visual:
                 part.exhibit, part.layout = "visual", VISUAL_LAYOUTS[part.visual.type]
@@ -837,16 +827,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 context["slide_sources"] = focused_sources(document, align_query_period(query, period))
             attach_slide_sources(document, context)
         images = image_ids(assets, context)
-        if not inferred_intent.get("reuse_uploaded_images", False):
-            used = {el.asset_id for slide in document.slides for el, *_ in flattened(slide.elements)
-                    if isinstance(el, Image)}
-            images.difference_update(used)
+        if not inferred_intent.get("reuse_uploaded_images"):
+            images.difference_update(referenced_images(document.slides))
         can_illustrate = (
-            item.request.get("generate_images") and ai.provider != "demo" and image_configured() and
-            not part.visual and
-            ai.usage.get("images", 0) < settings().image_limit_per_job and
+            item.request.get("generate_images") and not part.visual and
             (part.layout in IMAGE_LAYOUTS or (part.layout == "cover" and not part.exhibit)) and
-            (settings().ai_job_cost_budget <= 0 or ai.usage["estimated_cost"] + settings().image_cost_usd <= settings().ai_job_cost_budget)
+            image_generation_blocker(ai.usage) is None
         )
         style_guidance = ""
         if part.visual:
@@ -1037,7 +1023,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 log.warning("Could not render inherited artwork for slide %s", slide.id)
         draft_content = SlideContent.model_validate(context["slide_content"])
         important = slide.layout in {"cover", "chart", "research", "process"} or bool(draft_content.visual)
-        use_vision = settings().llm_vision_enabled and ai.provider != "demo" and important
+        use_vision = settings().llm_vision_enabled and important
 
         def evaluate(part, recipes, image):
             try:
@@ -1082,9 +1068,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if part.exhibit and (exhibit := context["slide_content"].get(part.exhibit)):
             earlier = context.get("earlier_exhibits", [])
             context["earlier_exhibits"] = [*earlier[-5:], {"slide": index + 1, part.exhibit: exhibit}]
-        document.slides.append(slide)
-        context["_preview_bytes"] = png
-        context["progress_index"] = index + 1
+        finish_slide(document, context, events, slide, png, index)
         changed = document
         context.pop("draft", None)
         context.pop("slide_content", None)
@@ -1093,7 +1077,6 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         context.pop("web_image", None)
         context.pop("web_image_warning", None)
         context.pop("slide_sources", None)
-        events.append(("slide.completed", f"Slide {index + 1} is ready.", {"slide_id": slide.id, "index": index, "warnings": slide.warnings}))
         stage, status = "slide", "GENERATING"
     elif stage == "revise":
         index = context.get("progress_index", len(document.slides))

@@ -544,7 +544,8 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         return y + height
 
     points = content.points
-    if rules and item.layout == "cover" and content.image_asset_id in image_ids and (ratio := image_ratio or web_image_ratio):
+    image_ratio = image_ratio or web_image_ratio
+    if rules and item.layout == "cover" and content.image_asset_id in image_ids and image_ratio:
         if compact:
             image = Image(x=.055, y=.33, w=.89, h=.61, asset_id=content.image_asset_id, alt=item.title)
             end = fitted_label(item.title, .07, .07, .86, .15, 48, 31, ink, heading=True)
@@ -553,7 +554,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             image = Image(x=.035, y=.045, w=.65, h=.91, asset_id=content.image_asset_id, alt=item.title)
             end = fitted_label(item.title, .719, .29, .245, .33, 64, 30, ink, heading=True)
             fitted_label(content.subtitle, .722, end + .028, .225, .22, 19, 14, muted)
-        elements.append(fit_image(image, document, ratio))
+        elements.append(fit_image(image, document, image_ratio))
         return slide
 
     if rules and item.layout == "cover" and content.cover_callout:
@@ -807,14 +808,13 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
                               header_color=readable("#FFFFFF", accent) if consulting else None))
     elif content.image_asset_id in image_ids and item.layout in IMAGE_LAYOUTS:
         image = Image(x=.55, y=.45, w=.38, h=.44, asset_id=content.image_asset_id, alt=item.title)
-        if web_image_ratio or image_ratio:
-            elements.append(image)
+        elements.append(image)
+        if image_ratio:
             for i, point in enumerate(points[:3]):
                 y = .46 + i * .146
                 label(point.title, .07, y, .43, .056, 18, ink, True)
                 label(point.body, .07, y + .06, .43, .08, 15, muted)
         else:
-            elements.append(image)
             for i, point in enumerate(points[:2]):
                 y = .46 + i * .21
                 label(point.title, .07, y, .43, .06, 20, ink, True)
@@ -931,7 +931,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             if isinstance(element, Chart):
                 style_chart(element, t, bg)
             if isinstance(element, Image):
-                ratio = (image_ratio or web_image_ratio) if element.asset_id == content.image_asset_id else 1
+                ratio = image_ratio if element.asset_id == content.image_asset_id else 1
                 if ratio:
                     fitted = fit_image(element, document, ratio)
                     element.x, element.y, element.w, element.h = fitted.x, fitted.y, fitted.w, fitted.h
@@ -944,10 +944,6 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
 def compose_visual_slide(item, content, document, brand, image_ids, source_ids, recipe):
     role = VISUAL_LAYOUTS[content.visual.type]
     heading = item.title.strip() or content.title.strip() or "Untitled slide"
-    source_ids = list(dict.fromkeys(key for key in content.source_ids if key in source_ids))
-    slide = Slide(title=heading, layout=role, background=document.theme.background,
-                  notes=content.notes, source_ids=source_ids)
-    frame = ExhibitCanvas(document, slide, (.06, .055, .88, .89))
     if brand:
         header = content.model_copy(update={"points": [], "subtitle": "", "chart": None, "table": None,
                                             "image_asset_id": None})
@@ -966,6 +962,9 @@ def compose_visual_slide(item, content, document, brand, image_ids, source_ids, 
             x, w = .06, .88
         frame = ExhibitCanvas(document, slide, (x, top, w, bottom - top))
     else:
+        slide = Slide(title=heading, layout=role, background=document.theme.background, notes=content.notes,
+                      source_ids=list(dict.fromkeys(key for key in content.source_ids if key in source_ids)))
+        frame = ExhibitCanvas(document, slide, (.06, .055, .88, .89))
         frame.label(heading, 0, 0, 1, .184, 35, bold=True, emphasis=content.decorations.emphasis if content.decorations else ())
         heading_box = slide.elements[-1]
         top = max(.17, heading_box.y + heading_box.h + .042)

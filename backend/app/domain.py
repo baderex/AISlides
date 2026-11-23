@@ -283,19 +283,25 @@ def display_value(value: float, prefix: str = "") -> str:
     return ("−" if value < 0 and magnitude != "0" else "") + prefix + magnitude
 
 
-class Chart(ElementBase):
-    type: Literal["chart"] = "chart"
-    chart: Literal["bar", "column", "line", "pie", "stacked_column"] = "column"
+ChartKind = Literal["bar", "column", "line", "pie", "stacked_column"]
+
+
+class WorkbookData(Contract):
+    chart: ChartKind
     categories: list[ShortText] = Field(min_length=1, max_length=16)
     series: list[Series] = Field(min_length=1, max_length=5)
-    color: Color = "#4C52D9"
-
-    palette: list[Color] = Field(default_factory=list, max_length=5)
-    label_color: Color = "#292C49"
-    font: str = Field(default="Arial", max_length=60)
     value_prefix: str = Field(default="", max_length=8)
     value_suffix: str = Field(default="", max_length=8)
     show_values: bool = False
+
+
+class Chart(ElementBase, WorkbookData):
+    type: Literal["chart"] = "chart"
+    chart: ChartKind = "column"
+    color: Color = "#4C52D9"
+    palette: list[Color] = Field(default_factory=list, max_length=5)
+    label_color: Color = "#292C49"
+    font: str = Field(default="Arial", max_length=60)
     highlight: int | None = Field(default=None, ge=0)
     context_color: Color | None = None
 

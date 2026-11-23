@@ -16,6 +16,13 @@ os.environ["ALLOW_SIGNUP"] = "true"
 from app.auth import LOCAL_USER
 from app.db import Base, Session, User, engine
 from app.skills import seed
+from model_fixture import model_fixture
+
+
+@pytest.fixture(autouse=True)
+def use_model_fixture():
+    with model_fixture():
+        yield
 
 
 @pytest.fixture(scope="session", autouse=True)

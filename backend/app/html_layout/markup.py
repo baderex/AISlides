@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 from pydantic import Field, ValidationInfo, create_model, model_validator
 
-from app.domain import Color, Contract, Identifier, Layout, Series, ShortText
+from app.domain import Color, Contract, Identifier, Layout, WorkbookData
 from app.evidence import EvidenceObservation
 from app.visuals import VISUAL_MODELS, VisualType
 
@@ -42,15 +42,6 @@ class PageMarkup(Contract):
     source_ids: list[Identifier] = Field(default_factory=list, max_length=20)
     notes: str = Field(default="", max_length=3500)
     markup: str = Field(description="One XML page containing composed visual content", max_length=30000)
-
-
-class WorkbookData(Contract):
-    chart: Literal["bar", "column", "line", "pie", "stacked_column"]
-    categories: list[ShortText] = Field(min_length=1, max_length=16)
-    series: list[Series] = Field(min_length=1, max_length=5)
-    value_prefix: str = Field(default="", max_length=8)
-    value_suffix: str = Field(default="", max_length=8)
-    show_values: bool = False
 
 
 @lru_cache

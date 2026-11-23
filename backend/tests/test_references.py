@@ -227,7 +227,7 @@ def test_data_driven_can_continue_without_web_research(monkeypatch):
     monkeypatch.setattr(Intelligence, "structured", plan)
     monkeypatch.setattr("app.workflow.collect", unexpected_search)
     client = TestClient(app)
-    path = create(client, "One slide about electricity generation", research=False)
+    path = create(client, "One slide about electricity generation", research=False, native=True)
     work()
     question, = client.get(path + "/questions").json()["questions"]
     answers = {"answers": [{"question_id": question["id"], "option_ids": ["continue"]}]}
@@ -372,9 +372,6 @@ def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, 
     monkeypatch.setattr("app.workflow.collect", lambda query: [])
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: http_client(transport=httpx.MockTransport(respond), **kwargs))
     structured = Intelligence.structured
-    if html:
-        monkeypatch.setattr("app.providers.provider_for", lambda config: "compatible")
-        monkeypatch.setattr("app.providers.provider_configured", lambda config, provider: True)
 
     def plan(self, schema, task, data, stage="planning", image=None):
         if schema is Intent:
@@ -401,7 +398,7 @@ def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, 
     prompt = "Create one slide for students about Example."
     if requested:
         prompt += " Include an official portrait."
-    path = create(client, prompt, research=True)
+    path = create(client, prompt, research=True, native=not html)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -463,7 +460,7 @@ def test_image_queries_cannot_replace_planned_layouts_or_exhibits(monkeypatch, d
 
     monkeypatch.setattr(Intelligence, "structured", plan)
     client = TestClient(app)
-    path = create(client, "Build a quarterly results deck with web research and photos.", research=True)
+    path = create(client, "Build a quarterly results deck with web research and photos.", research=True, native=True)
     work()
     result = client.get(path).json()
     assert result["status"] == "COMPLETED"
@@ -473,28 +470,3 @@ def test_image_queries_cannot_replace_planned_layouts_or_exhibits(monkeypatch, d
     assert any(element["type"] == "table" for element in slides[3]["elements"])
     assert all(element["type"] != "image" for slide in slides for element in slide["elements"])
     assert [item["id"] for item in result["document"]["sources"]] == [source.id]
-
-
-def test_resuming_an_older_image_draft_restores_the_planned_layout():
-    client = TestClient(app)
-    path = create(client, "Generate one slide in editorial style about accessibility for new hires.")
-    work(6)
-    identifier = path.rsplit("/", 1)[1]
-    source = Source(title="Old web photo", asset_id="old_asset")
-    with Session.begin() as db:
-        job = db.scalar(select(Job).where(Job.presentation_id == identifier))
-        assert job.checkpoint == "review"
-        job.context = {
-            **job.context,
-            "draft": {**job.context["draft"], "layout": "editorial", "source_ids": [source.id]},
-            "slide_content": {**job.context["slide_content"], "image_asset_id": source.asset_id,
-                              "source_ids": [source.id]},
-            "web_image": {"source": source.model_dump(mode="json"), "ratio": 1., "layout": "editorial"},
-        }
-
-    work()
-    final = client.get(path).json()
-    assert final["status"] == "COMPLETED"
-    slide, = final["document"]["slides"]
-    assert slide["layout"] == "cover"
-    assert not slide["source_ids"] and not final["document"]["sources"]

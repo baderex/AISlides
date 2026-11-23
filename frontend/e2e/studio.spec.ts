@@ -22,6 +22,7 @@ test('edit exhibit values and composition, then save and reload the rebuilt slid
   expect(seeded.ok()).toBe(true);
 
   await page.goto('/presentation/' + id);
+  await expect(page.getByRole('banner').getByText('Draft', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Edit exhibit', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Edit exhibit' });
   await dialog.getByRole('group', { name: 'Pricing' }).getByRole('spinbutton', { name: 'Value' }).fill('-18');
@@ -83,11 +84,9 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
   await page.screenshot({ path: info.outputPath('workspace.png') });
 
   await page.getByRole('button', { name: /Slide 2: What makes it different/ }).click();
-  const icons = page.locator('.canvas-frame img[src*="/assets/lucide-"]');
-  await expect(icons).toHaveCount(2);
-  await expect.poll(() => icons.evaluateAll(images => images.every(image => (image as HTMLImageElement).naturalWidth > 0)))
-    .toBe(true);
-  await page.screenshot({ path: info.outputPath('workspace-icons.png') });
+  const table = page.locator('.canvas-frame table');
+  await expect(table.getByText('Classical bits')).toBeVisible();
+  await expect(table.getByText('Quantum bits')).toBeVisible();
   await page.getByRole('button', { name: /Slide 1: Quantum Computing/ }).click();
 
   const text = page.locator('.canvas-frame .slide-text').filter({ hasText: /^Quantum Computing$/ });
@@ -115,6 +114,7 @@ test('clarify, reload, generate, edit, save and export an editable PowerPoint', 
     'assert len(deck.slides) == 3',
     'assert any(s.shape_type == MSO_SHAPE_TYPE.TEXT_BOX and s.text == "Quantum Computing for Directors" for s in deck.slides[0].shapes)',
     'assert any(s.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE for s in deck.slides[0].shapes)',
+    'assert any(s.has_table and s.table.cell(0, 0).text == "Classical bits" for s in deck.slides[1].shapes)',
   ].join('\n'), output]);
 });
 
@@ -295,7 +295,7 @@ test('the Skill library confirms deletion and clears a deleted draft skill', asy
 
 test('import a branded template and review the generated PowerPoint', async ({ page }, info) => {
   test.skip(!process.env['POWERPOINT_RENDERER'], 'Set POWERPOINT_RENDERER to run the Impress integration.');
-  test.setTimeout(85000);
+  test.setTimeout(120000);
   const python = resolve('../backend/.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   const template = info.outputPath('Company.pptx');
   execFileSync(python, ['-c', [
@@ -316,10 +316,19 @@ test('import a branded template and review the generated PowerPoint', async ({ p
   await expect(page.getByLabel('Slide aspect ratio')).toHaveValue('4:3');
   await page.getByLabel('Describe your presentation').fill('Generate three slides about quantum computing for executives.');
   await page.getByRole('button', { name: 'Generate slides' }).click();
-  await expect(page.getByText('The presentation is ready to edit and export.', { exact: true })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole('banner').getByText('Ready', { exact: true })).toBeVisible({ timeout: 55000 });
 
   await page.getByRole('button', { name: 'Export', exact: true }).click();
-  await page.getByRole('button', { name: 'Review PowerPoint export' }).click();
+  const reviewButton = page.getByRole('button', { name: 'Review PowerPoint export' });
+  await expect.poll(async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/export/review?') && r.request().method() === 'POST'),
+      reviewButton.click(),
+    ]);
+    if (response.status() === 429) return false;
+    expect(response.ok()).toBe(true);
+    return true;
+  }, { timeout: 55000, intervals: [1000, 2000] }).toBe(true);
   const review = page.getByRole('dialog', { name: 'PowerPoint export review' });
   await expect(review).toBeVisible({ timeout: 55000 });
   await review.getByRole('combobox', { name: 'Slide', exact: true }).selectOption('0', { timeout: 5000 });
