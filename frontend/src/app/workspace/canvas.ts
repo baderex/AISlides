@@ -112,6 +112,7 @@ export class SlideCanvas {
   }
 
   font(size: number) { return size / this.widthPoints() * 100 + 'cqw'; }
+  fontFamily(name?: string) { return JSON.stringify(name || 'Arial'); }
 
   linePath(direction?: string) {
     return ({

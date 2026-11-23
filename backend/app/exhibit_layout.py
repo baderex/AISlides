@@ -93,7 +93,7 @@ def waterfall(c, v):
         total = i == 0 or i == len(labels) - 1
         identity = f"waterfall:{'start' if i == 0 else 'end' if total else f'driver:{label}'}"
         value = end if total else v.rows[i - 1].values[0]
-        color = c.accent if total or value >= 0 else "#A44742"
+        color = c.colors["highlight" if total else "negative" if value < 0 else "positive" if value > 0 else "neutral"]
         if bottom > top:
             c.shape(x, top, width, bottom - top, color, element_key=f"{identity}:bar")
         else:
@@ -124,7 +124,7 @@ def composition(c, v):
             segment = f"{identity}:{v.series[i]}"
             height = .55 * value / (total if split else maximum)
             if height:
-                fill = c.palette[i]
+                fill = c.palette[i % len(c.palette)]
                 c.shape(left, bottom - height, width, height, fill, element_key=f"{segment}:bar")
                 if height >= .11 and width >= .075:
                     c.label(f"{value / total:.0%}" if split else fmt(value), left, bottom - height, width, height,
@@ -138,7 +138,7 @@ def composition(c, v):
         x += column
     for i, name in enumerate(v.series):
         step = 1 / len(v.series)
-        c.shape(i * step + .01, .89, .022, .035, c.palette[i], element_key=f"{v.type}:legend:{name}:swatch")
+        c.shape(i * step + .01, .89, .022, .035, c.palette[i % len(c.palette)], element_key=f"{v.type}:legend:{name}:swatch")
         c.label(name, i * step + .04, .86, step - .044, .11, 11, element_key=f"{v.type}:legend:{name}:label")
 
 
@@ -682,10 +682,11 @@ def venn(c, v):
     width = height * c.h * c.pth / (c.w * c.ptw)
     for i, (name, only) in enumerate(((v.left, v.left_only), (v.right, v.right_only))):
         center = .5 + (i - .5) * width * .64
-        fill = blend(c.slide.background, c.palette[i], .38)
+        color = c.palette[i % len(c.palette)]
+        fill = blend(c.slide.background, color, .38)
         identity = "venn:left" if i == 0 else "venn:right"
         c.shape(center - width / 2, .54 - height / 2, width, height, fill,
-                shape="ellipse", opacity=.68, border=c.palette[i], element_key=f"{identity}:circle")
+                shape="ellipse", opacity=.68, border=color, element_key=f"{identity}:circle")
         title_width = width * .60
         c.label(name, center - title_width / 2, 0, title_width, .14, 15, bold=True, align="center",
                 element_key=f"{identity}:heading")
@@ -697,19 +698,22 @@ def venn(c, v):
 
 
 def code(c, v):
+    mono = c.theme.font if c.theme.brand_kit and "font" in c.theme.brand_kit.protected else "IBM Plex Mono"
     height = min(.12, .88 / len(v.lines))
     c.label(v.language, .022, 0, .95, .10, 13, color=c.muted, bold=True, element_key="code:language")
     c.shape(0, .105, 1, height * len(v.lines), c.surface, element_key="code:panel")
     for i, line in enumerate(v.lines):
         y = .105 + i * height
         identity = f"code:line:{i + 1}"
+        fill = c.surface
         if line.highlight:
-            c.shape(.002, y, .996, height, blend(c.slide.background, c.accent, .22), z=-1, element_key=f"{identity}:highlight")
+            fill = blend(c.slide.background, c.accent, .22)
+            c.shape(.002, y, .996, height, fill, z=-1, element_key=f"{identity}:highlight")
             c.shape(.002, y, .006, height, c.accent, z=-1, element_key=f"{identity}:accent")
-        c.label(str(i + 1), .015, y + height * .08, .054, height * .85, 12, color=c.muted,
-                font="Courier New", align="right", element_key=f"{identity}:number")
+        c.label(str(i + 1), .015, y + height * .08, .054, height * .85, 12, color=readable(c.muted, fill, c.ink),
+                font=mono, align="right", element_key=f"{identity}:number")
         c.label(line.code.expandtabs(4), .09, y + height * .08, .90, height * .85, 14,
-                font="Courier New", bold=line.highlight, element_key=f"{identity}:text")
+                font=mono, bold=line.highlight, element_key=f"{identity}:text")
         c.mark(str(i + 1), .98, y + height / 2)
 
 

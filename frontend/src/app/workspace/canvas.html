@@ -20,7 +20,7 @@
           [style.border]="el.border && (el.type !== 'shape' || (el.shape !== 'diamond' && !el.polygon)) ? '1px solid ' + el.border : null">
           @switch (el.type) {
             @case ('text') {
-              <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="el.font" [style.color]="el.color"
+              <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="fontFamily(el.font)" [style.color]="el.color"
                 [style.white-space]="el.single_line && !el.edited ? 'pre' : null" [style.line-height]="el.line_spacing"
                 [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">@for (run of textRuns(el); track $index) {<span [style.color]="run.color" [style.font-weight]="run.bold ? 700 : 400">{{ run.text }}</span>}</div>
             }
@@ -57,7 +57,7 @@
             }
             @case ('table') {
               @let format = tableFormat(el, g.w * frameWidth, g.h * frameHeight);
-              <table [style.font-family]="el.font || 'Arial'" [studioFitText]="el" [preferredFont]="font(el.size ?? 12)"
+              <table [style.font-family]="fontFamily(el.font)" [studioFitText]="el" [preferredFont]="font(el.size ?? 12)"
                 [style.color]="el.color" [style.background]="el.fill" [class.ruled-table]="el.row_rule"
                 [style.--row-rule]="el.row_rule" [style.--header-rule]="el.header_rule || el.row_rule"
                 [style.--row-rule-width]="font(.65)" [style.--header-rule-width]="font(el.header_rule ? 1.5 : .65)"
@@ -136,7 +136,7 @@
                       @if (mark.height > 0) {
                         <span class="stacked-point-value" [style.left.%]="mark.x + mark.width / 2"
                           [style.top.%]="(mark.y + mark.height / 2) * .90"
-                          [style.color]="segmentInk(chartColor(el, seriesIndex))" [style.font-family]="el.font"
+                          [style.color]="segmentInk(chartColor(el, seriesIndex))" [style.font-family]="fontFamily(el.font)"
                           [style.font-size]="font(12)">{{ chartPointValue(el, $index, seriesIndex) }}</span>
                       }
                     }
@@ -149,19 +149,19 @@
                     <span class="chart-point-value" [class.chart-value-side]="horizontal" [class.chart-value-negative]="mark.negative && !line"
                       [style.left.%]="horizontal ? mark.bx + (mark.negative ? 0 : mark.bw) : line ? mark.cx : mark.x + mark.w / 2"
                       [style.top.%]="horizontal ? mark.by + mark.horizontal * .4 : line ? mark.cy : mark.y + (mark.negative ? mark.h : 0)"
-                      [style.font-family]="el.font" [style.color]="el.highlight === $index ? chartColor(el, 0) : el.label_color"
+                      [style.font-family]="fontFamily(el.font)" [style.color]="el.highlight === $index ? chartColor(el, 0) : el.label_color"
                       [style.font-size]="font(line ? 14 : 12)">
                       {{ chartPointValue(el, $index) }}
                     </span>
                     @if (horizontal) {
                       <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * .4"
-                        [style.font-family]="el.font" [style.color]="el.label_color" [style.font-size]="font(11)">{{ el.categories[$index] }}</span>
+                        [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(11)">{{ el.categories[$index] }}</span>
                     }
                   }
                 }
                 @if (el.chart !== 'bar') {
                   <div class="chart-labels" [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values"
-                    [style.font-family]="el.font" [style.color]="el.label_color"
+                    [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color"
                     [style.font-size]="font(el.chart === 'stacked_column' || el.show_values ? 13 : 10)"
                     [style.font-weight]="el.chart === 'stacked_column' ? 700 : null">
                     @for (label of chartLabels(el); track $index) { <span>{{ label }}</span> }

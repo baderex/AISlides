@@ -22,7 +22,7 @@ def consulting_theme() -> Theme:
 
 
 def consulting_rules(theme: Theme) -> DesignRules:
-    return DesignRules(audience="Decision makers", purpose="Present evidence and a recommendation",
+    return DesignRules(family="consulting", audience="Decision makers", purpose="Present evidence and a recommendation",
                        industry="General", mood="Strategy consulting", brand_constraints="", visual_references="",
                        imagery="Use imagery where it supports the evidence.", heading_font=theme.font, spacing="compact",
                        card_shape="rect", cover_style="rules", cover_background=theme.background,

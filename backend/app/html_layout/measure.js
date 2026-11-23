@@ -2,6 +2,7 @@
 namespace => {
   const slide = document.querySelector(".slide");
   const page = slide.getBoundingClientRect();
+  const metrics = document.createElement("canvas").getContext("2d");
   const hex = css => {
     const rgb = /^rgb\((\d+), (\d+), (\d+)\)$/.exec(css);
     if (!rgb) throw Error("Use an opaque RGB color");
@@ -34,8 +35,14 @@ namespace => {
       const range = document.createRange();
       range.selectNodeContents(el);
       const fragments = [...range.getClientRects()].filter(line => line.width > 0);
+      const bounds = el.dataset.checkParent ? el.parentElement.getBoundingClientRect() : r;
+      metrics.font = style.fontWeight+" "+style.fontSize+" "+style.fontFamily;
+      const ink = metrics.measureText(el.textContent);
       for (const line of fragments) {
-        if (line.x < r.x-1 || line.right > r.right+1 || line.bottom > r.bottom+3)
+        // DOM ranges include unused ascent and descent. Check the painted ink against the frame.
+        const baseline = line.top + ink.fontBoundingBoxAscent;
+        if (line.x < bounds.x-1 || line.right > bounds.right+1 ||
+            baseline-ink.actualBoundingBoxAscent < bounds.top-3 || baseline+ink.actualBoundingBoxDescent > bounds.bottom+3)
           throw Error("Text exceeds its frame: " + el.innerText.slice(0,100));
       }
       const single = fragments.length > 0 && !el.innerText.includes("\n") &&

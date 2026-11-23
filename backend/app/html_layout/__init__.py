@@ -3,17 +3,22 @@ from functools import lru_cache
 from pathlib import Path
 import base64
 import io
+from math import dist
+import re
 
 from playwright.sync_api import Error as BrowserError, sync_playwright
 from PIL import Image
 
 from app.config import settings
+from app.bundled_fonts import browser_face, faces
 from app.db import uid
+from app.deck_design import DeckDesignSpec
 from app.domain import Document, ExhibitRegion, Slide, Theme
 from app.html_layout.exhibits import attach_region
 from app.html_layout.markup import MarkupError, parse_markup
-from app.html_layout.review import readability_warnings
+from app.html_layout.review import HARD_WARNINGS, readability_warnings
 from app.providers import ProviderError
+from app.palette import oklab, semantic_palette
 from app.rendering import preview
 from app.storage import Storage
 
@@ -99,6 +104,35 @@ def compose(markup, title, theme, aspect, available_pictures=(), document=None, 
         k: v for k, v in theme.items() if k in Theme.model_fields}))
     theme = dict(theme)
     apply_brand_roles(page_data["body"], theme, document, plan.layout if plan else None)
+    spec = DeckDesignSpec.from_theme(document.theme, aspect, plan.layout if plan else None)
+    root = page_data["body"]
+    bg = root["a"].setdefault("bg", "cover" if plan and plan.layout in {"cover","closing","section","quote"} else "background")
+    palette = spec.palette
+    def palette_value(value):
+        if re.fullmatch(r"#[\da-fA-F]{6}", value):
+            return min(palette.values(), key=lambda token: dist(oklab(token), oklab(value)))
+        return value
+
+    bg = palette.get(bg, palette_value(bg))
+    if re.fullmatch(r"#[\da-fA-F]{6}", bg):
+        palette = semantic_palette(document.theme, bg)
+        # Keep explicit authorized surfaces (including the resolved page background).
+        palette["page"] = bg
+        root["a"]["bg"] = "page"
+    nodes = [root]
+    while nodes:
+        node = nodes.pop()
+        nodes.extend(node["children"])
+        for key in ("bg", "color"):
+            if value := node["a"].get(key):
+                node["a"][key] = palette_value(value)
+        if node["tag"] == "text" and "role" not in node["a"] and (
+                node["t"] == title or node["a"].get("font") == "display"):
+            node["a"]["role"] = "cover" if plan and plan.layout == "cover" else "headline"
+    theme.update(palette=palette, roles={k:v.model_dump() for k,v in spec.typography.items()},
+                 margin=spec.margin_px, gap=spec.gap_px, display=document.theme.design.heading_font
+                 if document.theme.design else theme.get("display", document.theme.font),
+                 font=document.theme.font, mono=spec.typography["code"].family)
     logo = document.theme.brand_kit.logo_asset_id if document.theme.brand_kit else None
     if logo:
         if logo in pictures:
@@ -109,12 +143,15 @@ def compose(markup, title, theme, aspect, available_pictures=(), document=None, 
         browser = launch(playwright.chromium)
         try:
             page = browser.new_page(viewport={"width":width, "height":720}, offline=True)
+            fonts = "".join(browser_face(*face) for face in faces((theme["font"], theme["display"], theme["mono"])))
             page.set_content(f"""<meta charset="utf-8"><meta http-equiv="Content-Security-Policy"
-              content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'">
-              <style>*{{box-sizing:border-box}}body{{margin:0}}
+              content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'">
+              <style>{fonts}*{{box-sizing:border-box}}body{{margin:0}}
               .slide{{width:{width}px;height:720px;position:relative;overflow:hidden}}</style><main></main>""")
             # Only bundled code is evaluated. Untrusted markup crosses this boundary as parsed data.
             try:
+                # Layout-dependent widgets paint synchronously, so load the bundled faces before drawing.
+                page.evaluate("Promise.all(Array.from(document.fonts, face => face.load()))")
                 page.evaluate(script("draw.js"), {"theme":theme, "pages":[page_data], "width":width, "pictures":pictures,
                                                   "logo":logo, "hasExhibit":bool(plan and plan.exhibit)})
                 if pictures:
@@ -134,7 +171,8 @@ def compose(markup, title, theme, aspect, available_pictures=(), document=None, 
             if regions:
                 region = ExhibitRegion.model_validate({k:v for k,v in regions[0].items() if k != "type"})
                 slide = attach_region(document, slide, region, candidate, plan, observations)
-            slide.warnings = list(dict.fromkeys([*slide.warnings, *readability_warnings(document, slide)]))[:30]
+            warnings = dict.fromkeys([*slide.warnings, *readability_warnings(document, slide)])
+            slide.warnings = sorted(warnings, key=lambda w: not w.startswith(HARD_WARNINGS))[:30]
             if regions:
                 return slide, preview(document, slide, Storage().get, width)
             return slide, page.screenshot(type="png", timeout=15000)

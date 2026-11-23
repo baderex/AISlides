@@ -1,4 +1,5 @@
 import base64
+import ctypes
 import io
 import os
 import re
@@ -13,12 +14,14 @@ from itertools import islice
 from pathlib import Path
 from threading import BoundedSemaphore
 
+from PIL import Image as PILImage, ImageChops, ImageStat
 import pypdfium2 as pdfium
-from pypdfium2.raw import FPDF_PAGEOBJ_TEXT
+from pypdfium2.raw import FPDF_PAGEOBJ_TEXT, FPDFFont_GetFontData
+from reportlab.pdfbase.ttfonts import TTFError, TTFontFile
 
 from app.config import settings
-from app.domain import Document, Table, Text
-from app.rendering import flattened, table_columns
+from app.domain import Chart, Document, Image, Table, Text
+from app.rendering import fit_slide_text, flattened, table_columns, table_rows
 
 
 class ReviewUnavailable(RuntimeError):
@@ -125,15 +128,34 @@ def intersection(a, b):
 
 
 def cell_content(value):
-    value = unicodedata.normalize("NFKC", value).casefold().replace("−", "-")
+    # PDFium can extract the hyphen at an Office line break as U+0002.
+    value = unicodedata.normalize("NFKC", value).casefold().replace("−", "-").replace("\x02", "-")
     return "".join(ch for ch in value if ch.isalnum() or ch in "-+.%$€£¥")
 
 
+def rendered_face(font, aliases):
+    name = font.get_family_name()
+    if not name.isdecimal() or not font.is_embedded:
+        return name
+    # PowerPoint PDF export can assign numeric family names to temporary embedded faces.
+    key = font.get_base_name()
+    if key not in aliases:
+        aliases[key] = name
+        length = ctypes.c_size_t()
+        if FPDFFont_GetFontData(font, None, 0, ctypes.byref(length)) and 0 < length.value <= 8_000_000:
+            buffer = (ctypes.c_uint8 * length.value)()
+            if FPDFFont_GetFontData(font, buffer, len(buffer), ctypes.byref(length)):
+                try:
+                    aliases[key] = TTFontFile(io.BytesIO(bytes(buffer))).name.decode("ascii")
+                except (TTFError, ValueError):
+                    pass
+    return aliases[key]
+
+
 def missing_table_cells(text, table, x, top, width, height):
-    row_height = height / len(table.rows)
     columns = table_columns(table, width)
-    for row_index, row in enumerate(table.rows):
-        upper = top - row_index * row_height
+    for row_index, (row, (dy, row_height)) in enumerate(zip(table.rows, table_rows(table, height))):
+        upper = top - dy
         for column_index, (cell, (offset, cell_width)) in enumerate(zip(row, columns)):
             expected = cell_content(cell)
             if expected:
@@ -151,7 +173,8 @@ def page_findings(page, slide):
 
     width, height = page.get_size()
     with closing(page.get_textpage()) as text:
-        runs = [TextRun(obj.extract().strip(), obj.get_bounds(), obj.get_font().get_family_name())
+        aliases = {}
+        runs = [TextRun(obj.extract().strip(), obj.get_bounds(), rendered_face(obj.get_font(), aliases))
                 for obj in islice(page.get_objects(filter=[FPDF_PAGEOBJ_TEXT], textpage=text), 800)]
         runs = [run for run in runs if run.text and area(run.box) > 0]
         for element, x, y, w, h in flattened(slide.elements):
@@ -223,6 +246,48 @@ def review_powerpoint(raw: bytes, document: Document) -> list[dict]:
         return inspect_pdf(render_native_pdf(executable, raw), document)
     except pdfium.PdfiumError as error:
         raise ReviewUnavailable("The rendered PowerPoint could not be inspected.") from error
+
+
+def compare_rasters(preview, rendered, layers):
+    """Compare coarse paint coverage in corresponding regions, allowing for glyph antialiasing."""
+    with PILImage.open(io.BytesIO(preview)) as before, PILImage.open(io.BytesIO(rendered)) as after:
+        size = (96, max(12, round(96 * before.height / before.width)))
+        images = [im.convert("RGB").resize(size, PILImage.Resampling.BOX) for im in (before, after)]
+    diff = ImageChops.difference(*images)
+    missing = []
+    for el, x, y, w, h in layers:
+        if not isinstance(el, (Chart, Table, Image)) or w * h < .012 or not el.opacity:
+            continue
+        bounds = (int(x*size[0]), int(y*size[1]), round((x+w)*size[0]), round((y+h)*size[1]))
+        # A detailed exhibit turning into flat paint is different from a change in chart styling.
+        before, after = [ImageStat.Stat(im.crop(bounds)) for im in images]
+        if max(before.stddev) > 12 and max(after.stddev) < 2 and max(ImageStat.Stat(diff.crop(bounds)).mean) > 8:
+            missing.append(f"Export fit: the {el.type} at {x:.0%} from the left, {y:.0%} from the top disappeared.")
+    regions = []
+    for row, vertical in enumerate(("top", "middle", "bottom")):
+        for col, horizontal in enumerate(("left", "center", "right")):
+            bounds = (col * size[0]//3, row * size[1]//3, (col+1)*size[0]//3, (row+1)*size[1]//3)
+            rms = sum(ImageStat.Stat(diff.crop(bounds)).rms) / (3*255)
+            regions.append((rms, f"{vertical} {horizontal}"))
+    distance, region = max(regions)
+    return distance, region, missing
+
+
+def compare_slide_export(document, slide, canonical, get_asset, brand=None):
+    from app.powerpoint import to_pptx
+
+    fitted = slide.model_copy(deep=True)
+    fit_slide_text(document, fitted)
+    single = document.model_copy(update={"slides":[fitted]})
+    result, = review_powerpoint(to_pptx(single, get_asset, brand), single)
+    hard_codes = {"text-fit", "table-content", "off-slide", "text-overlap"}
+    issues = [("Export fit: " if issue["code"] in hard_codes else "Export difference: ") + issue["message"]
+              for issue in result["issues"]]
+    difference, region, missing = compare_rasters(canonical, base64.b64decode(result["image"]), flattened(fitted.elements))
+    issues.extend(missing)
+    if difference >= .13:
+        issues.append(f"Export difference: the {region} differs from the preview. Check object placement and size.")
+    return issues, difference
 
 
 def render_native_pdf(executable: str, raw: bytes) -> bytes:

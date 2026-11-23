@@ -50,6 +50,7 @@ def model_response(schema: str, data: dict) -> dict:
         direction = data["direction"].lower()
         if "dark" in direction and "luxury" in direction and not data["locked_template"]:
             theme.update(background="#191817", ink="#F7F2E8", muted="#D1C8B6", surface="#302E2A", accent="#D3B478")
+            theme["design"] = None  # Simulate the director overriding the seed for this custom brief.
         theme.pop("profile")
         theme["design"] = theme.get("design") or {
             "audience": data["intent"].get("audience") or "General audience",
@@ -98,8 +99,7 @@ def model_response(schema: str, data: dict) -> dict:
                 label += f" · {index + 1}"
             slides.append({"title": label, "layout": layout, "purpose": f"Explain {label.lower()} in the context of {title}."})
         if schema == "HtmlPlan":
-            return {"title": title, "background": "#FFFFFF", "ink": "#151923", "accent": "#126148",
-                    "muted": "#485564", "surface": "#EFF5F2", "display": "Georgia",
+            return {"title": title,
                     "slides": [{"title": s["title"], "layout": s["layout"], "direction": s["purpose"]} for s in slides]}
         return {"title": title, "narrative": "Frame the opportunity, explain the mechanics, and highlight practical next steps.", "slides": slides}
     if schema in {"PageMarkup", "LayoutMarkup"}:

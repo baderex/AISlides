@@ -9,17 +9,49 @@ from pptx.enum.dml import MSO_LINE_DASH_STYLE
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
 from pptx.enum.text import MSO_AUTO_SIZE, MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+from pptx.opc.package import Part
 from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
 from app.branding import SLOT_TYPES, layout_for_slide, native_layouts
+from app.bundled_fonts import faces, powerpoint_face
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
-from app.rendering import TEXT_LEADING, segment_ink, table_columns, table_insets, table_rows
+from app.rendering import TEXT_LEADING, flattened, segment_ink, table_columns, table_insets, table_rows
 
 
 def color(value):
     return RGBColor.from_string(value[1:].upper())
+
+
+def embed_slide_fonts(presentation, document):
+    used = {el.font for slide in document.slides for el, *_ in flattened(slide.elements)
+            if isinstance(el, (Text, Chart, Table))}
+    root = presentation._element
+    package = presentation.part.package
+    entries = root.find(qn("p:embeddedFontLst"))
+    for family, style, path in faces(used):
+        if entries is None:
+            entries = OxmlElement("p:embeddedFontLst")
+            root.insert_element_before(entries, "p:custShowLst", "p:photoAlbum", "p:custDataLst", "p:kinsoku",
+                                       "p:defaultTextStyle", "p:modifyVerifier", "p:extLst")
+        entry = next((e for e in entries if e.find(qn("p:font")).get("typeface").casefold() == family.casefold()), None)
+        if entry is None:
+            entry = OxmlElement("p:embeddedFont")
+            face = OxmlElement("p:font")
+            face.set("typeface", family)
+            entry.append(face)
+            entries.append(entry)
+        tag = "p:" + style.lower()
+        if entry.find(qn(tag)) is None:
+            part = Part(package.next_partname("/ppt/fonts/font%d.fntdata"), "application/x-fontdata",
+                        package, powerpoint_face(path))
+            ref = OxmlElement(tag)
+            ref.set(qn("r:id"), presentation.part.relate_to(part, RT.FONT))
+            successors = ("p:bold", "p:italic", "p:boldItalic") if style == "Regular" else ("p:italic", "p:boldItalic")
+            index = next((i for i, child in enumerate(entry) if child.tag in {qn(s) for s in successors}), len(entry))
+            entry.insert(index, ref)
+        root.set("embedTrueTypeFonts", "1")
 
 
 def alpha(solid, opacity):
@@ -253,6 +285,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
             references = [f"{source.title} — {source.url}" if source.url else source.title
                           for source in (sources[key] for key in item.source_ids)]
             slide.notes_slide.notes_text_frame.text = "\n\n".join(filter(None, [item.notes, "\n".join(references), lineage]))
+    embed_slide_fonts(presentation, document)
     output = io.BytesIO()
     presentation.save(output)
     return output.getvalue()

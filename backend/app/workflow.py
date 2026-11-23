@@ -16,18 +16,21 @@ from app.composition import (
 )
 from app.config import settings
 from app.consulting import CONSULTING_DIRECTION, PLAN_GUIDANCE, SLIDE_GUIDANCE, requested_consulting
+from app.deck_design import DeckDesignSpec, FAMILIES, baseline_rules, design_family, resolve_fonts
 from app.design import ArtDirection, DIRECTOR_PROMPT, apply_brand_kit, enforce_constraints, explicit_constraints, font_family, reference_sheet
 from app.domain import Slide, Source, Theme, read_document
 from app.evidence import EVIDENCE_GUIDANCE, EvidenceObservation, resolve_headline, verified_observations
-from app.export_review import ReviewBusy, ReviewUnavailable, renderer
+from app.export_review import ReviewBusy, ReviewUnavailable, compare_slide_export, renderer
 from app.imagery import image_configured, render_image, source_web_image
 from app import html_layout
 from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, LayoutMarkup, MarkupError, page_schema
+from app.html_layout.review import design_memory, evaluate_quality, markup_content
 from app.master_artwork import master_artwork
 from app.presentations import asset_sources, referenced_images
 from app.providers import ProviderError
 from app.questions import Choice, Clarification, Option, standard_options
 from app.rendering import flattened
+from app.render_geometry import available_family
 from app.research import collect
 from app.slide_design import LAYOUT_RUBRIC, LayoutReview, build_slide, review_layouts
 from app.storage import Storage
@@ -506,8 +509,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             native = (brand
                       or (data_driven and (web_research or any(not a.media_type.startswith("image/") for a in assets))))
             context["layout_engine"] = "native" if native else "html"
-        after_research = {"html": "html_plan", "native": "design"}[context["layout_engine"]]
-        if after_research == "html_plan" and not web_research and not any(a.extracted.strip() for a in assets):
+        after_research = "design"
+        if context["layout_engine"] == "html" and not web_research and not any(a.extracted.strip() for a in assets):
             events.append(("research.completed", "Using the supplied prompt as the slide brief.", {}))
             return after_research, "queued", "PLANNING", events, None, None
         if web_research and not context.get("web_research_complete"):
@@ -566,6 +569,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 events.append(("research.completed", "No reference sources were provided for this deck.", {}))
         stage, status = after_research, "PLANNING"
     elif stage == "html_plan":
+        if not document.theme.design:  # Resume an older job that went directly from research to outline.
+            return "design", state, "PLANNING", events, None, None
         if not start_status(job_id, token, "PLANNING", "agent.started", "Planning the deck and its visual layout."):
             return None
         plan = ai.structured(HtmlPlan, HTML_PLAN, {
@@ -573,42 +578,39 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "visual_direction":direction, "requires_chart_workbook":bool(inferred_intent.get("requires_chart_workbook")),
             "web_images":bool(web_research and inferred_intent.get("web_images_requested")),
             "generate_images":bool(item.request.get("generate_images") and image_configured()),
-            "brand_theme":skill.theme.model_dump(mode="json") if skill and skill.theme.brand_kit else None,
+            "reuse_uploaded_images":bool(inferred_intent.get("reuse_uploaded_images")),
+            "deck_design":DeckDesignSpec.from_theme(document.theme, document.aspect_ratio).model_dump(),
             "available_pictures":{a.id:a.name for a in assets if a.media_type.startswith("image/")},
         }, "outline", reference_sheet(assets) if settings().llm_vision_enabled else None)
         context["html_plan"] = plan.model_dump(mode="json")
         document.title = plan.title
-        document.theme = document.theme.model_copy(update=plan.model_dump(include={"background","ink","accent","muted","surface"}))
-        if skill and skill.theme.brand_kit:
-            document.theme.design = skill.theme.design
-            document.theme = apply_brand_kit(document.theme, skill.theme)
         document.sources = [Source.model_validate(s) for s in context["sources"]]
-        events.extend([("design.completed", "HTML/CSS layout and palette ready.", {}),
-                       ("outline.completed", "Slide outline ready.", {"outline":{"title":plan.title,
-                        "slides":[{"title":p.title} for p in plan.slides]}})])
+        events.append(("outline.completed", "Slide outline ready.", {"outline":{"title":plan.title,
+                       "slides":[{"title":p.title} for p in plan.slides]}}))
         stage, status, changed = "html_slide", "GENERATING", document
     elif stage in {"html_slide", "html_measure"}:
-        plan = HtmlPlan.model_validate(context["html_plan"])
+        saved_plan = context["html_plan"]
+        plan = HtmlPlan.model_validate({key:saved_plan[key] for key in HtmlPlan.model_fields})
         index = context.get("progress_index", len(document.slides))
         if index == len(plan.slides):
             return completed(document, ai.usage, index)
         part = plan.slides[index]
         theme = document.theme.model_dump(include={"background","ink","accent","muted","surface","font"})
-        theme["display"] = plan.display
-        kit = document.theme.brand_kit
-        if kit:
-            theme["roleAliases"] = {getattr(plan, role).lower():role for role in kit.protected
-                                    if role in {"background","ink","muted","accent","surface"}
-                                    and getattr(plan, role).lower() != theme[role].lower()}
-        if kit and document.theme.design and "heading_font" in kit.protected:
-            theme["display"] = document.theme.design.heading_font
+        if not document.theme.design:
+            # A pre-design-stage checkpoint already has the old plan's selected palette.
+            document.theme.design = baseline_rules(document.theme, design_family(direction, item.request["mode"], skill))
+            document.theme.design.heading_font = saved_plan.get("display", document.theme.font)
+        theme["display"] = document.theme.design.heading_font
         pictures = {a.id:a.name for a in assets if a.media_type.startswith("image/")}
         if not inferred_intent.get("reuse_uploaded_images"):
             for key in referenced_images(document.slides):
                 pictures.pop(key, None)
+            for future in plan.slides[index+1:]:
+                if future.picture_id:
+                    pictures.pop(future.picture_id, None)
         previous = context.get("layout_retry", {})
         media = context.get("html_media", {})
-        if stage == "html_slide" and not media and (part.image_query or part.image_prompt):
+        if stage == "html_slide" and not part.picture_id and not media and (part.image_query or part.image_prompt):
             media = prepare_html_image(job_id, token, index, part, item, context, ai, web_research)
             if media is None:
                 return None
@@ -616,23 +618,32 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             return "html_slide", state, "GENERATING", events, None, None
         if media.get("asset_id"):
             pictures[media["asset_id"]] = media["description"]
+        required_picture = part.picture_id or media.get("asset_id")
         schema = page_schema(part.exhibit)
         if stage == "html_slide":
             if not start_status(job_id, token, "GENERATING", "slide.started", f"Designing slide {index+1}: {part.title}.", index=index):
                 return None
             request = {"slide":part.model_dump(exclude={"source_ids"}), "slide_number":index+1,
-                       "available_pictures":pictures, "required_picture":media.get("asset_id"), "theme":theme,
+                       "available_pictures":pictures, "required_picture":required_picture, "theme":theme,
+                       "deck_design":DeckDesignSpec.from_theme(document.theme, document.aspect_ratio, part.layout).model_dump(),
+                       "recent_compositions":design_memory(document.slides),
                        "aspect":document.aspect_ratio, "width":html_layout.WIDTH[document.aspect_ratio]}
             if previous and "html_candidate" in context:
                 saved = context["html_candidate"]
                 request.update(previous=saved["markup"], correction=previous["error"])
-                repair = ai.structured(LayoutMarkup,
-                    "Repair the supplied slide XML using the renderer's correction. Return one complete <page> "
-                    "in markup. Keep facts, labels, theme and exhibit placement. Use the given width and a 720px "
-                    "height. Rows and columns use flex layout; simplify nesting or adjust grow, gap and padding "
-                    "to fit. Include one <exhibit grow=\"1\"/> for a planned exhibit and use the exact asset ID "
-                    "for a required <picture>. XML-escape text and close every tag.", request, "html-slide")
-                candidate = schema.model_validate({**saved, "markup": repair.markup})
+                try:
+                    repair = ai.structured(LayoutMarkup,
+                        "Repair the supplied slide XML using the renderer's correction. Return one complete <page> "
+                        "in markup. Preserve all copy, figures, pictures and source notes. Use the deck_design roles, "
+                        "canvas width and a 720px height. Adjust layout, contrast, gap or padding as requested. "
+                        "Include one exhibit for a planned exhibit and the exact asset ID for a required picture. "
+                        "XML-escape text and close every tag.", request, "html-slide")
+                    candidate = schema.model_validate({**saved, "markup": repair.markup})
+                except ProviderError:
+                    if "html_best" not in context:
+                        raise
+                    context["html_candidate"] = context["html_best"]["candidate"]
+                    return "html_measure", state, "REVIEWING", events, None, None
             else:
                 request.update(html_slide_inputs(item, context, part),
                                outline=[p.title for p in plan.slides], deck_title=document.title)
@@ -644,6 +655,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             context["html_candidate"] = candidate.model_dump(mode="json")
             return "html_measure", state, "REVIEWING", events, None, None
         candidate = schema.model_validate(context["html_candidate"])
+        best = context.get("html_best")
+        def measure(page):
+            observations = verified_observations(getattr(page, "observations", []), document.sources)
+            return html_layout.compose(page.markup, part.title, theme, document.aspect_ratio, pictures,
+                                       document, part, page, list(observations), required_picture)
+
         try:
             if media.get("source"):
                 credit = Source.model_validate(media["source"])
@@ -652,23 +669,56 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 candidate.source_ids = list(dict.fromkeys([credit.id, *candidate.source_ids]))[:20]
             if set(candidate.source_ids) - {source.id for source in document.sources}:
                 raise ValueError("Cite only source IDs supplied with this brief.")
-            observations = verified_observations(getattr(candidate, "observations", []), document.sources)
-            slide, png = html_layout.compose(candidate.markup, part.title, theme, document.aspect_ratio, pictures,
-                                             document, part, candidate, list(observations), media.get("asset_id"))
+            if best and markup_content(candidate.markup) != markup_content(best["candidate"]["markup"]):
+                raise MarkupError("Retain the copy and data in the earlier composition.")
+            slide, png = measure(candidate)
+            quality = evaluate_quality(slide, document.slides)
+            if quality.hard:
+                raise MarkupError(" ".join(quality.hard))
+            score = quality.penalty
+            if renderer():
+                try:
+                    issues, difference = compare_slide_export(document, slide, png, Storage().get, brand)
+                    if any(issue.startswith("Export fit:") for issue in issues):
+                        raise MarkupError(" ".join(issues))
+                    quality.soft.extend(issues)
+                    score += difference + len(issues)
+                except (ReviewBusy, ReviewUnavailable) as error:
+                    slide.warnings.append(f"Export comparison unavailable: {error}")
+                    if best:
+                        raise MarkupError(str(error)) from error
+            elif index == 0:
+                events.append(("agent.progress", "PowerPoint render comparison is unavailable on this worker.", {}))
+            if best and best["score"] <= score:
+                if candidate.markup != best["candidate"]["markup"]:
+                    slide, png = measure(schema.model_validate(best["candidate"]))
+                slide.warnings = best["warnings"]
+            elif quality.soft and not best and previous.get("attempt", 0) < 2:
+                context["html_best"] = {"score":score, "candidate":candidate.model_dump(mode="json"),
+                                        "warnings":list(dict.fromkeys([*slide.warnings, *quality.soft]))[:30]}
+                raise MarkupError(" ".join(quality.soft))
+            else:
+                slide.warnings = list(dict.fromkeys([*slide.warnings, *quality.soft]))[:30]
         except (ValueError, ET.ParseError) as error:
-            attempt = previous.get("attempt", 0) + 1
-            issue = str(error)[:800]
-            if attempt >= 3:
-                context.pop("layout_retry", None)
-                raise ProviderError(f"Could not fit slide {index+1} after three layouts: {issue}") from error
-            retry = {"attempt":attempt, "error":issue}
-            if not isinstance(error, (MarkupError, ET.ParseError)):
-                retry["markup"] = candidate.markup
-                if part.exhibit:
-                    retry["exhibit_data"] = candidate.exhibit_data.model_dump(mode="json")
-                context.pop("html_candidate")
-            context["layout_retry"] = retry
-            return "html_slide", state, "GENERATING", [("slide.revised", "Adjusting the slide to fit its layout.", {"index":index})], None, None
+            if best:
+                slide, png = measure(schema.model_validate(best["candidate"]))
+                slide.warnings = best["warnings"]
+            else:
+                attempt = previous.get("attempt", 0) + 1
+                issue = str(error)[:800]
+                if attempt >= 3:
+                    context.pop("layout_retry", None)
+                    raise ProviderError(f"Slide {index+1} failed visual review after three layouts: {issue}") from error
+                retry = {"attempt":attempt, "error":issue}
+                if not isinstance(error, (MarkupError, ET.ParseError)):
+                    retry["markup"] = candidate.markup
+                    if part.exhibit:
+                        retry["exhibit_data"] = candidate.exhibit_data.model_dump(mode="json")
+                    context.pop("html_candidate")
+                context["layout_retry"] = retry
+                events.append(("slide.revised", "Revising the slide after visual review.", {"index":index, "issue":issue}))
+                return "html_slide", state, "GENERATING", events, None, None
+        context.pop("html_best", None)
         context.pop("layout_retry", None)
         context.pop("html_candidate")
         context.pop("html_media", None)
@@ -680,6 +730,14 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if not start_status(job_id, token, "PLANNING", "agent.started", "Choosing the deck typography, palette and visual rules."):
             return None
         baseline = design(direction or ("Data Driven" if data_driven else ""), item.request["mode"], skill.theme if skill else None)
+        family = design_family(direction or ("Data Driven" if data_driven else ""), item.request["mode"], skill)
+        if skill and skill.theme.design:
+            family = skill.theme.design.family
+        seed = baseline.model_copy(deep=True)
+        if not seed.design:
+            seed.design = baseline_rules(seed, family)
+            if not skill:
+                seed.font = FAMILIES[family].body
         locked = brand is not None
         references = [{"name": asset.name, "type": asset.media_type, "excerpt": asset.extracted[:900]} for asset in assets]
         style_answers = [answer["value"] for answer in context.get("answers", [])
@@ -688,16 +746,30 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         proposed = ai.structured(ArtDirection, DIRECTOR_PROMPT, {
             "prompt": item.request["prompt"], "intent": context["intent"], "answers": context.get("answers", []),
             "direction": direction, "selected_skill": context.get("skill"), "references": references,
-            "baseline": baseline.model_dump(exclude={"constraints", "brand_kit"}), "locked_template": locked,
+            "baseline": seed.model_dump(exclude={"constraints", "brand_kit"}), "locked_template": locked,
+            "deck_design":DeckDesignSpec.from_theme(seed, document.aspect_ratio).model_dump(),
+            "available_fonts":[f for f in ("Source Serif 4", "Manrope", "IBM Plex Mono", "Arial", "Arial Black", "Aptos", "Calibri", "Cambria", "Georgia", "Consolas",
+                                           "Trebuchet MS", "Verdana", "Liberation Sans", "Liberation Serif",
+                                           "DejaVu Sans", "DejaVu Serif") if available_family(f)],
             "protected_brand_roles": baseline.brand_kit.protected if baseline.brand_kit else [],
             "explicit_constraints": constraints.model_dump() if constraints else None,
         }, "design", reference_sheet(assets) if settings().llm_vision_enabled else None)
         theme = Theme.model_validate({**proposed.model_dump(), "profile": baseline.profile})
+        theme.design.family = family
         if not locked:
+            if skill and not baseline.brand_kit:
+                for role in ("background", "ink", "accent", "muted", "surface", "font"):
+                    setattr(theme, role, getattr(baseline, role))
+                if baseline.design:
+                    theme.design = baseline.design.model_copy(deep=True)
+                else:
+                    for role in ("cover_background", "dense_surface", "dense_ink", "chart_colors"):
+                        setattr(theme.design, role, getattr(seed.design, role))
             theme.font = font_family(theme.font)
             theme.design.heading_font = font_family(theme.design.heading_font)
             theme = enforce_constraints(theme, constraints)
             theme = apply_brand_kit(theme, baseline)
+            resolve_fonts(theme)
         if locked:
             rules = proposed.design
             if baseline.design:
@@ -705,8 +777,11 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 rules = baseline.design.model_copy(update=brief)
             theme = baseline.model_copy(update={"design": rules})
         document.theme = theme
-        events.append(("design.completed", "Deck design system ready.", {"mood": theme.design.mood}))
-        stage, status, changed = "plan", "PLANNING", document
+        missing_fonts = sorted({f for f in (theme.font, theme.design.heading_font) if not available_family(f)})
+        events.append(("design.completed", "Deck design system ready.", {"mood":theme.design.mood,
+                       "family":theme.design.family, "unavailable_fonts":missing_fonts}))
+        stage = "html_plan" if context.get("layout_engine") == "html" else "plan"
+        status, changed = "PLANNING", document
     elif stage == "plan":
         if not start_status(job_id, token, "PLANNING", "agent.started", "Planning the narrative and slide sequence."):
             return None
@@ -735,6 +810,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "Use chart layouts only when grounded data is available." + SELECTION_GUIDANCE + style_guidance
             + period_guidance + research_guidance + image_guidance,
             {**planning_inputs, "slide_count": count, "design": theme.model_dump(),
+             "deck_design":DeckDesignSpec.from_theme(theme, document.aspect_ratio).model_dump(),
              "uploaded_images": [asset.name for asset in assets if asset.media_type.startswith("image/")]}, "outline")
         use_exhibits = theme.design and not brand
         prompt = item.request["prompt"]

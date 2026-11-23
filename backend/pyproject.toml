@@ -23,7 +23,7 @@ dev = ["pytest>=8,<10"]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["lucide_icons/*.png", "lucide_icons/LICENSE"]
+app = ["lucide_icons/*.png", "lucide_icons/LICENSE", "fonts/*.ttf", "fonts/*-OFL.txt"]
 "app.html_layout" = ["*.js"]
 
 [tool.pytest.ini_options]

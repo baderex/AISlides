@@ -9,6 +9,8 @@ from app.composition_models import (
 from app.branding import choose_layout, compose_branded
 from app.consulting import CONSULTING_ICON_LAYOUTS, consulting_rules, consulting_theme, requested_consulting
 from app.design import blend, readable, style_chart, style_slide_tables
+from app.deck_design import DeckDesignSpec
+from app.palette import categorical_palette
 from app.diagrams import draw_diagram, draw_swimlane
 from app.domain import BrandTemplate, Chart, Document, Image, Layout, Recipe, Shape, Slide, Table, Text, Theme, display_value
 from app.exhibit_layout import ExhibitCanvas, compose_exhibit
@@ -158,6 +160,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         slide = compose_branded(item, content, document, image_ids, brand)
         return style_slide_tables(slide, document.theme, preserve_palette=True)
     t = document.theme
+    typography = DeckDesignSpec.from_theme(t, document.aspect_ratio, layout).typography if rules else {}
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     font_scale = max(.87, factor) if rules else factor
@@ -293,7 +296,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             rect(.82, .28, .135, .24, t.muted, "ellipse")
         if rules:
             end = fitted_label(item.title, .068, .25, .86 if rules.cover_style == "rules" else .66,
-                               .31, 52, 30, ink, heading=True)
+                               .31, typography["cover"].target_pt, 30, ink, heading=True)
             fitted_label(content.subtitle, .07, end + .032, .68, .19, 21, 15, muted)
         else:
             label(item.title, .068, .24, .66, .28, 47, ink, True, heading=True)
@@ -307,10 +310,10 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
 
     body_top = .445
     if rules:
-        end = fitted_label(item.title, .07, .095, .86, .20, 34 if compact else 38, 27, ink,
+        end = fitted_label(item.title, .07, .095, .86, .20, typography["headline"].target_pt, 26, ink,
                            bold=rules.heading_font.casefold() == t.font.casefold(), heading=True, prefer_one_line=True)
         if content.subtitle:
-            end = fitted_label(content.subtitle, .07, end + .018, .86, .112, 18, 14, muted)
+            end = fitted_label(content.subtitle, .07, end + .018, .86, .112, typography["body"].target_pt, 14, muted)
         body_top = max(.252, min(.455, end + .035))
     else:
         label(item.title, .068, .17, .87, .17, 35, ink, True, heading=True)
@@ -399,7 +402,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         allocation = content.allocation
         amount = sum(line.amount for line in allocation.lines)
         total = display_value(amount, allocation.value_prefix)
-        palette = list(dict.fromkeys(color.upper() for color in (accent, *rules.chart_colors, ink, muted)))
+        palette = categorical_palette(t, bg)
         if amount:
             x = .07
             for index, line in enumerate(allocation.lines):
