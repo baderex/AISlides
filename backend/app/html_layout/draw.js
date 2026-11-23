@@ -308,6 +308,7 @@ payload => {
       if(!a.grow && !a.h) box.style.flexShrink="0";
     } else if(tag==="rule") {
       if(!a.h) box.style.height="2px";
+      if(!a.w && parent.style.flexDirection==="column") box.style.alignSelf="stretch";
       box.style.flexShrink="0"; mark(box,"shape");box.style.backgroundColor=color(a.color||a.bg||"muted");
     } else if(widgets[tag]) {
       if(!a.grow && !a.h) box.style.flex="1 1 0px";
