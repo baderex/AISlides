@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from app.composition import Outline, SlideContent
+from app.composition import Intent, Outline, SlideContent
 from app.config import Settings, settings
 from app.providers import Intelligence, ProviderError
 
@@ -103,6 +103,32 @@ def test_openrouter_retries_with_validation_feedback(monkeypatch):
     assert client.usage["input"] == 270
 
 
+def test_detailed_design_brief_passes_intent_planning_on_first_response(monkeypatch):
+    client = openrouter(monkeypatch)
+    direction = (
+        "Premium McKinsey/BCG-style consulting presentation. Off-white background (#F7F7F2), "
+        "dark navy typography (#17283C), restrained emerald accent (#16856B). Strong answer-first headlines, "
+        "annotated exhibits, thin dividers, precise alignment, compact source notes. No decorative stock imagery. "
+        "Every slide should communicate one conclusion."
+    )
+    prompt = f"Create a 6-slide board presentation for Northstar Cloud. Design direction: {direction}"
+    calls = []
+
+    def post(url, body, headers):
+        calls.append(body)
+        response = {"subject": "The Growth Engine Is Leaking", "visual_direction": direction, "slide_count": 6}
+        return {"choices": [{"message": {"content": json.dumps(response)}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    intent = client.structured(Intent, "Extract intent.", {"prompt": prompt})
+
+    assert len(calls) == 1
+    assert json.loads(calls[0]["messages"][1]["content"])["prompt"] == prompt
+    assert intent.slide_count == 6
+    assert intent.visual_direction.startswith("Premium McKinsey/BCG-style consulting presentation.")
+    assert len(intent.visual_direction) <= 250
+
+
 def test_openrouter_reports_fields_when_corrections_fail(monkeypatch):
     client = openrouter(monkeypatch)
     bad = {"title": "Exhibit", "table": "private model text"}
@@ -132,6 +158,45 @@ def test_planned_exhibit_is_required_and_repaired(monkeypatch):
     slide = client.structured(SlideContent, "Write the decision slide.", {"required_exhibit": "decision"}, "slide")
     assert slide.decision.model_dump() == decision
     assert "populate the decision object for this slide" in prompts[1]
+
+
+def test_maturity_heatmap_schema_separates_scores_from_categories(monkeypatch):
+    client = openrouter(monkeypatch)
+    calls = []
+    rows = [{"label": label, "cells": scores} for label, scores in [
+        ("Temperature monitoring", [2, 5]), ("Route planning", [3, 4]), ("Warehouse automation", [2, 4]),
+        ("Quality inspection", [4, 5]), ("Exception response", [1, 4]),
+    ]]
+    visual = {"type": "heatmap", "columns": ["Current", "Target"], "rows": rows}
+
+    def post(url, body, headers):
+        calls.append(body)
+        response = dict(visual)
+        if len(calls) == 1:
+            response.update(weights=[0.2, 0.8], levels=["1", "2", "3", "4", "5"])
+        return {"choices": [{"message": {"content": json.dumps({"title": "Maturity", "visual": response})}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    slide = client.structured(SlideContent, "Compare current and target maturity.",
+                              {"required_exhibit": "visual", "visual_choice": {"type": "heatmap"}}, "slide")
+
+    contract = calls[0]["response_format"]["json_schema"]["schema"]
+
+    def resolve(ref):
+        return contract["$defs"][ref["$ref"].split("/")[-1]]
+
+    cell_types = set()
+    for option in contract["properties"]["visual"]["anyOf"]:
+        fields = resolve(option)["properties"]
+        assert "weights" not in fields
+        row = resolve(fields["rows"]["items"])
+        cell_type = row["properties"]["cells"]["items"]["type"]
+        assert ("levels" in fields) == (cell_type == "string")
+        cell_types.add(cell_type)
+    assert cell_types == {"number", "string"}
+    assert len(calls) == 2
+    assert "omit weights for a heatmap. Use numeric cells without levels" in calls[1]["messages"][0]["content"]
+    assert [row.model_dump() for row in slide.visual.rows] == rows
 
 
 def test_explicit_visible_point_count_is_repaired(monkeypatch):
@@ -170,6 +235,9 @@ def test_outline_falls_back_and_repairs_the_count_without_rejecting_extra_fields
     assert [slide.layout for slide in outline.slides] == ["cover", "process"]
     assert "content" not in outline.slides[0].model_dump()
     constrained, fallback, repair = calls
+    assert "JSON schema:" not in constrained["messages"][0]["content"]
+    assert "JSON schema:" in fallback["messages"][0]["content"]
+    assert "JSON schema:" in repair["messages"][0]["content"]
     assert constrained["provider"] == {"require_parameters": True}
     assert constrained["response_format"]["type"] == "json_schema"
     envelope = constrained["response_format"]["json_schema"]
@@ -183,6 +251,21 @@ def test_outline_falls_back_and_repairs_the_count_without_rejecting_extra_fields
         assert all("default" not in field for field in obj["properties"].values())
     assert fallback["response_format"] == repair["response_format"] == {"type": "json_object"}
     assert "slides: return exactly 2 slides (received 1)" in repair["messages"][0]["content"]
+
+
+def test_budget_check_counts_native_schema_and_checkpoint_usage(monkeypatch):
+    client = openrouter(monkeypatch)
+    client.usage.update(input=73620, output=13259)
+    monkeypatch.setattr(settings(), "ai_job_token_budget", 88000)
+    monkeypatch.setattr(client, "_post", lambda *args: pytest.fail("Over-budget request reached the provider"))
+
+    with pytest.raises(ProviderError) as error:
+        client.structured(Outline, "Plan the deck.", {"slide_count": 6}, "outline")
+
+    assert "86,879 of 88,000 tokens" in str(error.value)
+    assert "next outline request" in str(error.value)
+    assert "AI_JOB_TOKEN_BUDGET" in str(error.value)
+    assert client.usage["input"] + client.usage["output"] == 86879
 
 
 @pytest.mark.parametrize(("layout", "expected"), [(" Line_Chart ", "chart"), ("data-table", "research"), (" Metrics ", "metrics")])

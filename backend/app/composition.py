@@ -1,4 +1,5 @@
 import re
+from textwrap import shorten
 from typing import Annotated, Literal
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -19,12 +20,17 @@ from app.rendering import contrast, fit_image, longest_word_width, physical, sli
 from app.visuals import Annotation, Copy, Decorations, VISUAL_LAYOUTS, Visual, VisualChoice
 
 
+VISUAL_DIRECTION_LIMIT = 250
+
+
 class Intent(Contract):
     subject: ShortText
     objective: str = Field(default="", max_length=700)
     audience: str = Field(default="", max_length=250)
     tone: str = Field(default="", max_length=250)
-    visual_direction: str = Field(default="", max_length=250)
+    visual_direction: str = Field(default="", max_length=VISUAL_DIRECTION_LIMIT, description=(
+        "Give a short style label such as 'Strategy consulting'. The designer receives the full brief separately."
+    ))
     requires_quantitative_evidence: bool = False
     slide_count: int | None = Field(default=None, ge=1, le=30)
     web_images_requested: bool = False
@@ -33,6 +39,14 @@ class Intent(Contract):
     supplied_evidence_only: bool = False
     supplied_phase_quantities: bool = False
     missing: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("visual_direction", mode="before")
+    @classmethod
+    def shorten_visual_direction(cls, value: object) -> object:
+        if isinstance(value, str) and len(value) > VISUAL_DIRECTION_LIMIT:
+            # Keep a usable prefix even for writing systems without spaces.
+            return shorten(value, width=VISUAL_DIRECTION_LIMIT, placeholder="") or value.lstrip()[:VISUAL_DIRECTION_LIMIT]
+        return value
 
 
 class PlanningResponse(Contract):
