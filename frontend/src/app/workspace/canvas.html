@@ -37,10 +37,11 @@
                 </svg>
               } @else {
                 <div class="slide-shape" [class]="el.shape" [style.background]="el.fill"
-                  [style.border-radius]="el.shape === 'round' ? radius(g) : null"></div>
+                  [style.border-radius]="el.shape === 'round' ? (el.radius_pt == null ? radius(g) : font(el.radius_pt)) : null"></div>
               }
             }
-            @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" draggable="false" /> }
+            @case ('image') { <img [src]="'/api/v1/assets/' + el.asset_id" [alt]="el.alt" [style.object-fit]="el.fit ?? 'fill'"
+              [style.object-position]="((el.focal_x ?? .5)*100) + '% ' + ((el.focal_y ?? .5)*100) + '%'" draggable="false" /> }
             @case ('line') {
               <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-connector" aria-hidden="true">
                 <svg:path [attr.d]="link?.path ?? linePath(el.direction)" fill="none" [attr.stroke]="el.color"
@@ -99,6 +100,8 @@
               </table>
             }
             @case ('chart') {
+              @let key = needsChartKey(el);
+              <div class="chart-plot" [style.width.%]="key ? 47 : 100">
               @if (el.chart === 'pie') { <div class="slide-pie" [style.background]="pie(el)"></div> }
               @else {
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart"
@@ -153,13 +156,14 @@
                       [style.font-size]="font(line ? 14 : 12)">
                       {{ chartPointValue(el, $index) }}
                     </span>
-                    @if (horizontal) {
-                      <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * .4"
-                        [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(11)">{{ el.categories[$index] }}</span>
-                    }
-                  }
+                   }
                 }
-                @if (el.chart !== 'bar') {
+                @if (el.chart === 'bar') {
+                  @for (mark of chart(el)[0]; track $index) {
+                    <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * .4"
+                      [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(11)">{{ el.categories[$index] }}</span>
+                  }
+                } @else {
                   <div class="chart-labels" [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values"
                     [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color"
                     [style.font-size]="font(el.chart === 'stacked_column' || el.show_values ? 13 : 10)"
@@ -167,6 +171,22 @@
                     @for (label of chartLabels(el); track $index) { <span>{{ label }}</span> }
                   </div>
                 }
+              }
+              </div>
+              @if (key) {
+                <div class="chart-key" [style.font-family]="fontFamily(el.font)"
+                  [style.font-size]="font(el.series.length <= 2 && el.categories.length <= 6 ? 14 : 12)"
+                  [style.color]="el.label_color" [style.grid-template-columns]="'40% repeat(' + el.series.length + ', minmax(0,1fr))'"
+                  [style.row-gap]="font(6)">
+                  <span></span>
+                  @for (series of el.series; track $index) {
+                    <strong>@if (el.chart !== 'pie') { <i [style.background]="chartColor(el,$index)"></i> }{{series.name}}</strong>
+                  }
+                  @for (category of el.categories; track $index; let row = $index) {
+                    <span>@if (el.chart === 'pie') { <i [style.background]="chartColor(el,row)"></i> }{{category}}</span>
+                    @for (series of el.series; track $index) { <span>{{chartPointValue(el,row,$index)}}</span> }
+                  }
+                </div>
               }
             }
             @case ('group') {

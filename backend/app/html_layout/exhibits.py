@@ -10,7 +10,7 @@ from app.render_geometry import fit_slide_text
 
 
 def fill_region(document, slide, region, content, recipe, namespace, workbook=None):
-    layer = Slide(title=slide.title, background=region.background or slide.background, source_ids=slide.source_ids)
+    layer = Slide(title=slide.title, layout=slide.layout, background=region.background or slide.background, source_ids=slide.source_ids)
     bounds = region.model_dump(include={"x", "y", "w", "h"})
     if workbook:
         chart = Chart(**bounds, **workbook.model_dump(), element_key="workbook:chart",

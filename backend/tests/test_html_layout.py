@@ -10,14 +10,14 @@ from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 from sqlalchemy import select
 
-from app.db import Job, Session
+from app.db import Job, PresentationRecord, Session
 from app.deck_design import baseline_rules, DeckDesignSpec
 from app.design import style_chart
 from app.domain import Chart, Document, Shape, Theme
 from app.export_review import compare_rasters
 from app.powerpoint import to_pptx
 from app.html_layout import compose
-from app.html_layout.markup import PagePlan
+from app.html_layout.markup import MarkupError, PagePlan, parse_markup
 from app.main import app
 from app.providers import Intelligence, ProviderError
 from app.queue import claim
@@ -43,6 +43,19 @@ def test_divider_in_end_aligned_column_uses_available_width():
     assert full.x + full.w == pytest.approx(short.x + short.w)
 
 
+def test_col_geometry_exports_as_native_shapes_and_a_directed_connector():
+    slide, _ = compose('<page><col grow="1"><text>Browser SPA</text>'
+                       '<box id="spa" x="5" y="30" w="20" h="20"/>'
+                       '<box id="api" x="75" y="30" w="20" h="20"/>'
+                       '<arrow x1="25" y1="40" x2="75" y2="40" from="spa:right" to="api:left"/>'
+                       '</col></page>', "Architecture", PALETTE, "1:1")
+    title, spa, api, arrow = slide.elements
+    assert title.text == "Browser SPA" and arrow.arrows == "end"
+    assert (arrow.start_anchor.shape_id, arrow.end_anchor.shape_id) == (spa.id, api.id)
+    with pytest.raises(MarkupError, match="Unexpected <script> inside <col>"):
+        parse_markup("<page><col><script/></col></page>")
+
+
 def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     item = SimpleNamespace(request={"prompt": "Compare error correction methods"})
     sources = [{"id": key, "excerpt": key * 200} for key in ("brief", "history", "hardware")]
@@ -56,6 +69,49 @@ def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     for ids in (None, ["missing"]):
         assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": ids}))["sources"] == sources
     assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": []}))["sources"] == sources[:1]
+
+
+def test_retry_legacy_architecture_checkpoint_keeps_diagram_and_finished_cover(monkeypatch):
+    client = TestClient(app)
+    path = create(client, "A square OAuth deck", aspect_ratio="1:1", research=False)
+    visual = {"type":"architecture", "nodes":[{"id":key, "label":label} for key, label in
+              [("spa","Browser SPA"), ("auth","Authorization endpoint"), ("token","Token endpoint"), ("api","API")]],
+              "edges":[{"source":a, "target":b, "label":label} for a,b,label in [
+                  ("spa","auth","Redirect"), ("auth","spa","Authorization code"), ("spa","token","Code and verifier"),
+                  ("token","spa","Access token"), ("spa","api","Bearer token")]]}
+    with Session.begin() as db:
+        job = db.scalar(select(Job))
+        item = db.get(PresentationRecord, job.presentation_id)
+        item.status = "FAILED"
+        source = {"id":"spec", "title":"PKCE", "excerpt":"The client submits the verifier."}
+        item.document = {**item.document, "slides":[{"id":"cover", "title":"OAuth", "elements":[]}], "sources":[source]}
+        job.state, job.checkpoint = "failed", "html_slide"
+        job.context = {"layout_engine":"html", "sources":[source], "intent":{}, "progress_index":1,
+                       "usage":{"input":68016,"output":13059,"estimated_cost":.24},
+                       "html_plan":{"title":"OAuth", "slides":[{"title":"OAuth","direction":"Cover"},
+                           {"title":"Architecture", "direction":"Show the endpoints", "exhibit":"architecture"}]},
+                       "layout_retry":{"attempt":2, "error":"Use exactly one exhibit frame for a planned exhibit, and none otherwise.",
+                                       "markup":"<page><col><text>Public client</text></col></page>", "exhibit_data":visual}}
+    calls = []
+    def recover(self, schema, task, data, stage, image=None):
+        calls.append(schema.__name__)
+        if stage == "content-review":
+            assert data["cited_source_ids"] == ["spec"] and "Architecture" in data["visible"]
+            return schema()
+        assert data["exhibit_data"] == visual and "outline" not in data and self.usage["attempt_start_tokens"] == 81075
+        return schema(caption="Public client", sources=[1], notes="Protocol reference")
+    monkeypatch.setattr(Intelligence, "structured", recover)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    assert client.post(path + "/generate").status_code == 202
+    work()
+    item = client.get(path).json()
+    assert calls == ["RecoveredExhibitFrame", "Review"]
+    assert item["status"] == "COMPLETED"
+    cover, diagram = item["document"]["slides"]
+    assert cover["id"] == "cover" and diagram["source_ids"] == ["spec"] and diagram["notes"] == "Protocol reference"
+    arrows = [el for el in diagram["elements"] if el.get("arrows") == "end"]
+    assert [el["direction"] for el in arrows] == ["right", "left", "right", "left", "right"]
+    assert len({el["y"] for el in arrows}) == len(arrows)
 
 
 def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeypatch):
@@ -77,6 +133,9 @@ def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeyp
             assert data["previous"] == "<page><script/></page>" and "correction" in data
             assert {"research", "sources", "outline", "previous_exhibit_data"}.isdisjoint(data)
             return schema(markup=MATRIX)
+        if stage == "content-review":
+            assert {"table": [["Capability", "Level"], ["Inspection", "4"]]} in data["visible"]
+            return schema()
         raise AssertionError(f"Unexpected legacy generation request: {schema.__name__}")
 
     monkeypatch.setattr(Intelligence, "structured", model)
@@ -164,6 +223,93 @@ def test_palette_and_type_roles_reach_editable_objects():
         style_chart(chart, theme.model_copy(update={"design":design}), "#FFFFFF")
         assert len(set(chart.palette)) == 5
         assert all(contrast(c, "#FFFFFF") >= 3 for c in chart.palette)
+
+
+def test_wrong_amount_and_scope_trigger_content_repair(monkeypatch):
+    structured = Intelligence.structured
+    required = ["Approve a pilot capped at $180,000", "No fleetwide rollout", "Three day-90 gates"]
+    corrected = "Approve a pilot capped at $180,000. No fleetwide rollout. Day-90 gates: safety, savings, uptime."
+    reviews = []
+
+    def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "HtmlPlan":
+            return schema(title="Pilot", slides=[dict(title="Pilot decision", direction="Seek approval",
+                                                      required_details=required)])
+        if schema.__name__ == "PageMarkup":
+            copy = "The pilot needs $999,000. Roll out immediately."
+            if reviews:
+                assert "funding cap" in data["correction"]
+                copy = corrected
+            return schema(markup=f'<page><text role="body">{copy}</text></page>')
+        if stage == "content-review":
+            assert data["assignment"]["required_details"] == required and "$180,000" in data["brief"]
+            reviews.append(data["visible"])
+            if corrected not in data["visible"]:
+                return schema(regenerate_content=True, issues=["Correct the funding cap, scope and day-90 gates."])
+            return schema(regenerate_content=False)
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", model)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    client = TestClient(app)
+    path = create(client, "Create one editorial slide for executives. " + ". ".join(required), research=False)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED" and len(reviews) == 2
+    assert result["document"]["slides"][0]["elements"][0]["text"] == corrected
+
+
+def test_html_crop_radius_and_code_survive_measurement(monkeypatch):
+    raw = io.BytesIO()
+    Image.new("RGB", (200, 100), "navy").save(raw, "PNG")
+    monkeypatch.setattr("app.html_layout.Storage.get", lambda self, key: raw.getvalue())
+    slide, _ = compose('<page><text role="code">    emit(  value)</text>'
+                       '<drawing h="110"><box x="0" y="0" w="100" h="100" form="round"/></drawing>'
+                       '<picture grow="1" asset="photo" fit="cover" focal_x="1" focal_y=".25"/></page>',
+                       "Crop", PALETTE, "1:1", {"photo"})
+    code, card, photo = slide.elements
+    assert code.role == "code" and code.text == "    emit(  value)"
+    assert card.radius_pt == 6
+    assert (photo.fit, photo.focal_x, photo.focal_y) == ("cover", 1, .25)
+
+
+def test_upload_conclusion_and_table_reach_the_finished_deck(monkeypatch):
+    structured = Intelligence.structured
+    conclusion = "Maintenance fell by 18%."
+    report = "General background. " * 550 + "\n" + conclusion + "\nQuarter | Savings\nQ3 | $82,500"
+
+    def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "HtmlPlan":
+            source, = data["sources"]
+            assert source["sections"] and conclusion in source["excerpt"]
+            return schema(title="Maintenance", slides=[dict(title="Maintenance", direction="Show quarterly savings",
+                                                            source_ids=[source["id"]])])
+        if schema.__name__ == "PageMarkup":
+            source, = data["sources"]
+            lines = source["excerpt"].splitlines()
+            assert conclusion in lines and "Q3 | $82,500" in lines
+            quarter, savings = lines[-1].split(" | ")
+            return schema(markup=f"<page><text>{lines[-3]}</text><matrix><tr><td>Quarter</td><td>Savings</td></tr>"
+                                 f"<tr><td>{quarter}</td><td>{savings}</td></tr></matrix></page>",
+                          source_ids=[source["id"]])
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", model)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    client = TestClient(app)
+    upload = client.post("/api/v1/assets", files={"file": ("report.txt", report.encode(), "text/plain")})
+    path = create(client, "Create one editorial slide for staff about maintenance savings from the report.",
+                  asset_ids=[upload.json()["id"]], research=False)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED"
+    source, = result["document"]["sources"]
+    slide, = result["document"]["slides"]
+    assert slide["source_ids"] == [source["id"]]
+    deck = Presentation(io.BytesIO(client.post(path + "/export", params={"format": "pptx"}).content))
+    shapes = deck.slides[0].shapes
+    assert any(shape.has_text_frame and shape.text == conclusion for shape in shapes)
+    assert any(shape.has_table and shape.table.cell(1, 1).text == "$82,500" for shape in shapes)
 
 
 @pytest.mark.parametrize(("repair_valid", "export_only"), [(True, False), (False, False), (True, True)])
@@ -308,6 +454,9 @@ def test_northstar_html_edit_recalculates_flags_and_exports_workbook(monkeypatch
         if schema.__name__ == "LayoutMarkup":
             assert "Export difference:" in data["correction"]
             return schema(markup=data["previous"])
+        if stage == "content-review":
+            assert data["cited_source_ids"]
+            return schema()
         assert schema.__name__ == "ExhibitPage", data.get("correction")
         source = data["sources"][0]["id"]
         if data["slide_number"] == 1:

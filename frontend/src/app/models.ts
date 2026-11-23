@@ -18,12 +18,14 @@ export interface Geometry {
 }
 export interface TextSpan { start: number; end: number; color?: string | null; bold?: boolean | null }
 export interface TextElement extends Geometry {
+  role?: 'cover' | 'headline' | 'body' | 'label' | 'code' | 'footnote' | null;
+  minimum_pt?: number | null;
   single_line?: boolean; line_spacing?: number | null;
   spans?: TextSpan[];
   type: 'text'; text: string; size: number; color: string; font: string; bold: boolean; align: 'left' | 'center' | 'right';
 }
-export interface ShapeElement extends Geometry { type: 'shape'; shape: 'rect' | 'round' | 'ellipse' | 'triangle' | 'diamond'; fill: string; polygon?: [number, number][] | null }
-export interface ImageElement extends Geometry { type: 'image'; asset_id: string; alt: string }
+export interface ShapeElement extends Geometry { type: 'shape'; radius_pt?: number | null; shape: 'rect' | 'round' | 'ellipse' | 'triangle' | 'diamond'; fill: string; polygon?: [number, number][] | null }
+export interface ImageElement extends Geometry { type: 'image'; fit?: 'fill' | 'contain' | 'cover'; focal_x?: number; focal_y?: number; asset_id: string; alt: string }
 export interface ConnectorAnchor { shape_id: string; side: 'top' | 'left' | 'bottom' | 'right' }
 export interface LineElement extends Geometry {
   type: 'line'; color: string; weight: number;
@@ -35,6 +37,7 @@ export interface LineElement extends Geometry {
   dashed?: boolean;
 }
 export interface TableElement extends Geometry {
+  minimum_pt?: number | null;
   css?: {columns: number[]; rows: number[]; align: ('left' | 'right' | 'center')[][]; bold: boolean[][]} | null;
   type: 'table'; font?: string; rows: string[][]; color: string; fill: string; size?: number;
   header_fill?: string | null; header_color?: string | null; row_rule?: string | null;

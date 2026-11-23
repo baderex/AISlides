@@ -3,8 +3,9 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
+from app.chart_key import chart_key
 from app.domain import Chart, Document, Image, Line, Shape, Table, Text
-from app.render_geometry import pdf_face, pdf_lines, styled_pdf_layout, align_offset, physical, flattened, table_columns, table_rows, table_insets, chart_marks, chart_values, bar_value_position, stacked_labels, segment_ink, arrowheads, connector_points, TEXT_LEADING
+from app.render_geometry import image_placement, pdf_face, pdf_lines, styled_pdf_layout, align_offset, physical, flattened, table_columns, table_rows, table_insets, chart_marks, chart_values, bar_value_position, stacked_labels, segment_ink, arrowheads, connector_points, TEXT_LEADING
 
 
 def to_pdf(document: Document, get_asset) -> bytes:
@@ -64,7 +65,7 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 elif el.shape == "ellipse":
                     pdf.ellipse(0, 0, w, h, stroke=int(bool(el.border)), fill=1)
                 elif el.shape == "round":
-                    pdf.roundRect(0, 0, w, h, min(w,h)*.12, stroke=int(bool(el.border)), fill=1)
+                    pdf.roundRect(0, 0, w, h, (min(w,h)*.12 if el.radius_pt is None else min(el.radius_pt, min(w,h)/2)), stroke=int(bool(el.border)), fill=1)
                 elif el.shape in {"triangle", "diamond"}:
                     path = pdf.beginPath()
                     path.moveTo(w/2, h)
@@ -80,7 +81,13 @@ def to_pdf(document: Document, get_asset) -> bytes:
                 else:
                     pdf.rect(0, 0, w, h, stroke=int(bool(el.border)), fill=1)
             elif isinstance(el, Image):
-                pdf.drawImage(ImageReader(io.BytesIO(get_asset(el.asset_id))), 0, 0, w, h, mask="auto")
+                source = ImageReader(io.BytesIO(get_asset(el.asset_id)))
+                (dx, dy, dw, dh), (left, top, right, bottom) = image_placement(el, *source.getSize(), w, h)
+                iw, ih = dw / (1-left-right), dh / (1-top-bottom)
+                path = pdf.beginPath()
+                path.rect(0, 0, w, h)
+                pdf.clipPath(path, stroke=0)
+                pdf.drawImage(source, dx-left*iw, h-dy-dh-bottom*ih, iw, ih, mask="auto")
             elif isinstance(el, Line):
                 pdf.setStrokeColor(HexColor(el.color))
                 pdf.setLineWidth(el.weight)
@@ -144,10 +151,20 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         pdf.setLineWidth(weight)
                         pdf.line(0, rule_y, w, rule_y)
             elif isinstance(el, Chart):
+                plot_w, cells, _ = chart_key(el, w, h)
+                for cell in cells:
+                    cx, cy = cell.x, h-cell.y
+                    if cell.swatch:
+                        pdf.setFillColor(HexColor(cell.swatch))
+                        pdf.rect(cx, cy-3, 6, 6, stroke=0, fill=1)
+                        cx += 9
+                    pdf.setFillColor(HexColor(el.label_color))
+                    pdf.setFont(pdf_face(el.font, cell.bold), cell.size)
+                    pdf.drawString(cx, cy-cell.size*.32, cell.text)
                 plot_h = h * (.96 if el.chart == "bar" and el.show_values else .87)
                 segment_labels = iter(stacked_labels(el))
                 bar_labels = el.show_values and len(el.series) == 1 and el.chart in {"bar", "column"}
-                for index, (kind, color, dims) in enumerate(chart_marks(el, w, plot_h)):
+                for index, (kind, color, dims) in enumerate(chart_marks(el, plot_w, plot_h)):
                     pdf.setFillColor(HexColor(color))
                     pdf.setStrokeColor(HexColor(color))
                     if kind == "rect":
@@ -169,10 +186,10 @@ def to_pdf(document: Document, get_asset) -> bytes:
                                 pdf.drawRightString(px, h - py - 4, value)
                             else:
                                 pdf.drawCentredString(px, h - py - (10 if anchor == "mt" else 0), value)
-                            if el.chart == "bar":
-                                pdf.setFont(pdf_face(el.font, False), 11)
-                                pdf.setFillColor(HexColor(el.label_color))
-                                pdf.drawRightString(w * .22, h - py - 4, el.categories[index][:20])
+                        if el.chart == "bar" and index < len(el.categories):
+                            pdf.setFont(pdf_face(el.font, False), 11)
+                            pdf.setFillColor(HexColor(el.label_color))
+                            pdf.drawRightString(plot_w * .22, h - ry - rh/2 - 4, el.categories[index])
                     elif kind == "pie":
                         cx, cy, radius, begin, sweep = dims
                         pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=0, fill=1)
@@ -190,11 +207,11 @@ def to_pdf(document: Document, get_asset) -> bytes:
                     stacked = el.chart == "stacked_column"
                     if stacked:
                         pdf.setStrokeColor(HexColor(el.label_color))
-                        pdf.line(0, h - plot_h, w, h - plot_h)
+                        pdf.line(0, h - plot_h, plot_w, h - plot_h)
                     pdf.setFont(pdf_face(el.font, stacked), 13 if stacked or el.show_values else 10)
                     pdf.setFillColor(HexColor(el.label_color))
                     for i, category in enumerate(el.category_labels()):
-                        pdf.drawCentredString(w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])
+                        pdf.drawCentredString(plot_w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])
             pdf.restoreState()
         if lineage := evidence_notes(document, slide):
             pdf.textAnnotation(lineage, Rect=(.015 * width, .01 * height, .048 * width, .043 * height))

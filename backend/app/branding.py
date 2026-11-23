@@ -11,6 +11,7 @@ from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 
+from app.deck_design import DeckDesignSpec
 from app.design import readable
 from app.domain import BrandLayout, BrandPanel, BrandSlot, BrandTemplate, Chart, Image, Skill, Slide, Table, Text, Theme
 from app.rendering import contrast, physical, text_fits
@@ -234,6 +235,8 @@ def layout_for_slide(brand, slide):
 
 def compose_branded(item, content, document, image_ids, brand):
     role = "summary" if item.layout == "section" and content.points else item.layout
+    typography = DeckDesignSpec.from_theme(document.theme, document.aspect_ratio, role).typography
+    title_role = "cover" if role == "cover" else "headline"
     sources = {source.id for source in document.sources}
     source_ids = list(dict.fromkeys(key for key in content.source_ids if key in sources))
     points = [" — ".join(filter(None, (point.title, point.value if source_ids else "", point.body)))
@@ -257,14 +260,16 @@ def compose_branded(item, content, document, image_ids, brand):
             if not text_fits(body, w * ptw, h * pth, 18, False, font):
                 continue
             heading = Text(x=title.x, y=title.y, w=title.w, h=title_height, text=item.title,
-                           size=title.size, color=readable(title.color, panel.color, document.theme.accent),
+                           size=title.size, role=title_role, minimum_pt=min(title.size, typography[title_role].minimum_pt),
+                           color=readable(title.color, panel.color, document.theme.accent),
                            font=title.font, bold=title.bold, align=title.align, placeholder_idx=title.idx)
-            detail = Text(x=x, y=y, w=w, h=h, text=body, size=18,
+            detail = Text(x=x, y=y, w=w, h=h, text=body, size=18, role="body", minimum_pt=typography["body"].minimum_pt,
                           color=readable(document.theme.ink, panel.color), font=font)
             return Slide(title=item.title, layout=role, brand_layout_index=layout.index, background=layout.background,
                          elements=[heading, detail], notes=content.notes, source_ids=source_ids)
 
-    layout = choose_layout(brand.layouts, role)
+    # A closing with supporting points needs a content placeholder in the template.
+    layout = choose_layout(brand.layouts, "summary" if role == "closing" and points else role)
     slide = Slide(title=item.title, layout=role, brand_layout_index=layout.index,
                   background=layout.background, notes=content.notes,
                   source_ids=source_ids)
@@ -276,7 +281,7 @@ def compose_branded(item, content, document, image_ids, brand):
     def geometry(slot):
         return {"x": slot.x, "y": slot.y, "w": slot.w, "h": slot.h}
 
-    def text(value, slot, fallback):
+    def text(value, slot, fallback, text_role="body"):
         if not value.strip():
             return
         if slot:
@@ -284,12 +289,14 @@ def compose_branded(item, content, document, image_ids, brand):
             if role not in {"cover", "section", "closing"}:
                 color = readable(color, slide.background, theme.accent, theme.ink)
             slide.elements.append(Text(**geometry(slot), text=value, size=slot.size, color=color, font=slot.font,
+                                       role=text_role, minimum_pt=min(slot.size, typography[text_role].minimum_pt),
                                        bold=slot.bold, align=slot.align, placeholder_idx=slot.idx))
         else:
             color = readable(theme.ink, slide.background, theme.accent)
-            slide.elements.append(Text(**fallback, text=value, font=theme.font, color=color))
+            slide.elements.append(Text(**fallback, text=value, font=theme.font, color=color,
+                                       role=text_role, minimum_pt=typography[text_role].minimum_pt))
 
-    text(item.title, title, {"x": .06, "y": .06, "w": .88, "h": .15, "size": 32, "bold": True})
+    text(item.title, title, {"x": .06, "y": .06, "w": .88, "h": .15, "size": 32, "bold": True}, title_role)
     if subtitle:
         text(content.subtitle, subtitle, {})
     elif content.subtitle:
@@ -316,12 +323,14 @@ def compose_branded(item, content, document, image_ids, brand):
             if exhibit_kind == "chart":
                 chart = content.chart
                 slide.elements.append(Chart(**exhibit, chart=chart.chart, categories=chart.categories,
-                                            series=[{"name": chart.label, "values": chart.values}], color=theme.accent))
+                                            series=[{"name": chart.label, "values": chart.values}], color=theme.accent,
+                                            value_prefix=chart.value_prefix, value_suffix=chart.value_suffix, font=theme.font))
             elif exhibit_kind == "table":
                 slide.elements.append(Table(**exhibit, rows=[[cell[:180] for cell in row] for row in content.table],
                                             color=theme.ink, fill=theme.surface, header_fill=theme.accent, header_color="#FFFFFF"))
             else:
-                slide.elements.append(Image(**exhibit, asset_id=content.image_asset_id, alt=item.title))
+                slide.elements.append(Image(**exhibit, asset_id=content.image_asset_id, alt=item.title,
+                                            **content.picture_placement.model_dump()))
         except ValueError:
             slide.warnings.append("The exhibit could not be rendered in the template.")
         else:

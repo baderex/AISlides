@@ -2,13 +2,14 @@
 import io
 from PIL import Image as PILImage
 from PIL import ImageDraw
+from app.chart_key import chart_key
 from app.domain import Chart, Document, Image, Line, Shape, Slide, Table, Text
 from app.pdf_render import to_pdf
 from app.render_geometry import (
     font, wrapped, RasterText, raster_text, pdf_face,
     pdf_lines, styled_lines, styled_raster_layout, styled_pdf_layout, styled_text_fits,
     align_offset, text_fits, text_height, longest_word_width, draw_raster_text,
-    physical, fit_image, slide_icon, flattened, fit_slide_text,
+    physical, image_placement, fit_image, slide_icon, flattened, fit_slide_text,
     validate_slide, table_columns, tracks, table_rows, table_insets,
     table_text_fits, contrast, chart_marks, chart_values, bar_value_position,
     stacked_labels, segment_ink, arrowheads, dashed_segments, connector_points,
@@ -61,7 +62,7 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
             elif el.shape == "ellipse":
                 draw.ellipse((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
             elif el.shape == "round":
-                draw.rounded_rectangle((0, 0, w-1, h-1), radius=min(w, h)*.12, fill=el.fill, outline=el.border)
+                draw.rounded_rectangle((0, 0, w-1, h-1), radius=min(w, h)*.12 if el.radius_pt is None else min(el.radius_pt * scale, min(w,h)/2), fill=el.fill, outline=el.border)
             else:
                 draw.rectangle((0, 0, w-1, h-1), fill=el.fill, outline=el.border)
         elif isinstance(el, Line):
@@ -85,7 +86,11 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
         elif isinstance(el, Image):
             try:
                 with PILImage.open(io.BytesIO(get_asset(el.asset_id))) as source:
-                    layer = source.convert("RGBA").resize((w, h))
+                    (dx, dy, dw, dh), (left, top, right, bottom) = image_placement(el, *source.size, w, h)
+                    box = (left * source.width, top * source.height, (1-right) * source.width, (1-bottom) * source.height)
+                    picture = source.convert("RGBA").resize((max(1, round(dw)), max(1, round(dh))),
+                                                            PILImage.Resampling.LANCZOS, box)
+                    layer.alpha_composite(picture, (round(dx), round(dy)))
             except (OSError, ValueError):
                 draw.rectangle((0, 0, w-1, h-1), outline="#BB3457", width=3)
         elif isinstance(el, Table):
@@ -123,10 +128,19 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                     table_draw.line((0, rule_y, width, rule_y), fill=shade, width=stroke)
             layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
+            plot_pt, cells, _ = chart_key(el, nw * ptw, nh * pth)
+            plot_w = plot_pt * scale
+            for cell in cells:
+                cx, cy = cell.x * scale, cell.y * scale
+                if cell.swatch:
+                    draw.rectangle((cx, cy-3*scale, cx+6*scale, cy+3*scale), fill=cell.swatch)
+                    cx += 9 * scale
+                draw.text((cx, cy), cell.text, fill=el.label_color, anchor="lm",
+                          font=font(max(1, round(cell.size * scale)), cell.bold, el.font))
             plot_h = h * (.96 if el.chart == "bar" and el.show_values else .87)
             segment_labels = iter(stacked_labels(el))
             bar_labels = el.show_values and len(el.series) == 1 and el.chart in {"bar", "column"}
-            for index, (kind, color, dims) in enumerate(chart_marks(el, w, plot_h)):
+            for index, (kind, color, dims) in enumerate(chart_marks(el, plot_w, plot_h)):
                 if kind == "rect":
                     rx, ry, rw, rh = dims
                     draw.rectangle((rx, ry, rx+rw, ry+rh), fill=color)
@@ -138,9 +152,9 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                         value, px, py, anchor = bar_value_position(el, index, dims, 4 * scale)
                         draw.text((px, py), value, fill=color if index == el.highlight else el.label_color,
                                   font=font(max(1, round(12 * scale)), True, el.font), anchor=anchor)
-                        if el.chart == "bar":
-                            draw.text((w * .22, py), el.categories[index][:20], fill=el.label_color,
-                                      font=font(max(1, round(11 * scale)), False, el.font), anchor="rm")
+                    if el.chart == "bar" and index < len(el.categories):
+                        draw.text((plot_w * .22, ry + rh/2), el.categories[index], fill=el.label_color,
+                                  font=font(max(1, round(11 * scale)), False, el.font), anchor="rm")
                 elif kind == "pie":
                     cx, cy, radius, begin, sweep = dims
                     draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color)
@@ -155,10 +169,10 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
             if el.chart not in {"pie", "bar"}:
                 stacked = el.chart == "stacked_column"
                 if stacked:
-                    draw.line((0, plot_h, w, plot_h), fill=el.label_color)
+                    draw.line((0, plot_h, plot_w, plot_h), fill=el.label_color)
                 face = font(max(1, round((13 if stacked or el.show_values else 10) * scale)), stacked, el.font)
                 for index, category in enumerate(el.category_labels()):
-                    draw.text((w*(index+.5)/len(el.categories), plot_h+3), category if stacked else category[:20],
+                    draw.text((plot_w*(index+.5)/len(el.categories), plot_h+3), category if stacked else category[:20],
                               fill=el.label_color, font=face, anchor="mt")
         if el.rotation:
             layer = layer.rotate(-el.rotation, expand=True, resample=PILImage.Resampling.BICUBIC)

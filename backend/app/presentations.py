@@ -1,3 +1,5 @@
+from uuid import NAMESPACE_URL, uuid5
+
 from sqlalchemy import func, select
 
 from app.asset_lifecycle import track_document
@@ -72,7 +74,8 @@ def referenced_images(slides: list[Slide]):
 
 
 def asset_sources(assets):
-    return [Source(title=asset.name, excerpt=asset.extracted[:3000], asset_id=asset.id) for asset in assets]
+    return [Source(id=str(uuid5(NAMESPACE_URL, f"framecraft:asset:{asset.id}")), title=asset.name,
+                   excerpt=asset.extracted[:20000], asset_id=asset.id) for asset in assets]
 
 
 def present_owned(db, item_id, owner_id, lock=False):
@@ -88,11 +91,23 @@ def queue_generation(db, item, *, restart_failed=False):
         if not restart_failed or job.state not in {"failed", "cancelled"}:
             raise Conflict("This presentation already has a completed generation. Duplicate it to start a new deck.")
         admit_ai(db, item.owner_id)
+        message = "Generation queued again from its saved checkpoint."
+        if job.state == "failed":
+            context = dict(job.context)
+            if usage := context.get("usage"):
+                context["usage"] = {**usage, "attempt_start_tokens": usage["input"] + usage["output"]}
+            retry = context.get("layout_retry", {})
+            if retry:
+                context["layout_retry"] = {**retry, "attempt": 0}
+            if job.checkpoint == "html_measure" and "html_candidate" not in context and retry.get("attempt", 0) >= 3:
+                job.checkpoint = "html_slide"
+            job.context = context
+            message = "Retrying from the saved checkpoint with a fresh token allowance."
         job.state, job.error, job.cancelled = "queued", None, False
         job.lease = None
         job.lease_owner = None
         item.status = "CREATED"
-        emit(db, item, "generation.resumed", "Generation queued again from its saved checkpoint.", job)
+        emit(db, item, "generation.resumed", message, job)
         return job
     admit_ai(db, item.owner_id)
     job = Job(presentation_id=item.id, context={"layout_engine":"auto"})

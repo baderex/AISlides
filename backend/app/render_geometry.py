@@ -99,13 +99,13 @@ def wrapped(value, width, measure):
     result = []
     for paragraph in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = ""
-        for word in paragraph.split():
-            candidate = f"{line} {word}" if line else word
-            if line and measure(candidate) > width:
-                result.append(line)
-                line = word
-            else:
-                line = candidate
+        for token in re.findall(r"[^\S\n]+|\S+", paragraph.expandtabs(4)):
+            if line.strip() and not token.isspace() and measure(line + token) > width:
+                result.append(line.rstrip())
+                line = ""
+            line += token
+            if token.isspace():
+                continue
             while line and measure(line) > width:
                 stop = next((i for i in range(1, len(line) + 1) if measure(line[:i]) > width), len(line) + 1)
                 count = max(1, stop - 1)
@@ -188,9 +188,9 @@ def styled_lines(element, width, measure):
         if line and line_width + width_of(space) + addition > width:
             lines.append((line, line_width))
             line, line_width = [], 0
-        if line:
-            line.extend(space)
-            line_width += width_of(space)
+            space = []
+        line.extend(space)
+        line_width += width_of(space)
         space = []
         if addition <= width:
             line.extend(runs)
@@ -269,12 +269,29 @@ def physical(document: Document):
     return tuple(value * 72 for value in document.dimensions)
 
 
+def image_placement(image, source_w, source_h, frame_w, frame_h):
+    """Destination rectangle and fractional source crop, aligned like CSS object-position."""
+    if image.fit == "fill":
+        return (0, 0, frame_w, frame_h), (0, 0, 0, 0)
+    factors = frame_w / source_w, frame_h / source_h
+    scale = max(factors) if image.fit == "cover" else min(factors)
+    w, h = source_w * scale, source_h * scale
+    if image.fit == "contain":
+        return ((frame_w-w)*image.focal_x, (frame_h-h)*image.focal_y, w, h), (0, 0, 0, 0)
+    dx, dy = max(0, 1-frame_w/w), max(0, 1-frame_h/h)
+    return (0, 0, frame_w, frame_h), (dx*image.focal_x, dy*image.focal_y,
+                                      dx*(1-image.focal_x), dy*(1-image.focal_y))
+
+
 def fit_image(image: Image, document: Document, ratio: float) -> Image:
+    if image.fit == "cover":
+        return image
     width, height = document.dimensions
     normalized_ratio = ratio * height / width
     w = min(image.w, image.h * normalized_ratio)
     h = min(image.h, image.w / normalized_ratio)
-    return image.model_copy(update={"x": image.x + (image.w - w) / 2, "y": image.y + (image.h - h) / 2, "w": w, "h": h})
+    return image.model_copy(update={"x": image.x + (image.w-w)*image.focal_x, "y": image.y + (image.h-h)*image.focal_y,
+                                    "w": w, "h": h})
 
 
 def slide_icon(document: Document, name: str, x: float, y: float, h: float, background: str) -> Image:
@@ -314,8 +331,10 @@ def fit_slide_text(document: Document, slide: Slide) -> list[str]:
             warning = "Some exhibit cells need shorter text."
         else:
             continue
-        while el.size > MIN_TEXT_SIZE and not fits(h):
-            el.size = max(MIN_TEXT_SIZE, el.size - 1)
+        floor = el.minimum_pt or MIN_TEXT_SIZE
+        el.size = max(floor, el.size)
+        while el.size > floor and not fits(h):
+            el.size = max(floor, el.size - 1)
         if fits(h):
             continue
 
@@ -446,7 +465,7 @@ def chart_marks(el: Chart, w: float, h: float):
         return
     if el.chart == "pie":
         total = sum(values) or 1
-        angle = 0
+        angle = -90  # The native pie chart starts at twelve o'clock and proceeds clockwise.
         for index, value in enumerate(values):
             sweep = value / total * 360
             yield ("pie", shades[index % len(shades)], (w / 2, h / 2, min(w, h) * .45, angle, sweep))
@@ -459,7 +478,7 @@ def chart_marks(el: Chart, w: float, h: float):
             pos = h * (high - value) / span
             if el.chart == "bar":
                 thickness = h / len(el.categories) * .72 / len(el.series)
-                inset = w * .24 if el.show_values else 0
+                inset = w * .24
                 zero = inset + (w - inset) * -low / span
                 end = inset + (w - inset) * (value - low) / span
                 y = i * h / len(el.categories) + thickness * si
@@ -532,6 +551,21 @@ def dashed_segments(points, scale):
             end = min(start + 5 * scale, length)
             yield [(x + dx * offset / length, y + dy * offset / length) for offset in (start, end)]
             start += 8 * scale
+
+
+def segment_crosses(start, end, rect):
+    # Intersect the segment's parameter interval with the interior of each axis.
+    first, last = 0., 1.
+    for axis in range(2):
+        distance = end[axis] - start[axis]
+        low, high = rect[axis], rect[axis + 2]
+        if distance == 0:
+            if not low < start[axis] < high:
+                return False
+        else:
+            a, b = sorted(((low - start[axis]) / distance, (high - start[axis]) / distance))
+            first, last = max(a, first), min(b, last)
+    return first < last
 
 
 def connector_points(line, x, y, width, height, nodes):

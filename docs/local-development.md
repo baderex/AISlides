@@ -6,7 +6,7 @@ The studio is at [localhost:4200](http://localhost:4200), the API docs at [local
 
 The Angular dev server reloads frontend changes. Restart the supervisor after changing backend code or configuration.
 
-Each generation job has a cumulative token budget (`AI_JOB_TOKEN_BUDGET`, default 90,000). Planning, slide generation, reviews and validation retries all draw from it. **Retry generation** preserves both completed slides and usage. To give a saved job more room, set a higher total in `backend/.env`, restart the worker and retry the presentation. The worker setting also applies to other jobs it processes.
+Each generation attempt has a token budget (`AI_JOB_TOKEN_BUDGET`, default 90,000). Planning, slide generation, reviews and automatic repairs share that allowance. An explicit retry of a failed job starts a fresh allowance at the saved checkpoint. Completed slides, cumulative usage and the job's cost limit carry forward. Resuming a cancelled job or reclaiming a worker lease continues the existing allowance.
 
 The worker limits each reply by stage and by the budget left after estimating the request input. Outline limits scale with the requested slide count. On OpenRouter, the worker requests non-thinking mode for DeepSeek V4 models. Inspect `usage.by_stage` at `GET /api/v1/jobs/{job_id}` for call counts, input and output tokens, validation failures, and truncations. Where reported, `reasoning` is included in output. Older checkpoints retain their original totals and accumulate stage details for new calls.
 

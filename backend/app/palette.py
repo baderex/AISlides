@@ -91,7 +91,7 @@ def semantic_palette(theme, background=None):
                       key=lambda c: dist(oklab(c), oklab(series[0])), default=neutral)
     return {"background": theme.background, "surface": theme.surface, "ink": main, "heading": main,
             "body": main, "muted": ink(theme.muted, bg), "accent": theme.accent, "highlight": series[0],
-            "border": mapped(blend(bg, main, .28)), "neutral": neutral,
+            "accentText": ink(series[0], bg), "border": mapped(blend(bg, main, .28)), "neutral": neutral,
             "positive": mapped(visible_tone(blend("#187548", theme.accent, .16), bg)),
             "negative": mapped(visible_tone(blend("#A43C40", theme.accent, .12), bg)),
             "onAccent": ink(theme.background, theme.accent), "onSurface": ink(theme.ink, theme.surface),

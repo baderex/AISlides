@@ -8,6 +8,7 @@ from grandalf.layouts import SugiyamaLayout, VertexViewer
 from app.design import blend, readable
 from app.domain import ConnectorAnchor, Table, Text, display_value
 from app.lucide import ICON_NAMES
+from app.render_geometry import segment_crosses
 from app.rendering import slide_icon
 from app.visuals import CodeVisual, FlowVisual, GraphVisual, MatrixVisual, QuantitativeVisual, ScatterVisual, ScheduleVisual, SequenceVisual, SlopeVisual, SwimlaneVisual, VennVisual, weighted_average
 from app.exhibit_canvas import ExhibitCanvas
@@ -61,7 +62,7 @@ def quantitative(c, v):
             left, right = row.values if tornado else sorted((origin, row.values[0]))
             position = x(row.values[0])
             y = .04 + i * height
-            color = c.accent if not v.highlight or v.highlight == row.label else c.rule
+            color = c.accent if not v.highlight or v.highlight == row.label else c.colors["neutral"]
             if row.label == c.highlight_band:
                 c.shape(0, y, 1, height, c.surface, z=-4, element_key=f"{identity}:highlight")
             if left != right:
@@ -165,7 +166,7 @@ def course(c, v):
         for i, row in enumerate(v.rows):
             identity = f"slope:{row.label}"
             left, right = map(positions, row.values)
-            color = c.accent if not v.highlight or row.label == v.highlight else c.muted
+            color = c.accent if not v.highlight or row.label == v.highlight else c.colors["neutral"]
             c.line((.41, left), (.59, right), color=color, weight=2 if row.label == v.highlight else 1.2,
                    element_key=f"{identity}:connector")
             c.line((.39, slots[0][i] + .043), (.41, left), color=color, element_key=f"{identity}:left-tick")
@@ -248,12 +249,13 @@ def matrix(c, v):
             c.shape(min(zero, zero + length), (i + 1.44) * row_height, abs(length), .12 * row_height,
                     c.accent, element_key=f"{v.type}:score-bar:{v.rows[i].label}")
     table_width = .79 if weighted and c.score_bars else 1
+    floor = c.typography["table"].minimum_pt
     c.slide.elements.append(Table(**c.box(0, 0, table_width, .84 if show_key else .98), rows=rows, fill=c.slide.background,
-                                  color=c.ink, size=max(9, min(15, 96 / len(rows))), font=c.theme.font,
+                                  color=c.ink, size=max(floor, min(15, 96 / len(rows))), minimum_pt=floor, font=c.theme.font,
                                   header_fill=c.accent, header_color=readable("#FFFFFF", c.accent),
                                   focus_rows=[i for i, row in enumerate(v.rows, 1)
                                               if row.label in (v.recommended, c.highlight_band)],
-                                  focus_fill=c.surface, focus_ink=c.accent, row_rule=c.rule,
+                                  focus_fill=c.surface, focus_ink=readable(c.accent, c.surface, c.ink), row_rule=c.rule,
                                   numeric_columns=[i for i in range(1, len(headers)) if all(
                                       isinstance(row.cells[i - 1], (int, float)) for row in v.rows
                                   )] if not weighted else list(range(1, len(headers))),
@@ -310,7 +312,7 @@ def scatter(c, v):
         max_height = min(.17, .25 * c.w * c.ptw / (c.h * c.pth))
         height = max_height * sqrt(point.size / largest) if point.size and v.type == "bubble-chart" else .035
         width = height * c.h * c.pth / (c.w * c.ptw)
-        fill = c.accent if not v.highlight or point.label == v.highlight else c.muted
+        fill = c.accent if not v.highlight or point.label == v.highlight else c.colors["neutral"]
         c.shape(px - width / 2, py - height / 2, width, height, fill, shape="ellipse", opacity=.78,
                 element_key=f"{identity}:point")
         label = f"{point.label} ({fmt(point.size)})" if v.type == "bubble-chart" else point.label
@@ -403,7 +405,54 @@ def graph_order(v, ranks):
     return order
 
 
+def architecture_ports(c, v, hub):
+    """Give each directed connection its own labeled port along the shared service."""
+    peers = [node for node in v.nodes if node.id != hub.id]
+    by_peer = defaultdict(list)
+    for edge in v.edges:
+        by_peer[edge.target if edge.source == hub.id else edge.source].append(edge)
+    def node_box(node, x, y, w, h):
+        key = f"architecture:{node.id}"
+        c.shape(x, y, w, h, c.surface, border=c.rule, element_key=key + ":node")
+        heading = "\n".join(filter(None, [node.group, node.label]))
+        detail = "\n".join(dict.fromkeys(filter(None, [node.detail, *node.fields])))
+        c.label(heading, x + .014, y + h * .04, w - .028, h * (.45 if detail else .92),
+                15, bold=True, centered=True, element_key=key + ":heading")
+        if detail:
+            c.label(detail, x + .014, y + h * .50, w - .028, h * .46,
+                    12, centered=True, element_key=key + ":detail")
+        c.mark(node.label, x + w, y + h / 2)
+
+    node_box(hub, 0, .015, .255, .97)
+    # Reserve more room for services with both requests and replies.
+    weights = [max(1.6, len(by_peer[peer.id])) for peer in peers]
+    total = sum(weights)
+    top = 0.
+    for peer, weight in zip(peers, weights):
+        height = weight / total
+        node_box(peer, .655, top + .012, .345, height - .024)
+        edges = by_peer[peer.id]
+        for index, edge in enumerate(edges):
+            row = (height - .024) / len(edges)
+            y = top + .012 + index * row
+            left, right = (.255, y + row * .80), (.655, y + row * .80)
+            start, end = (left, right) if edge.source == hub.id else (right, left)
+            key = edge_key(v, edge)
+            c.line(start, end, arrow=True, color=c.accent, element_key=key + ":connector")
+            c.label(edge.label, .27, y, .37, row * .74, 12, align="center", centered=True,
+                    element_key=key + ":label")
+        top += height
+
+
 def graph(c, v):
+    if v.type == "architecture" and c.recipe == "standard" and c.document.aspect_ratio == "1:1" and len(v.nodes) >= 4:
+        endpoints = [{edge.source, edge.target} for edge in v.edges]
+        shared = set.intersection(*endpoints)
+        connected = set.union(*endpoints)
+        if (len(shared) == 1 and len(connected) == len(v.nodes) and all(len(pair) == 2 for pair in endpoints)
+                and not any(node.icon or node.role in {"decision", "store"} for node in v.nodes)):
+            architecture_ports(c, v, next(node for node in v.nodes if node.id in shared))
+            return
     ranks = graph_ranks(v)
     stack = v.type == "layered-stack"
     sankey = v.type == "sankey"
@@ -476,6 +525,7 @@ def graph(c, v):
         cross_start += cross
     pairs = {(edge.source, edge.target) for edge in v.edges}
     order = {node.id: i for i, node in enumerate(v.nodes)}
+    segments, labels = [], []
     for edge in v.edges:
         identity = edge_key(v, edge)
         sx, sy, sw, sh = local[edge.source]
@@ -486,6 +536,7 @@ def graph(c, v):
             points = [start, (bend_x, start[1]), (bend_x, bend_y), (end[0], bend_y), end]
             for i, (a, b) in enumerate(zip(points, points[1:])):
                 c.line(a, b, arrow=i == 3, element_key=f"{identity}:loop:{i}")
+                segments.append((a, b))
             lx, ly = bend_x - .096, bend_y + .006
         else:
             same_rank = ranks[edge.source] == ranks[edge.target]
@@ -509,12 +560,15 @@ def graph(c, v):
                     start, end = (start[0], start[1] + sh * .26), (end[0], end[1] + th * .26)
                 anchors = (None, None)
             c.line(start, end, arrow=True, z=-3, anchors=anchors, element_key=f"{identity}:connector")
+            segments.append((start, end))
             lx = (start[0] + end[0]) / 2 - .085
             ly = (start[1] + end[1]) / 2 + (.01 if reversed_pair else -.073)
-        graph_label(c, edge.label, lx, ly, element_key=f"{identity}:label")
+        labels.append((edge.label, lx, ly, f"{identity}:label"))
+    for label, lx, ly, key in labels:
+        graph_label(c, label, lx, ly, segments=segments, element_key=key)
 
 
-def graph_label(c, text, x, y, *, element_key=None):
+def graph_label(c, text, x, y, *, segments=(), element_key=None):
     if not text:
         return
     width, height = .17, .068
@@ -523,11 +577,15 @@ def graph_label(c, text, x, y, *, element_key=None):
     def overlap(position):
         bounds = c.box(*position, width, height)
         bx, by, bw, bh = (bounds[key] for key in ("x", "y", "w", "h"))
-        return sum(max(0, min(bx + bw, el.x + el.w) - max(bx, el.x)) *
+        area = sum(max(0, min(bx + bw, el.x + el.w) - max(bx, el.x)) *
                    max(0, min(by + bh, el.y + el.h) - max(by, el.y)) for el in occupied)
+        left, top = position
+        rect = (left, top, left + width, top + height)
+        return area, sum(segment_crosses(a, b, rect) for a, b in segments)
 
     candidates = [(min(1 - width, max(0, x + dx)), min(1 - height, max(0, y + dy)))
-                  for dx, dy in ((0, 0), (0, -.075), (0, .085), (0, .16), (-.09, 0), (.09, 0))]
+                  for dx, dy in ((0, 0), (0, -.075), (0, .085), (-.09, 0), (.09, 0),
+                                 (-.11, -.075), (.11, -.075), (-.11, .075), (.11, .075), (0, .16))]
     c.label(text, *min(candidates, key=overlap), width, height, 10, bold=True, align="center", element_key=element_key)
 
 
@@ -670,10 +728,23 @@ def sequence(c, v):
         start, end = [(key + .5) * step for key in (message.source, message.target)]
         y = .17 + (i + .8) * height
         identity = f"sequence:message:{i}"
-        c.line((start, y), (end, y), arrow=True, dashed=message.kind == "return", element_key=f"{identity}:connector")
-        left = min(start, end)
-        c.label(message.label, left + .006, y - min(.092, height * .79), abs(end - start) - .012,
-                min(.086, height * .75), 12, align="center", element_key=f"{identity}:label")
+        if start == end:
+            turn = start + (.35 if start < .5 else -.35) * step
+            rise = min(.025, height * .24)
+            c.line((start, y-rise), (turn, y-rise), element_key=f"{identity}:out")
+            c.line((turn, y-rise), (turn, y), element_key=f"{identity}:turn")
+            c.line((turn, y), (end, y), arrow=True, element_key=f"{identity}:connector")
+            label_bottom = y - rise
+        else:
+            c.line((start, y), (end, y), arrow=True, dashed=message.kind == "return", element_key=f"{identity}:connector")
+            label_bottom = y
+        # The label can span more than the distance between adjacent lifelines on a square slide.
+        width = min(.96, max(.56 if c.document.aspect_ratio == "1:1" or start == end else 0, abs(end - start) - .012))
+        left = min(1 - width, max(0, (start + end - width) / 2))
+        top = y - min(.10, height * .82)
+        label_height = label_bottom - top - .004
+        c.shape(left, top, width, label_height, c.slide.background, z=-3, element_key=f"{identity}:backdrop")
+        c.label(message.label, left, top, width, label_height, 12, align="center", centered=True, element_key=f"{identity}:label")
         c.mark(message.label, end, y)
 
 
@@ -713,7 +784,7 @@ def code(c, v):
         c.label(str(i + 1), .015, y + height * .08, .054, height * .85, 12, color=readable(c.muted, fill, c.ink),
                 font=mono, align="right", element_key=f"{identity}:number")
         c.label(line.code.expandtabs(4), .09, y + height * .08, .90, height * .85, 14,
-                font=mono, bold=line.highlight, element_key=f"{identity}:text")
+                font=mono, role="code", bold=line.highlight, element_key=f"{identity}:text")
         c.mark(str(i + 1), .98, y + height / 2)
 
 
@@ -798,9 +869,9 @@ def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned
             kicker_x = icon.w / w + .008
         frame.label(details.kicker, kicker_x, 0, .30 - kicker_x, .12, 12, color=frame.muted, bold=True,
                     centered=True, element_key="exhibit:decoration:kicker")
-        frame.label(details.key_metric, .32, 0, .29, .12, 23, color=frame.accent, bold=True,
+        frame.label(details.key_metric, .32, 0, .29, .12, 23, color=frame.accent_text, bold=True,
                     element_key="exhibit:decoration:metric")
-        frame.label(details.delta, .62, 0, .13, .12, 15, color=frame.accent, bold=True,
+        frame.label(details.delta, .62, 0, .13, .12, 15, color=frame.accent_text, bold=True,
                     element_key="exhibit:decoration:delta")
         if details.status is not None:
             frame.label(f"{'○◔◑◕●'[details.status]}  {details.status_label}", .77, 0, .23, .12, 13,
@@ -826,7 +897,7 @@ def compose_exhibit(document, slide, content, bounds, *, annotations=(), planned
     if unit:
         frame.label(unit, 0, (y - frame.y) / frame.h, 1, .075, 11, color=frame.muted, element_key="exhibit:unit")
     if footer:
-        frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted, element_key="exhibit:footer")
+        frame.label(footer, 0, .92, 1, .08, 10, color=frame.muted, element_key="exhibit:footer", role="footnote")
     width = w * .72 if notes else w
     body = ExhibitCanvas(document, slide, (x, y + h * upper, width, h * (1 - lower - upper)),
                          highlight_band=details.highlight_band if details else None, recipe=recipe, score_bars=score_bars)

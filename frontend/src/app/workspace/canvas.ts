@@ -192,6 +192,11 @@ export class SlideCanvas {
     return !!draft && Math.abs((axis === 'x' ? draft.change.x + draft.change.w/2 : draft.change.y + draft.change.h/2) - .5) < .001;
   }
 
+  needsChartKey(el: ChartElement) {
+    return el.element_key === 'workbook:chart' || el.chart === 'pie' || !el.show_values ||
+      el.series.length > 1 && el.chart !== 'stacked_column';
+  }
+
   chart(el: ChartElement) {
     const values = el.series.flatMap(series => series.values);
     const min = Math.min(...values), max = Math.max(...values);
@@ -219,7 +224,7 @@ export class SlideCanvas {
       const lineY = el.chart === 'line' && el.show_values && el.highlight == null ? plotHeight * .13 + current * .82 : current;
       const thickness = .76 * band / el.series.length;
       const horizontal = plotHeight / el.categories.length * .72 / el.series.length;
-      const inset = el.chart === 'bar' && labeledBars ? 24 : 0;
+      const inset = el.chart === 'bar' ? 24 : 0;
       return { x: band*(index+.12), y: Math.min(current, baseline), w: thickness*.85, h: Math.abs(current-baseline),
         cx: band*(index+.5), cy: lineY, horizontal, bx: inset + (100 - inset) * (Math.min(0, value)-low)/span,
         by: index * plotHeight / el.categories.length, bw: Math.abs(value)*(100 - inset)/span, negative: value < 0 };

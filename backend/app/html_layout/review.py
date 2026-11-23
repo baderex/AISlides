@@ -2,25 +2,12 @@
 from collections import Counter
 from dataclasses import dataclass
 
+from app.chart_key import chart_key
 from app.domain import Chart, Image, Line, Shape, Table, Text
 from app.html_layout.markup import parse_markup
+from app.render_geometry import segment_crosses
 from app.rendering import (TEXT_LEADING, TEXT_SCALE, connector_points, flattened, physical,
                            raster_text, validate_slide)
-
-
-def segment_crosses(start, end, rect):
-    # Intersect the segment's parameter interval with the interior of each axis.
-    first, last = 0., 1.
-    for axis in range(2):
-        distance = end[axis] - start[axis]
-        low, high = rect[axis], rect[axis + 2]
-        if distance == 0:
-            if not low < start[axis] < high:
-                return False
-        else:
-            a, b = sorted(((low - start[axis]) / distance, (high - start[axis]) / distance))
-            first, last = max(a, first), min(b, last)
-    return first < last
 
 
 def text_rects(label, frame, width, height):
@@ -44,6 +31,9 @@ def readability_warnings(document, slide):
     assets = {el.asset_id for el, *_ in layers if isinstance(el, Image)}
     warnings = validate_slide(document, slide.model_copy(deep=True), assets)
     width, height = (v * TEXT_SCALE for v in physical(document))
+    for el, _, _, w, h in layers:
+        if isinstance(el, Chart):
+            warnings.extend(chart_key(el, w*width/TEXT_SCALE, h*height/TEXT_SCALE)[2])
     prior = []
     for el, *frame in layers:
         if not isinstance(el, Text) or not el.text.strip() or el.rotation:
@@ -116,7 +106,7 @@ def markup_content(markup):
         node = pending.pop()
         pending.extend(node["children"])
         if node["t"]:
-            content[("copy", " ".join(node["t"].split()))] += 1
+            content[("copy", node["t"] if node["a"].get("role") == "code" else " ".join(node["t"].split()))] += 1
         if node["tag"] == "matrix":
             rows = tuple(tuple(cell["t"] for cell in row["children"]) for row in node["children"])
             content[("matrix", rows)] += 1
@@ -137,13 +127,17 @@ class Quality:
     penalty: float
 
 
-HARD_WARNINGS = ("Low text contrast", "Low table", "Low chart", "Missing image", "Overlapping text ink",
+HARD_WARNINGS = ("Chart labels", "Low text contrast", "Low table", "Low chart", "Missing image", "Overlapping text ink",
                  "Text may overflow", "Some exhibit cells", "Connector crosses label", "Export fit")
 
 
 def evaluate_quality(slide, previous):
     hard = [warning for warning in slide.warnings if warning.startswith(HARD_WARNINGS)]
-    if any(isinstance(el, (Text, Table)) and el.size < 9.5 for el, *_ in flattened(slide.elements)):
+    for el, *_ in flattened(slide.elements):
+        if isinstance(el, Chart) and (any(not name.strip() for name in el.categories)
+                                      or any(not series.name.strip() for series in el.series)):
+            hard.append("Chart categories and series must have visible names.")
+    if any(isinstance(el, (Text, Table)) and el.size + .01 < (el.minimum_pt or 9.5) for el, *_ in flattened(slide.elements)):
         hard.append("Text falls below a readable size. Enlarge the exhibit or shorten the labels.")
     if not any(isinstance(el, (Chart, Table, Image, Line)) or isinstance(el, Text) and el.text.strip()
                or isinstance(el, Shape) and el.fill.casefold() != slide.background.casefold()

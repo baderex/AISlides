@@ -93,6 +93,8 @@ payload => {
     if (!(w>0 && h>0)) throw Error("Empty label bounds");
     const holder = el("div",p,{...pos(x,y,w,h),display:"flex",flexDirection:"column",justifyContent:"center"});
     const n = mark(el("div",holder,textStyle(a,"label")),"text"); n.textContent=value;
+    n.dataset.role = a.role || "label";
+    n.dataset.minimumPt = theme.roles[n.dataset.role].minimum_pt;
     let size=parseFloat(n.style.fontSize);
     const min=(theme.roles[a.role || "label"].minimum_pt)/.75;
     while(n.offsetHeight > h+1 && size>min) n.style.fontSize=px(size=Math.max(min,size-1));
@@ -146,6 +148,7 @@ payload => {
       });
     });
     let size=parseFloat(table.style.fontSize);
+    table.dataset.minimumPt = theme.roles.table.minimum_pt;
     const min=theme.roles.table.minimum_pt/.75;
     while(table.offsetHeight>h+2 && size>min) table.style.fontSize=px(size=Math.max(min,size-1));
     if(table.offsetHeight>h+3) throw Error("Matrix is too dense for the allocated height");
@@ -261,9 +264,15 @@ payload => {
     const asset = pictures[attrs.asset];
     if (!asset) throw Error("Picture is unavailable");
     const scale = Math.min(width / asset.width, height / asset.height);
-    const w = asset.width * scale, h = asset.height * scale;
+    const cover = attrs.fit === "cover";
+    const w = cover ? width : asset.width * scale, h = cover ? height : asset.height * scale;
     const image = mark(el("img", parent, pos((width-w)/2, (height-h)/2, w, h)), "image");
     image.dataset.asset = attrs.asset;
+    image.style.objectFit = cover ? "cover" : "contain";
+    const fx = number(attrs.focal_x, .5, 0, 1), fy = number(attrs.focal_y, .5, 0, 1);
+    image.style.objectPosition = (fx * 100) + "% " + (fy * 100) + "%";
+    image.dataset.focalX = fx;
+    image.dataset.focalY = fy;
     image.alt = attrs.alt || "";
     image.src = asset.src;
   }
@@ -304,6 +313,10 @@ payload => {
       children.forEach(c=>render(c,box,pending));
     } else if(tag==="text") {
       const copy=mark(el("div",box,{...textStyle(a),position:"relative"}),"text");copy.textContent=t;
+      copy.dataset.role=a.role || 'body';
+      copy.dataset.minimumPt=theme.roles[copy.dataset.role].minimum_pt;
+      // Let a wrapped headline grow within a column before allocating the remaining space to its exhibit.
+      if(parent.style.flexDirection === "column") box.style.minHeight="min-content";
       if(a.h || a.grow) copy.dataset.checkParent="true";
       if(!a.grow && !a.h) box.style.flexShrink="0";
     } else if(tag==="rule") {

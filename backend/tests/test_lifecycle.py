@@ -215,12 +215,14 @@ def test_image_regeneration_caches_only_the_same_prompt(monkeypatch):
     calls = []
 
     def request(url, **kwargs):
-        calls.append(kwargs["json"]["prompt"])
+        calls.append((kwargs["json"]["prompt"], kwargs["json"].get("size")))
         return httpx.Response(200, json={"data": [{"b64_json": encoded}]}, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx, "post", request)
     keys = [render_image(job_id, token, 0, LOCAL_USER, prompt) for prompt in ("morning", "morning", "evening")]
     assert len(calls) == 2 and keys[0] == keys[1] and keys[1] != keys[2]
+    wide = render_image(job_id, token, 0, LOCAL_USER, "morning", "landscape")
+    assert wide != keys[0] and calls[-1][1] == "1536x1024"
     assert client.delete(path).status_code == 204
     for key in set(keys):
         with pytest.raises(FileNotFoundError):
