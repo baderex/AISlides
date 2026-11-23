@@ -4,6 +4,27 @@ import { ChartElement, Slide } from '../models';
 import { SlideCanvas } from './canvas';
 
 describe('Workbook chart labels', () => {
+  it.each(['bar', 'column', 'line', 'stacked_column'] as const)('uses measured axis typography for %s charts', kind => {
+    const fixture = TestBed.createComponent(SlideCanvas);
+    const chart: ChartElement = {
+      id: 'chart', type: 'chart', chart: kind, element_key: 'workbook:chart',
+      x: 0, y: 0, w: 1, h: 1, rotation: 0, z: 0, opacity: 1, edited: false, border: null,
+      color: '#915c00', categories: ['North', 'South'],
+      series: [{name: 'Revenue', values: [50, 30]}, {name: 'Cost', values: [20, 10]}],
+      composition: {width: 960, height: 540, plot_width: 600, plot_height: 450, bar_inset: 100,
+        axis_labels: ['North', 'South'], axis_size: 14, numbered: false, key_size: 14,
+        key_left: 640, key_top: 230, columns: [160, 80, 80], rows: [25, 25, 25]},
+    };
+    fixture.componentRef.setInput('slide', {id: 'slide', title: 'Accounts', layout: 'chart', background: '#ffffff',
+      elements: [chart], notes: '', source_ids: [], warnings: []} satisfies Slide);
+    fixture.detectChanges();
+    const label = fixture.nativeElement.querySelector(kind === 'bar' ? '.chart-bar-category' : '.chart-labels');
+    expect(label.style.fontSize).toBe(fixture.componentInstance.font(14));
+    expect(fixture.componentInstance.chartAxisSize({...chart, composition: null})).toBe(kind === 'stacked_column' ? 13 : 12);
+    expect(fixture.componentInstance.chartAxisSize({...chart, composition: {...chart.composition!, axis_size: 10}}))
+      .toBe(kind === 'stacked_column' ? 13 : 12);
+  });
+
   it('updates the visible series, categories and amounts when chart data changes', () => {
     const fixture = TestBed.createComponent(SlideCanvas);
     const chart: ChartElement = {

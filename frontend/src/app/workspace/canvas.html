@@ -176,13 +176,13 @@
                   @for (mark of chart(el)[0]; track $index) {
                     <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * (el.series.length / 2 - .1)"
                       [style.width.%]="layout ? 100*(layout.bar_inset-4)/layout.plot_width : 22"
-                      [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(11)">{{ chartLabels(el)[$index] }}</span>
+                      [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(chartAxisSize(el))">{{ chartLabels(el)[$index] }}</span>
                   }
                 } @else {
                   <div class="chart-labels" [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values"
                     [style.top.%]="layout ? 100*(layout.plot_height+3)/layout.height : 89"
                     [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color"
-                    [style.font-size]="font(el.chart === 'stacked_column' || el.show_values ? 13 : 10)"
+                    [style.font-size]="font(chartAxisSize(el))"
                     [style.font-weight]="el.chart === 'stacked_column' ? 700 : null">
                     @for (label of chartLabels(el); track $index) { <span>{{ label }}</span> }
                   </div>

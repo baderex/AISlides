@@ -372,7 +372,7 @@ def review_content(slide):
     shapes = {el.id: frame for el, *frame in layers if el.type == "shape"}
     nodes = {key: i for i, key in enumerate(shapes, 1)}
     labels = [(el.text, x, y, w, h) for el, x, y, w, h in layers if el.type == "text"]
-    diagram = any(el.type == "line" or el.type == "shape" and el.polygon for el, *_ in layers)
+    diagram = any(el.type in {"line", "shape"} for el, *_ in layers)
 
     def endpoint_labels(point, anchor):
         if anchor and anchor.shape_id in shapes:
@@ -411,7 +411,7 @@ def review_content(slide):
     return {"visible": visible, "diagram": geometry, "speaker_notes": slide.notes}
 
 
-def review_slide_content(ai, slide, part, item, context, *, png=None):
+def review_slide_content(ai, slide, part, item, context, *, png=None, previous_reviewed=None):
     packet = html_slide_inputs(item, context, part) if hasattr(part, "direction") else slide_inputs(item, context, part)
     content = review_content(slide)
     sources = packet["sources"]
@@ -434,6 +434,9 @@ def review_slide_content(ai, slide, part, item, context, *, png=None):
         "Check quantities, units, directed edges, arrowheads, qualifications, and decision gates. "
         "Check assigned_requirements including required speaker notes and image credits. "
         "Speaker notes can satisfy notes requirements only. Edge points run from source to destination. "
+        "When previous_reviewed is supplied, preserve its meaningful nodes, connections, labels and graphics. "
+        "Allow decorative cleanup and repositioning that retain their meaning; flag removal of meaningful "
+        "anonymous shapes such as chart bars or parts of an illustration. "
         "Evaluate only requirements assigned to this slide. Accept faithful paraphrases. Flag a material "
         "contradiction even if the plan repeats it. Use only the visible content to establish what the audience "
         "can read. When an image is supplied also check whether the exhibit communicates the intended point. "
@@ -442,7 +445,8 @@ def review_slide_content(ai, slide, part, item, context, *, png=None):
         {"brief": packet["prompt"], "answers": packet["answers"],
          "assignment": part.model_dump(include={"title", "direction", "purpose", "key_message", "required_details"}),
          "sources": sources, "assigned_requirements": packet.get("assigned_requirements", []),
-         "checked_values": checked_values, **content, "cited_source_ids": slide.source_ids},
+         "checked_values": checked_values, **content, "cited_source_ids": slide.source_ids,
+         **({"previous_reviewed": previous_reviewed} if previous_reviewed is not None else {})},
         "content-review", base64.b64encode(png).decode("ascii") if png else None)
     if review.regenerate_content:
         return review.issues or ["Revise the visible content to fulfill the assigned brief requirements."]
@@ -885,8 +889,10 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 raise fit_error(quality.hard)
             if not best or candidate.markup != best["candidate"]["markup"]:
                 try:
+                    previous_reviewed = (best.get("reviewed_content") or review_content(measure(retained)[0])) if best else None
                     issues = review_slide_content(ai, slide, part, item, context,
-                                                  png=png if settings().llm_vision_enabled else None)
+                                                  png=png if settings().llm_vision_enabled else None,
+                                                  previous_reviewed=previous_reviewed)
                 except ProviderError as error:
                     if not best:
                         raise
@@ -914,7 +920,8 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 slide.warnings = best["warnings"]
             elif quality.soft and not best and previous.get("attempt", 0) < 2:
                 context["html_best"] = {"score":score, "candidate":candidate.model_dump(mode="json"),
-                                        "warnings":list(dict.fromkeys([*slide.warnings, *quality.soft]))[:30]}
+                                        "warnings":list(dict.fromkeys([*slide.warnings, *quality.soft]))[:30],
+                                        "reviewed_content":review_content(slide)}
                 raise MarkupError(" ".join(quality.soft))
             else:
                 slide.warnings = list(dict.fromkeys([*slide.warnings, *quality.soft]))[:30]

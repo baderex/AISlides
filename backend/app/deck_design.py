@@ -1,7 +1,7 @@
 """Shared deck direction, projected into the units used by each compositor."""
 from dataclasses import dataclass
 
-from app.domain import Contract, DesignRules
+from app.domain import Contract, DesignRules, MIN_LABEL_PT
 from app.palette import categorical_palette, semantic_palette
 from app.render_geometry import available_family, fallback_family
 
@@ -83,7 +83,7 @@ class DeckDesignSpec(Contract):
         roles = {"cover": (rules.heading_font, 44 if compact else 52, 36, True, 1.08),
                  "headline": (rules.heading_font, 30 if compact else 36, 26, True, 1.12),
                  "body": (theme.font, 18 if compact else 21, 16 if compact else 18, False, 1.2),
-                 "label": (theme.font, 14 if compact else 16, 12, False, 1.15),
+                 "label": (theme.font, 14 if compact else 16, MIN_LABEL_PT, False, 1.15),
                  "table": (theme.font, 13 if dense else 15, 11 if compact else 13, False, 1.18),
                  "footnote": (theme.font, 10 if compact else 11, 10, False, 1.15),
                  "code": (theme.font if theme.brand_kit and "font" in theme.brand_kit.protected else "IBM Plex Mono",

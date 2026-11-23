@@ -11,6 +11,7 @@ Identifier = Annotated[str, Field(min_length=1, max_length=70, pattern=r"^[a-zA-
 ShortText = Annotated[str, Field(min_length=1, max_length=220)]
 Aspect = Literal["16:9", "4:3", "1:1"]
 Layout = Literal["cover", "section", "summary", "comparison", "timeline", "process", "metrics", "chart", "showcase", "editorial", "research", "quote", "closing"]
+MIN_LABEL_PT = 12
 
 
 class Contract(BaseModel):
@@ -334,6 +335,10 @@ class Chart(ElementBase, WorkbookData):
     font: str = Field(default="Arial", max_length=60)
     highlight: int | None = Field(default=None, ge=0)
     context_color: Color | None = None
+
+    @property
+    def axis_size(self):
+        return max(MIN_LABEL_PT, 13 if self.chart == "stacked_column" or self.show_values else MIN_LABEL_PT)
 
     @property
     def needs_key(self):

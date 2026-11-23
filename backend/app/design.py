@@ -211,7 +211,7 @@ def style_slide_tables(slide, theme, *, preserve_palette=False, table_floor=None
 def style_chart(chart, theme, background):
     palette = semantic_palette(theme, background)
     identities = len(chart.categories) if chart.chart == "pie" else len(chart.series)
-    chart.palette = categorical_palette(theme, background, identities)
+    chart.palette = categorical_palette(theme, background, identities, distinct=chart.chart != "pie" and identities > 1)
     chart.color = chart.palette[0]
     chart.label_color = palette["muted"]
     if chart.highlight is not None:

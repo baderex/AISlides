@@ -30,7 +30,7 @@ def key_data(chart, numbered):
 
 def layout_signature(chart, width, height):
     fields = {"chart", "categories", "series", "font", "element_key", "show_values", "value_prefix", "value_suffix"}
-    data = f"{width:.4f},{height:.4f}:" + chart.model_dump_json(include=fields)
+    data = f"{width:.4f},{height:.4f},{chart.axis_size}:" + chart.model_dump_json(include=fields)
     return sha256(data.encode()).hexdigest()
 
 
@@ -47,7 +47,7 @@ def measure_chart(chart, width, height):
     pie = chart.chart == "pie"
     bar = chart.chart == "bar"
     stacked = chart.chart == "stacked_column"
-    axis_size = 11 if bar else 13 if stacked or chart.show_values else 10
+    axis_size = chart.axis_size
     axis = font(2 * axis_size, stacked, chart.font)
     categories = chart.category_labels()
     numbered = pie

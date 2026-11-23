@@ -362,6 +362,7 @@ def fit_slide_text(document: Document, slide: Slide) -> list[str]:
 
 def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[str]:
     from app.chart_key import measure_chart
+    from app.palette import series_distinguishable
 
     warnings = fit_slide_text(document, slide)
     ptw, pth = physical(document)
@@ -387,8 +388,13 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
             warnings.extend(fit_issues)
             if contrast(el.label_color, backing(el, x, y, w, h)) < 4.5:
                 warnings.append("Low chart label contrast.")
-            if el.chart != "pie" and len(el.series) > len({c.upper() for c in el.colors()[:len(el.series)]}):
-                warnings.append("Chart labels cannot distinguish repeated series colors. Use distinct colors or split the chart.")
+            if el.chart != "pie" and len(el.series) > 1:
+                colors = [el.context_color if el.chart == "line" and el.context_color else el.colors()[i % len(el.colors())]
+                          for i in range(len(el.series))]
+                if len({c.upper() for c in colors}) < len(colors):
+                    warnings.append("Chart labels cannot distinguish repeated series colors. Use distinct colors or split the chart.")
+                elif any(not series_distinguishable(a, b) for i, a in enumerate(colors) for b in colors[i+1:]):
+                    warnings.append("Chart labels cannot distinguish similar series colors. Use distinct colors or split the chart.")
         if isinstance(el, Text):
             overlap = any(min(x+w, px+pw)-max(x,px) > .008 and min(y+h, py+ph)-max(y,py) > .008
                           for px, py, pw, ph in boxes)

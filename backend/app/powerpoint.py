@@ -380,7 +380,7 @@ def style_native_chart(chart, element, background="#FFFFFF"):
     chart.element.chart.get_or_add_autoTitleDeleted().val = True
     chart.font.name = element.font
     chart.font.color.rgb = color(element.label_color)
-    chart.font.size = Pt(10)
+    chart.font.size = Pt(element.axis_size)
     # A transparent chart area keeps axis labels on the same surface as the editor.
     properties = OxmlElement("c:spPr")
     properties.append(OxmlElement("a:noFill"))
@@ -437,7 +437,7 @@ def style_native_chart(chart, element, background="#FFFFFF"):
         for axis in (chart.category_axis, chart.value_axis):
             axis.tick_labels.font.name = element.font
             axis.tick_labels.font.color.rgb = color(element.label_color)
-            axis.tick_labels.font.size = Pt(13 if element.show_values else 10)
+            axis.tick_labels.font.size = Pt(element.axis_size)
     if element.show_values and element.chart in {"line", "bar", "column"} and len(element.series) == 1:
         if element.chart == "line" and element.highlight is not None:
             low, high, step = element.focused_line_axis()

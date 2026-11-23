@@ -266,6 +266,11 @@ export class SlideCanvas {
     return this.chartTotals(el).map((total, i) => `${el.categories[i]}  ${el.value_prefix ?? ''}${number.format(total)}${el.value_suffix ?? ''}`);
   }
 
+  chartAxisSize(el: ChartElement) {
+    const preferred = el.chart === 'stacked_column' || el.show_values ? 13 : 12;
+    return Math.max(preferred, el.composition?.axis_size ?? 0);
+  }
+
   private chartTotals(el: ChartElement) {
     return el.categories.map((_, i) => el.series.reduce((sum, series) => sum + series.values[i], 0));
   }
