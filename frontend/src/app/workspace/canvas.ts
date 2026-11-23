@@ -217,17 +217,19 @@ export class SlideCanvas {
     }
     const span = high - low || 1;
     const band = 100 / el.categories.length;
-    const plotHeight = el.show_values ? (el.chart === 'bar' ? 96 : 87) : 85;
+    const layout = el.composition;
+    const plotHeight = layout ? 100 * layout.plot_height / layout.height : el.chart === 'bar' ? 96 : 87;
     const baseline = plotHeight * high / span;
     return el.series.map(series => series.values.map((value, index) => {
       const current = plotHeight * (high - value) / span;
       const lineY = el.chart === 'line' && el.show_values && el.highlight == null ? plotHeight * .13 + current * .82 : current;
       const thickness = .76 * band / el.series.length;
       const horizontal = plotHeight / el.categories.length * .72 / el.series.length;
-      const inset = el.chart === 'bar' ? 24 : 0;
+      const inset = el.chart === 'bar' ? (layout ? 100 * layout.bar_inset / layout.plot_width : 24) : 0;
       return { x: band*(index+.12), y: Math.min(current, baseline), w: thickness*.85, h: Math.abs(current-baseline),
         cx: band*(index+.5), cy: lineY, horizontal, bx: inset + (100 - inset) * (Math.min(0, value)-low)/span,
-        by: index * plotHeight / el.categories.length, bw: Math.abs(value)*(100 - inset)/span, negative: value < 0 };
+        by: (index + .14) * plotHeight / el.categories.length + .1 * horizontal,
+        bw: Math.abs(value)*(100 - inset)/span, negative: value < 0 };
     }));
   }
 
@@ -258,6 +260,7 @@ export class SlideCanvas {
   }
 
   chartLabels(el: ChartElement) {
+    if (el.composition) return el.composition.axis_labels;
     if (el.chart !== 'stacked_column') return el.categories;
     const number = new Intl.NumberFormat('en-US', {maximumFractionDigits: 2});
     return this.chartTotals(el).map((total, i) => `${el.categories[i]}  ${el.value_prefix ?? ''}${number.format(total)}${el.value_suffix ?? ''}`);
@@ -268,7 +271,8 @@ export class SlideCanvas {
   }
 
   chartColor(el: ChartElement, index: number) {
-    const palette = el.palette?.length ? el.palette : [el.color, ...this.shades.slice(1)];
+    const palette = el.palette?.length ? el.palette : [el.color, ...this.shades.slice(1),
+      ...(el.chart === 'pie' ? ['#A33766', '#927500', '#345B29', '#542657', '#206688', '#A84728'] : [])];
     return palette[index % palette.length];
   }
 
@@ -277,14 +281,21 @@ export class SlideCanvas {
       ? el.context_color : this.chartColor(el, series);
   }
 
-  pie(el: ChartElement) {
+  pieSlices(el: ChartElement) {
     const total = el.series[0].values.reduce((sum, value) => sum + value, 0) || 1;
-    let start = 0;
-    return 'conic-gradient(' + el.series[0].values.map((value, index) => {
-      const end = start + value * 100 / total;
-      const entry = this.chartColor(el, index) + ' ' + start + '% ' + end + '%';
-      start = end;
-      return entry;
-    }).join(',') + (el.series[0].values.length === 1 ? ', transparent 100%' : '') + ')';
+    let angle = -Math.PI / 2;
+    return el.series[0].values.map(value => {
+      const start = angle;
+      angle += value / total * 2 * Math.PI;
+      const mid = (start + angle) / 2;
+      const point = (a: number) => [50 + 45 * Math.cos(a), 50 + 45 * Math.sin(a)].join(' ');
+      // Two arcs also describe a full circle when there is just one category.
+      const path = 'M50 50 L' + point(start) + ' A45 45 0 0 1 ' + point(mid) + ' A45 45 0 0 1 ' + point(angle) + ' Z';
+      return {path, value, x: 50 + 31.5 * Math.cos(mid), y: 50 + 31.5 * Math.sin(mid)};
+    });
+  }
+
+  keyTracks(values: number[], unit: number) {
+    return values.map(value => value / unit * 100 + '%').join(' ');
   }
 }

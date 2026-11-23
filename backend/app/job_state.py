@@ -25,6 +25,7 @@ def start_status(job_id, token, status, event_type, message, **payload):
 
 
 def commit(job_id, token, checkpoint, state, status, context, events, document=None, version_label=None, error=None, png=None):
+    preview_index = context.pop("_preview_index", -1)
     with Session.begin() as db:
         begin_write(db)
         item = lock_presentation(db, job_id)
@@ -40,7 +41,7 @@ def commit(job_id, token, checkpoint, state, status, context, events, document=N
         item.status, item.updated = status, now()
         if document:
             if png:
-                put_preview(db, item.id, document, document.slides[-1], png)
+                put_preview(db, item.id, document, document.slides[preview_index], png)
             persist(db, item, document, version_label)
         elif version_label:
             persist(db, item, read_document(item.document), version_label)

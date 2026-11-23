@@ -56,6 +56,49 @@ def test_col_geometry_exports_as_native_shapes_and_a_directed_connector():
         parse_markup("<page><col><script/></col></page>")
 
 
+@pytest.mark.parametrize("vision", [False, True])
+def test_layout_repair_cannot_reverse_a_reviewed_freeform_arrow(monkeypatch, vision):
+    from app.config import settings
+    from app.html_layout.review import Quality, markup_content
+
+    page = ('<page><drawing grow="1"><label x="2" y="40" w="23" h="18">Browser</label>'
+            '<label x="75" y="40" w="23" h="18">Server</label>'
+            '<arrow x1="25" y1="50" x2="75" y2="50"/></drawing></page>')
+    reversed_page = page.replace('x1="25"', 'x1="75"').replace('x2="75"', 'x2="25"')
+    assert markup_content(page) != markup_content(reversed_page)
+    assert markup_content(page) != markup_content(page.replace('<arrow ', '<arrow head="false" '))
+    structured = Intelligence.structured
+    reviews, repairs = [], []
+
+    def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "HtmlPlan":
+            return schema(title="Request", slides=[dict(title="Request", direction="Show browser to server")])
+        if schema.__name__ == "PageMarkup":
+            return schema(markup=page, notes="Diagram credit")
+        if schema.__name__ == "LayoutMarkup":
+            repairs.append(data["previous"])
+            return schema(markup=reversed_page)
+        if stage == "content-review":
+            edge = next(obj for obj in data["diagram"] if "edge" in obj)
+            assert edge["arrowheads"] == "end" and edge["edge"][0][0] < edge["edge"][-1][0]
+            assert edge["labels_near_start"] == ["Browser"] and edge["labels_near_end"] == ["Server"]
+            assert data["speaker_notes"] == "Diagram credit" and bool(image) == vision
+            reviews.append(edge)
+            return schema()
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(settings(), "llm_vision_enabled", vision)
+    monkeypatch.setattr(Intelligence, "structured", model)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    monkeypatch.setattr("app.workflow.evaluate_quality", lambda *_: Quality([], ["Improve spacing"], 1))
+    client = TestClient(app)
+    path = create(client, "Create one editorial slide for staff about a browser request.", research=False)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED" and repairs == [page] and len(reviews) == 1
+    assert next(el for el in result["document"]["slides"][0]["elements"] if el["type"] == "line")["direction"] == "right"
+
+
 def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     item = SimpleNamespace(request={"prompt": "Compare error correction methods"})
     sources = [{"id": key, "excerpt": key * 200} for key in ("brief", "history", "hardware")]
@@ -69,6 +112,60 @@ def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
     for ids in (None, ["missing"]):
         assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": ids}))["sources"] == sources
     assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": []}))["sources"] == sources[:1]
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_finished_deck_repairs_missing_notes_and_retains_late_brief_evidence(monkeypatch, native):
+    from app.evidence import EvidenceObservation, verified_observations
+    from app.domain import Source
+    from app.composition_models import Outline
+    from app.html_layout.markup import HtmlPlan
+    from pydantic import ValidationError
+
+    required = "Credit the city archive in slide one's speaker notes"
+    quote = "Q3 revenue was $7m."
+    prompt = "Make two editorial slides for staff. " + required + ". " + "Background material. " * 175 + quote
+    structured = Intelligence.structured
+    audits = []
+    def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "Intent":
+            return schema(subject="Revenue", audience="Staff", visual_direction="Editorial", slide_count=2,
+                          supplied_figures=True, requirements=[required])
+        if schema in (Outline, HtmlPlan):
+            slides = [{"title": s, **({"layout": "summary"} if native else {"direction": s})}
+                      for s in ("Report", "Conclusion")]
+            checks = {"brief_requirements": [required], "slide_count": 2}
+            assert data["brief_requirements"] == [required]
+            with pytest.raises(ValidationError, match="Missing IDs"):
+                schema.model_validate({"title": "Report", "slides": slides}, context=checks)
+            slides[0]["requirement_ids"] = [1]
+            return schema.model_validate({"title": "Report", "slides": slides}, context=checks)
+        if stage in ("html-slide", "slide"):
+            title = (data["item"] if native else data["slide"])["title"]
+            assigned = data["assigned_requirements"]
+            assert assigned == ([required] if title == "Report" else [])
+            note = "City archive" if data.get("required_correction") else ""
+            return schema(title=title, notes=note) if native else schema(markup=f"<page><text>{title}</text></page>", notes=note)
+        if schema.__name__ == "CoverageReview":
+            page, = data["slides"]
+            audits.append(page["speaker_notes"])
+            return schema(issues=[] if page["speaker_notes"] == "City archive" else
+                          [dict(slide_number=1, correction="Credit the city archive in speaker notes.")])
+        return structured(self, schema, task, data, stage, image)
+
+    monkeypatch.setattr(Intelligence, "structured", model)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    client = TestClient(app)
+    path = create(client, prompt, native=native, research=False)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED" and audits == ["", "City archive"]
+    first, second = result["document"]["slides"]
+    assert first["notes"] == "City archive" and second["title"] == "Conclusion"
+    source, = [Source.model_validate(s) for s in result["document"]["sources"] if s["title"] == "User-provided brief"]
+    assert source.excerpt == prompt
+    row = EvidenceObservation(source_id=source.id, metric="revenue", period="Q3", amount=7, unit="m", currency="$", quote=quote)
+    assert list(verified_observations([row], [source])) == [row]
 
 
 def test_retry_legacy_architecture_checkpoint_keeps_diagram_and_finished_cover(monkeypatch):

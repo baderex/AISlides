@@ -7,7 +7,7 @@ from PIL import Image as PILImage
 from pydantic import Field
 
 from app.domain import Color, Contract, DesignConstraints, DesignRules, Table, Theme
-from app.palette import blend, readable, semantic_palette
+from app.palette import blend, categorical_palette, readable, semantic_palette
 from app.rendering import contrast, flattened
 from app.storage import Storage
 
@@ -211,7 +211,7 @@ def style_slide_tables(slide, theme, *, preserve_palette=False, table_floor=None
 def style_chart(chart, theme, background):
     palette = semantic_palette(theme, background)
     identities = len(chart.categories) if chart.chart == "pie" else len(chart.series)
-    chart.palette = [c for key, c in palette.items() if key.startswith("series")][:identities]
+    chart.palette = categorical_palette(theme, background, identities)
     chart.color = chart.palette[0]
     chart.label_color = palette["muted"]
     if chart.highlight is not None:

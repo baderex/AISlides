@@ -37,7 +37,8 @@ def test_native_objects_and_embedded_data():
     export = Presentation(io.BytesIO(data))
     assert export.slide_width / export.slide_height == 4/3
     shapes = list(export.slides[0].shapes)
-    assert [shape.shape_type for shape in shapes] == [MSO_SHAPE_TYPE.TEXT_BOX, MSO_SHAPE_TYPE.AUTO_SHAPE,
+    primary = [shape for shape in shapes if shape.name in {el.id for el in slide.elements}]
+    assert [shape.shape_type for shape in primary] == [MSO_SHAPE_TYPE.TEXT_BOX, MSO_SHAPE_TYPE.AUTO_SHAPE,
          MSO_SHAPE_TYPE.LINE, MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.TABLE, MSO_SHAPE_TYPE.CHART, MSO_SHAPE_TYPE.GROUP]
     assert shapes[0].text == "Selectable native text"
     assert shapes[4].table.cell(1, 1).text == "12"

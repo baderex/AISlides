@@ -22,9 +22,29 @@ def terms(text):
     }
 
 
+def web_passage(text, query, size):
+    """Keep a bounded passage, ending before any incomplete table row or number."""
+    if len(text) <= size:
+        return text
+    if re.search(r"(?m)^\s*\|", text):
+        prefix = text[:size + 1]
+        if "\n" in prefix:
+            return prefix.rsplit("\n", 1)[0]
+    words = terms(query)
+    chunks = sections(text, size)
+    start, passage = max(chunks, key=lambda entry: len(words & terms(entry[1])))
+    end = start + len(passage)
+    # sections() can split a long token. Keep only complete words and values.
+    if start and not text[start - 1].isspace() and not text[start].isspace():
+        passage = re.sub(r"^\S+", "", passage)
+    if end < len(text) and not text[end].isspace() and not text[end - 1].isspace():
+        passage = re.sub(r"\S+$", "", passage)
+    return passage
+
+
 def source_packet(source, query, *, inventory=False):
     text = source.get("excerpt", "")
-    if not source.get("asset_id") or len(text) <= 3000:
+    if len(text) <= 3000 or (source.get("url") and not source.get("asset_id")):
         return source
     chunks = list(sections(text))
     words = terms(query)

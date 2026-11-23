@@ -231,6 +231,21 @@ def test_structured_source_facts_reconcile_annual_values_and_flag_conflicts():
     assert content.source_ids == ["ledger", "report"]
 
 
+def test_research_recovers_snapshot_labels_from_the_exact_table_cell():
+    quote = "| 1 | BTC | $87,508.83 | 19,969,815 BTC |"
+    header = "Historical snapshot - 31 December 2025"
+    source = Source(id="snapshot", title="Snapshot", excerpt=(
+        f"# {header}\n| Rank | Symbol | Price | Supply |\n| --- | --- | --- | --- |\n{quote}"))
+    amount = EvidenceObservation(source_id=source.id, metric="Supply", period="2025", unit="BTC",
+                                 scope="Circulating coins on the snapshot date", amount=19969815, quote=quote)
+    assert not list(verified_observations([amount], [source]))
+    checked, = verified_observations([amount], [source], extract_table_labels=True)
+    assert (checked.period, checked.scope, checked.quote) == ("BTC", header, quote)
+    assert list(verified_observations([checked], [source])) == [checked]
+    for changes in ({"period": "2024"}, {"metric": "Price"}, {"currency": "$"}, {"unit": ""}):
+        assert not list(verified_observations([amount.model_copy(update=changes)], [source], extract_table_labels=True))
+
+
 def test_brand_kit_protects_selected_roles_during_restyle():
     deck = themed_document()
     deck.theme.brand_kit = BrandKit(protected=["accent", "heading_font"])

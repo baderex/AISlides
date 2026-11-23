@@ -43,7 +43,13 @@ def export_checks(output, raw_document):
     checks = []
     for intent, exported, rendered in zip(document.slides, native.slides, pdf):
         elements = [element for element, *_ in flattened(intent.elements)]
-        shapes = list(native_shapes(exported.shapes))
+        all_shapes = list(native_shapes(exported.shapes))
+        key_names = {el.id + ":key" for el in elements if isinstance(el, Chart) and el.needs_key}
+        keys = {s.name: s.table for s in all_shapes if s.has_table and s.name in key_names}
+        if keys.keys() != key_names:
+            raise RuntimeError(f"PowerPoint chart data key missing on slide {rendered['number']}")
+        axis_prefixes = tuple(el.id + ":axis:" for el in elements if isinstance(el, Chart) and el.needs_key)
+        shapes = [s for s in all_shapes if s.name not in keys and not s.name.startswith(axis_prefixes)]
         charts = [shape.chart for shape in shapes if shape.has_chart]
         tables = [shape.table for shape in shapes if shape.has_table]
         texts = [shape.text for shape in shapes if shape.has_text_frame and shape.text]
@@ -61,6 +67,11 @@ def export_checks(output, raw_document):
         for element, chart in zip((el for el in elements if isinstance(el, Chart)), charts):
             if [list(series.values) for series in chart.series] != [series.values for series in element.series]:
                 raise RuntimeError(f"PowerPoint chart values differ on slide {rendered['number']}")
+            if element.needs_key:
+                key = keys[element.id + ":key"]
+                for j, series in enumerate(element.series, 1):
+                    if any(key.cell(i, j).text != element.format_value(v) for i, v in enumerate(series.values, 1)):
+                        raise RuntimeError(f"PowerPoint chart key values differ on slide {rendered['number']}")
         checks.append({"slide": rendered["number"], "title": intent.title, "layout": intent.layout,
                        "native_objects": counts, "generation_warnings": intent.warnings,
                        "pdf_findings": rendered["issues"]})

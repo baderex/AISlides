@@ -2,7 +2,6 @@
 from collections import Counter
 from dataclasses import dataclass
 
-from app.chart_key import chart_key
 from app.domain import Chart, Image, Line, Shape, Table, Text
 from app.html_layout.markup import parse_markup
 from app.render_geometry import segment_crosses
@@ -31,9 +30,6 @@ def readability_warnings(document, slide):
     assets = {el.asset_id for el, *_ in layers if isinstance(el, Image)}
     warnings = validate_slide(document, slide.model_copy(deep=True), assets)
     width, height = (v * TEXT_SCALE for v in physical(document))
-    for el, _, _, w, h in layers:
-        if isinstance(el, Chart):
-            warnings.extend(chart_key(el, w*width/TEXT_SCALE, h*height/TEXT_SCALE)[2])
     prior = []
     for el, *frame in layers:
         if not isinstance(el, Text) or not el.text.strip() or el.rotation:
@@ -105,6 +101,14 @@ def markup_content(markup):
     while pending:
         node = pending.pop()
         pending.extend(node["children"])
+        if node["tag"] == "drawing":
+            # Bind each label and shape to its local geometry and each arrowhead to
+            # its ordered endpoints. A bag of strings cannot distinguish A → B from B → A.
+            geometry = {"id", "x", "y", "w", "h", "x1", "y1", "x2", "y2",
+                        "from", "to", "head", "points", "form"}
+            content[("drawing", tuple((child["tag"], child["t"], tuple(sorted(
+                (k, v) for k, v in child["a"].items() if k in geometry)))
+                for child in node["children"]))] += 1
         if node["t"]:
             content[("copy", node["t"] if node["a"].get("role") == "code" else " ".join(node["t"].split()))] += 1
         if node["tag"] == "matrix":

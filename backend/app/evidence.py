@@ -5,8 +5,9 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Annotated
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, WithJsonSchema
 
 from app.domain import Contract, Identifier, display_value
 
@@ -56,32 +57,145 @@ class EvidenceObservation(Contract):
     source_id: Identifier
     metric: str = Field(min_length=1, max_length=80)
     period: str = Field(min_length=1, max_length=40, description="The source's period or comparison category label.")
-    scope: str = Field(default="", max_length=80, description="Series context such as fiscal year and geography.")
-    amount: Decimal = Field(ge=Decimal("-1e15"), le=Decimal("1e15"),
-                            description="Plain numeric value, e.g. 399. Put SAR in currency and bn in unit. Omit unavailable values.")
+    scope: str = Field(default="", max_length=80, description="Verbatim series context or date from the source. Leave empty when unnecessary.")
+    amount: Annotated[Decimal, WithJsonSchema({"type": "number", "minimum": -1e15, "maximum": 1e15},
+                                              mode="validation")] = Field(
+        ge=Decimal("-1e15"), le=Decimal("1e15"),
+        description="Plain numeric value, e.g. 399. Put SAR in currency and bn in unit. Omit unavailable values.")
     unit: str = Field(default="", max_length=8)
     currency: str = Field(default="", max_length=8)
-    quote: str = Field(min_length=1, max_length=420, description="Verbatim excerpt containing the metric, period and value.")
+    quote: str = Field(min_length=1, max_length=420, description="Verbatim supporting sentence or complete Markdown data row.")
 
 
 EVIDENCE_GUIDANCE = (
     " Extract numerical observations into observations, including source ID, metric, exact period, scope, amount, "
-    "unit, currency, and an exact supporting quote containing the metric, period, and numerical value. Preserve the "
-    "quoted scale. Use currency symbols ($, €, £, ¥) and suffixes such as m, bn, or % where the source supports them. "
-    "Record conflicting observations independently with the relevant source IDs. Omit rows without an exact quotation."
+    "unit, currency, and the shortest exact supporting quote. For a Markdown table quote one complete data row, "
+    "using its exact column header as metric and its year or category cell as period. For a ranked table use the "
+    "asset symbol or entity cell as period and the verbatim snapshot date as scope. Never paraphrase scope. Use a JSON number for amount: "
+    "for $33.83bn use amount 33.83, currency '$', unit 'bn'. For −6.3% use amount -6.3 and unit '%'. "
+    "Prioritize up to 16 observations relevant to the brief. Summarize conflicts and gaps in uncertainties. "
+    "Omit forecasts, ranges and unavailable values. Detailed slide authors can consult the original sources."
 )
 
 CURRENCY_HINTS = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
-UNIT_HINTS = {"m": r"millions?", "bn": r"billions?", "k": r"thousands?", "%": r"percent(?:age)?"}
+UNIT_HINTS = {"m": r"millions?", "bn": r"billions?", "tn": r"trillions?", "k": r"thousands?", "%": r"percent(?:age)?"}
+
+DISPLAY_AMOUNT = re.compile(
+    r"(?P<sign>[+−-]?)\s*(?P<currency>[$€£¥]|USD|EUR|GBP|JPY)?\s*(?P<inner_sign>[+−-]?)"
+    r"(?P<number>(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?)"
+    r"\s*(?P<unit>%|bn|tn|[kmbt]|thousands?|millions?|billions?|trillions?|percent)?", re.I)
 
 
-def verified_observations(observations, sources):
+def canonical_unit(unit):
+    unit = unit.casefold()
+    for short, pattern in UNIT_HINTS.items():
+        if re.fullmatch(pattern, unit):
+            return short
+    return {"b": "bn", "t": "tn"}.get(unit, unit)
+
+
+def currency_code(currency):
+    return CURRENCY_HINTS.get(currency, currency.upper())
+
+
+def display_amount(text, unit_hint=""):
+    text = text.strip()
+    match = DISPLAY_AMOUNT.fullmatch(text)
+    unit = ""
+    # A source can denominate a quantity in an asset, such as "19,969,815 BTC".
+    if not match and re.fullmatch(r"[A-Za-z]{1,8}", unit_hint):
+        number, _, suffix = text.rpartition(" ")
+        if suffix.casefold() == unit_hint.casefold():
+            match = DISPLAY_AMOUNT.fullmatch(number.rstrip())
+            if match and match["unit"]:
+                return None
+            unit = unit_hint
+    if not match or (match["sign"] and match["inner_sign"]):
+        return None
+    sign = (match["sign"] or match["inner_sign"]).replace("−", "-")
+    currency = (match["currency"] or "").upper()
+    return Decimal(sign + match["number"].replace(",", "")), currency, canonical_unit(match["unit"] or unit)
+
+
+def recover_observation_amount(row):
+    raw = row.get("amount")
+    unit = row.get("unit", "")
+    currency = row.get("currency", "")
+    parsed = display_amount(raw, unit) if isinstance(raw, str) else None
+    if not parsed:
+        return None
+    amount, prefix, suffix = parsed
+    if (abs(amount) > 10**15 or (prefix and currency and currency_code(prefix) != currency_code(currency))
+            or (suffix and unit and suffix != canonical_unit(unit))):
+        return None
+    return {**row, "amount": amount, "currency": currency or prefix, "unit": unit or suffix}
+
+
+def table_observation(row, excerpt, *, extract_labels):
+    # Require the verbatim data row under its own Markdown header and separator.
+    quote = row.quote.strip()
+    if not quote.startswith("|") or "\n" in quote:
+        return None
+    header = []
+    previous = []
+    heading = ""
+    for line in excerpt.splitlines():
+        line = line.strip()
+        if not (line.startswith("|") and line.endswith("|")):
+            header = previous = []
+            if line.startswith("#"):
+                heading = line.lstrip("#").strip()
+            continue
+        cells = [cell.strip() for cell in line[1:-1].split("|")]
+        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            header = previous if len(previous) == len(cells) else []
+        elif line == quote and len(header) == len(cells):
+            labels = [cell.casefold() for cell in header]
+            metric = row.metric.casefold()
+            if labels.count(metric) != 1:
+                return None
+            column = labels.index(metric)
+            parsed = display_amount(cells[column], row.unit)
+            if not parsed:
+                return None
+            amount, currency, unit = parsed
+            if amount != row.amount or currency_code(currency) != currency_code(row.currency) or unit != canonical_unit(row.unit):
+                return None
+            categories = [cell for i, cell in enumerate(cells) if i != column and
+                          (i == 0 or labels[i] in {"name", "symbol", "category", "period", "year"})]
+            period = row.period
+            scope = row.scope
+            if period.casefold() not in (cell.casefold() for cell in categories):
+                # Researchers sometimes put the snapshot date in period. Read the entity from the same row.
+                if not extract_labels or not contains(heading, period):
+                    return None
+                period = next((cells[labels.index(k)] for k in ("symbol", "name", "category")
+                               if labels.count(k) == 1 and labels.index(k) != column), "")
+                scope = heading
+            if scope and not contains(f"{heading} {line}", scope):
+                if not extract_labels or not heading:
+                    return None
+                scope = heading
+            if not 0 < len(period) <= 40 or len(scope) > 80:
+                return None
+            return row.model_copy(update={"scope": scope, "period": period})
+        previous = cells
+    return None
+
+
+def verified_observations(observations, sources, *, extract_table_labels=False, prose_check=None):
     by_id = {source.id: source.excerpt for source in sources}
     for observation in observations:
+        excerpt = by_id.get(observation.source_id, "")
         quote = " ".join(observation.quote.split())
-        source_text = " ".join(by_id.get(observation.source_id, "").split())
-        if (not quote or quote not in source_text or not contains(quote, observation.metric) or
-                (observation.scope and not contains(source_text, observation.scope))):
+        source_text = " ".join(excerpt.split())
+        if not quote or quote not in source_text:
+            continue
+        if observation.quote.strip().startswith("|"):
+            if matched := table_observation(observation, excerpt, extract_labels=extract_table_labels):
+                yield matched
+            continue
+        if not contains(quote, observation.metric) or (observation.scope and not contains(source_text, observation.scope)):
             continue
         period = rf"(?<!\w){re.escape(observation.period)}(?!\w)"
         if not re.search(period, quote, re.I):
@@ -105,7 +219,8 @@ def verified_observations(observations, sources):
             continue
         if (paired or candidates) != {observation.amount}:
             continue
-        yield observation
+        if prose_check is None or prose_check(observation):
+            yield observation
 
 
 def verified_metrics(observations, sources):

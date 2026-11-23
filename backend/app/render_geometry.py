@@ -361,7 +361,10 @@ def fit_slide_text(document: Document, slide: Slide) -> list[str]:
 
 
 def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[str]:
+    from app.chart_key import measure_chart
+
     warnings = fit_slide_text(document, slide)
+    ptw, pth = physical(document)
     boxes = []
     elements = list(flattened(slide.elements))
     def backing(element, x, y, w, h):
@@ -379,11 +382,13 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
                     warning = "Low table header contrast." if row == 0 and el.header_fill else "Low table cell contrast."
                     if warning not in warnings:
                         warnings.append(warning)
-        if isinstance(el, Chart) and el.palette:
+        if isinstance(el, Chart):
+            _, fit_issues = measure_chart(el, w * ptw, h * pth)
+            warnings.extend(fit_issues)
             if contrast(el.label_color, backing(el, x, y, w, h)) < 4.5:
                 warnings.append("Low chart label contrast.")
-            if len(el.series) > len(el.palette):
-                warnings.append("The chart palette repeats across series. Use direct labels to distinguish them.")
+            if el.chart != "pie" and len(el.series) > len({c.upper() for c in el.colors()[:len(el.series)]}):
+                warnings.append("Chart labels cannot distinguish repeated series colors. Use distinct colors or split the chart.")
         if isinstance(el, Text):
             overlap = any(min(x+w, px+pw)-max(x,px) > .008 and min(y+h, py+ph)-max(y,py) > .008
                           for px, py, pw, ph in boxes)
@@ -447,7 +452,7 @@ def contrast(first, second):
     return (light + .05) / (dark + .05)
 
 
-def chart_marks(el: Chart, w: float, h: float):
+def chart_marks(el: Chart, w: float, h: float, *, bar_inset=None):
     values = [v for series in el.series for v in series.values]
     low, high = el.value_bounds()
     span = high - low or 1
@@ -478,10 +483,10 @@ def chart_marks(el: Chart, w: float, h: float):
             pos = h * (high - value) / span
             if el.chart == "bar":
                 thickness = h / len(el.categories) * .72 / len(el.series)
-                inset = w * .24
+                inset = w * .24 if bar_inset is None else bar_inset
                 zero = inset + (w - inset) * -low / span
                 end = inset + (w - inset) * (value - low) / span
-                y = i * h / len(el.categories) + thickness * si
+                y = (i + .14) * h / len(el.categories) + thickness * (si + .1)
                 yield ("rect", el.mark_color(i, si), (min(zero, end), y, abs(end - zero), thickness * .8))
             elif el.chart == "column":
                 thickness = band * .76 / len(el.series)

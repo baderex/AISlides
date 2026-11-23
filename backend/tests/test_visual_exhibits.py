@@ -323,6 +323,24 @@ def test_research_quote_must_match_the_figures_currency_scale_and_meaning():
         assert build_slide(part, content, deck, 0, set()).spec.value_bindings[1]["status"] == "unverified"
 
 
+def test_table_evidence_binds_only_the_quoted_rows_exact_column_category_and_unit():
+    quote = "| 1 | Bitcoin | BTC | $1,747.54bn | $87,508.83 |"
+    source = Source(id="snapshot", title="December snapshot", excerpt=(
+        "| Rank | Name | Symbol | Market cap | Price |\n| --- | --- | --- | --- | --- |\n" + quote))
+    deck = Document(title="Market cap", sources=[source])
+    part = OutlineItem(title=deck.title, layout="chart")
+    row = {"source_id": source.id, "metric": "Market cap", "period": "BTC", "amount": "1747.54",
+           "currency": "$", "unit": "bn", "quote": quote}
+    for changes, expected in [({}, "verified"), ({"metric": "Price"}, "unverified"),
+                              ({"period": "ETH"}, "unverified"), ({"amount": 87508.83}, "unverified"),
+                              ({"unit": ""}, "unverified"), ({"currency": "EUR"}, "unverified")]:
+        fact = {**row, **changes}
+        content = SlideContent(title=part.title, source_ids=[source.id], chart={
+            "label": fact["metric"], "categories": [fact["period"]], "values": [fact["amount"]],
+            "value_prefix": fact["currency"], "value_suffix": fact["unit"]}, exhibit_observations=[fact])
+        assert build_slide(part, content, deck, 0, set()).spec.value_bindings[0]["status"] == expected
+
+
 def test_free_form_numeric_callout_does_not_inherit_chart_verification():
     part, content, deck = sourced_waterfall()
     part.annotations = ["Pricing headwind will cost $12m next year"]
