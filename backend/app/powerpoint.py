@@ -15,6 +15,7 @@ from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
 from app.branding import SLOT_TYPES, layout_for_slide, native_layouts
+from app.chart_key import axis_lines, chart_layout, key_data
 from app.bundled_fonts import faces, powerpoint_face
 from app.domain import BrandTemplate, Chart, Document, Group, Image, Line, Shape, Table, Text
 from app.render_geometry import image_placement
@@ -70,7 +71,7 @@ def set_table_rules(cell, bottom_rule):
         if (existing := properties.find(qn(name))) is not None:
             properties.remove(existing)
         line = OxmlElement(name)
-        if side == "lnB":
+        if side == "lnB" and bottom_rule:
             shade, weight = bottom_rule
             line.set("w", str(Pt(weight)))
             solid = OxmlElement("a:solidFill")
@@ -89,6 +90,69 @@ def chart_number_format(element, decimals):
         return f'"{escaped}"' if escaped else ""
 
     return f"{literal(element.value_prefix)}#,##0{decimals}{literal(element.value_suffix)}"
+
+
+def add_chart_key(shapes, element, layout, x, y):
+    table_shape = shapes.add_table(len(layout.rows), len(layout.columns), x + Pt(layout.key_left),
+                                   y + Pt(layout.key_top), Pt(sum(layout.columns)), Pt(sum(layout.rows)))
+    table_shape.name = element.id + ":key"
+    table = table_shape.table
+    table.first_row = table.banding_rows = False
+    for col, width in zip(table.columns, layout.columns):
+        col.width = Pt(width)
+    for i, (row, values, height) in enumerate(zip(table.rows, key_data(element, layout.numbered), layout.rows)):
+        row.height = Pt(height)
+        for j, (value, swatch) in enumerate(values):
+            cell = table.cell(i, j)
+            cell.margin_left = cell.margin_top = cell.margin_bottom = 0
+            cell.margin_right = Pt(3)
+            cell.fill.background()
+            set_table_rules(cell, None)
+            cell.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
+            p = cell.text_frame.paragraphs[0]
+            p.alignment = PP_ALIGN.LEFT
+            p.space_after = p.space_before = Pt(0)
+            p.line_spacing = Pt(layout.key_size * 1.2)
+            p.font.name, p.font.size, p.font.bold = element.font, Pt(layout.key_size), i == 0
+            p.font.color.rgb = color(element.label_color)
+            if swatch:
+                marker = p.add_run()
+                marker.text = "■ "
+                marker.font.size = Pt(8)
+                marker.font.color.rgb = color(swatch)
+            p.add_run().text = value
+
+    for i, (label, lx, ly) in enumerate(axis_lines(element, layout)):
+        bar = element.chart == "bar"
+        width = max(.1, lx) if bar else layout.plot_width / len(element.categories)
+        left = 0 if bar else lx - width / 2
+        box = shapes.add_textbox(x + Pt(left), y + Pt(ly-layout.axis_size*.7), Pt(width), Pt(layout.axis_size*1.4))
+        box.name = f"{element.id}:axis:{i}"
+        frame = box.text_frame
+        frame.margin_left = frame.margin_top = frame.margin_bottom = frame.margin_right = 0
+        frame.word_wrap = False
+        frame.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
+        p = frame.paragraphs[0]
+        p.text = label
+        p.alignment = PP_ALIGN.RIGHT if bar else PP_ALIGN.CENTER
+        p.font.name, p.font.size = element.font, Pt(layout.axis_size)
+        p.font.color.rgb = color(element.label_color)
+        p.font.bold = element.chart == "stacked_column"
+
+
+def fill_plot_frame(chart):
+    plot = chart._chartSpace.chart.plotArea
+    layout = plot.find(qn("c:layout"))
+    if layout is None:
+        layout = OxmlElement("c:layout")
+        plot.insert(0, layout)
+    manual = OxmlElement("c:manualLayout")
+    layout.append(manual)
+    for name, value in (("layoutTarget", "inner"), ("xMode", "edge"), ("yMode", "edge"),
+                        ("wMode", "factor"), ("hMode", "factor"), ("x", "0"), ("y", "0"), ("w", "1"), ("h", "1")):
+        node = OxmlElement("c:" + name)
+        node.set("val", value)
+        manual.append(node)
 
 
 def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -> bytes:
@@ -229,6 +293,16 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                             paragraph.line_spacing = Pt(el.size * 1.18) if el.css else TEXT_LEADING
                             paragraph.space_before = paragraph.space_after = Pt(0)
             elif isinstance(el, Chart):
+                layout = chart_layout(el, w.pt, h.pt)
+                key_x, key_y = x, y
+                if el.needs_key:
+                    x += Pt(layout.bar_inset)
+                    w = Pt(layout.plot_width-layout.bar_inset)
+                    h = Pt(layout.plot_height)
+                    if el.chart == "pie":
+                        diameter = round(.9 * min(w, h))
+                        x, y = x + (w-diameter)//2, y + (h-diameter)//2
+                        w = h = diameter
                 chart_data = CategoryChartData()
                 chart_data.categories = el.category_labels()
                 for series in el.series:
@@ -238,11 +312,20 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
                         "line": XL_CHART_TYPE.LINE, "pie": XL_CHART_TYPE.PIE}[el.chart]
                 filled = slot_kind == "chart"
                 obj = slot.insert_chart(kind, chart_data) if filled else shapes.add_chart(kind, x, y, w, h, chart_data)
-                obj.chart.has_legend = (len(el.series) > 1 and not (el.chart == "stacked_column" and el.show_values)
-                                        or el.chart == "pie")
+                obj.chart.has_legend = False
+                style_native_chart(obj.chart, el, item.background)
                 if el.needs_key:
-                    obj.chart.has_legend = True
-                style_native_chart(obj.chart, el)
+                    fill_plot_frame(obj.chart)
+                    if el.chart != "pie":
+                        obj.chart.category_axis.visible = obj.chart.value_axis.visible = False
+                        if el.chart == "bar":
+                            obj.chart.category_axis.reverse_order = True
+                        low, high = el.value_bounds()
+                        if el.chart == "stacked_column":
+                            high = max(el.totals()) / .95
+                        if high > low:
+                            obj.chart.value_axis.minimum_scale, obj.chart.value_axis.maximum_scale = low, high
+                    add_chart_key(shapes, el, layout, key_x, key_y)
             if filled:
                 placeholders.pop(el.placeholder_idx)
                 obj.left, obj.top, obj.width, obj.height = x, y, w, h
@@ -292,7 +375,7 @@ def to_pptx(document: Document, get_asset, brand: BrandTemplate | None = None) -
     return output.getvalue()
 
 
-def style_native_chart(chart, element):
+def style_native_chart(chart, element, background="#FFFFFF"):
     palette = element.colors()
     chart.element.chart.get_or_add_autoTitleDeleted().val = True
     chart.font.name = element.font
@@ -318,6 +401,9 @@ def style_native_chart(chart, element):
         else:
             mark.format.fill.solid()
             mark.format.fill.fore_color.rgb = shade
+            if element.chart == "pie":
+                mark.format.line.color.rgb = color(background)
+                mark.format.line.width = Pt(1.3)
     if element.highlight is not None:
         for index, point in enumerate(chart.series[0].points):
             shade = color(element.mark_color(index))
@@ -331,22 +417,20 @@ def style_native_chart(chart, element):
                 point.format.fill.solid()
                 point.format.fill.fore_color.rgb = shade
     if element.chart == "pie":
-        chart.has_title = True
-        title = chart.chart_title.text_frame
-        title.text = element.series[0].name
-        title_font = title.paragraphs[0].font
-        title_font.name, title_font.size = element.font, Pt(14)
-        title_font.color.rgb = color(element.label_color)
+        chart.has_title = False
         plot = chart.plots[0]
         plot.has_data_labels = True
         labels = plot.data_labels
-        labels.show_category_name = True
-        labels.show_value = True
-        labels.number_format = chart_number_format(element, ".##")
-        labels.font.name = element.font
-        labels.font.size = Pt(11)
-        labels.font.color.rgb = color(element.label_color)
-        labels.position = XL_DATA_LABEL_POSITION.OUTSIDE_END
+        labels.show_category_name = labels.show_value = False
+        labels.position = XL_DATA_LABEL_POSITION.CENTER
+        for i, point in enumerate(chart.series[0].points):
+            if element.series[0].values[i]:
+                label = point.data_label
+                label.text_frame.text = str(i + 1)
+                label.position = XL_DATA_LABEL_POSITION.CENTER
+                style = label.text_frame.paragraphs[0].font
+                style.name, style.size, style.bold = element.font, Pt(12), True
+                style.color.rgb = color(segment_ink(palette[i % len(palette)]))
     else:
         chart.value_axis.tick_labels.number_format = chart_number_format(element, ".##")
         chart.value_axis.has_major_gridlines = False

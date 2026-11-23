@@ -112,7 +112,7 @@ def quote_supports_amount(row):
     joint = r"\s*(?:(?:in|for|at|during|as of|by|of)\s+|\s*[:;|,–—]\s*)?"
     comparison = r"\s*(?:(?:was|were|is|are|stood at|totaled|totalled)\s+|\s*[:=|,–—]\s*)?"
     amount_pattern = rf"(?P<amount>(?:\b(?:USD|EUR|GBP|JPY)\s+)?{NUMBER})(?!\d|[.,]\d|[eE][+-]?\d)"
-    markers = [r"bn|[kmb]|millions?|billions?|thousands?|percent(?:age)?"]
+    markers = [r"bn|tn|[kmbt]|millions?|billions?|trillions?|thousands?|percent(?:age)?"]
     if row.unit:
         markers.insert(0, re.escape(row.unit))
     unit_pattern = rf"\s*(%|(?:{'|'.join(markers)})(?!\w))"
@@ -144,7 +144,7 @@ def exhibit_bindings(content, sources, source_ids, chart=None, planned_annotatio
     values = list(chart_values(chart) if chart else values_for(visual))
     if not values:
         return []
-    observations = [row for row in verified_observations(content.exhibit_observations, sources) if quote_supports_amount(row)]
+    observations = list(verified_observations(content.exhibit_observations, sources, prose_check=quote_supports_amount))
     bindings = {}
     for entry in values:
         amount = entry.value if isinstance(entry.value, str) else Decimal(str(entry.value))

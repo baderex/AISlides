@@ -306,11 +306,30 @@ class WorkbookData(Contract):
     show_values: bool = False
 
 
+class ChartLayout(Contract):
+    """Measured workbook plot and key, in slide points."""
+    signature: str = ""
+    width: float
+    height: float
+    plot_width: float
+    plot_height: float
+    bar_inset: float
+    axis_labels: list[str]
+    axis_size: float
+    numbered: bool
+    key_size: int
+    key_left: float
+    key_top: float
+    columns: list[float]
+    rows: list[float]
+
+
 class Chart(ElementBase, WorkbookData):
     type: Literal["chart"] = "chart"
     chart: ChartKind = "column"
     color: Color = "#4C52D9"
-    palette: list[Color] = Field(default_factory=list, max_length=5)
+    palette: list[Color] = Field(default_factory=list, max_length=16)
+    composition: ChartLayout | None = None
     label_color: Color = "#292C49"
     font: str = Field(default="Arial", max_length=60)
     highlight: int | None = Field(default=None, ge=0)
@@ -359,7 +378,12 @@ class Chart(ElementBase, WorkbookData):
         return display_value(value, self.value_prefix) + self.value_suffix
 
     def colors(self):
-        return self.palette or [self.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
+        if self.palette:
+            return self.palette
+        shades = [self.color, "#8B72DA", "#279990", "#BF693F", "#637B92"]
+        if self.chart == "pie":
+            shades.extend(["#A33766", "#927500", "#345B29", "#542657", "#206688", "#A84728"])
+        return shades
 
     @model_validator(mode="after")
     def matching_series(self):
@@ -385,7 +409,7 @@ Group.model_rebuild()
 
 
 Recipe = Literal[
-    "standard", "editorial_cover", "photo_cover", "decision_cover", "closing_display", "closing_centered",
+    "standard", "editorial_cover", "photo_cover", "photo_cover_title_above", "decision_cover", "closing_display", "closing_centered",
     "feature_panels", "feature_rows", "diagram_flow", "diagram_paths", "diagram_vertical",
     "diagram_swimlane",
     "dense_table", "dense_table_full", "chart", "readout", "allocation", "rollout", "decision",
@@ -463,7 +487,11 @@ class Document(Contract):
 def read_document(raw: dict) -> Document:
     if "schema_version" not in raw:
         raw = {"schema_version": 1, **raw}
-    return Document.model_validate(raw)
+    document = Document.model_validate(raw)
+    # Refresh derived geometry after an edit or when reading an older saved chart.
+    from app.chart_key import refresh_chart_layouts
+    refresh_chart_layouts(document)
+    return document
 
 
 class Skill(Contract):

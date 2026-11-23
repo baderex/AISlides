@@ -47,6 +47,9 @@ export interface TableElement extends Geometry {
   cell_fills?: (string | null)[][]; cell_inks?: (string | null)[][];
 }
 export interface ChartElement extends Geometry {
+  composition?: {width: number; height: number; plot_width: number; plot_height: number; bar_inset: number;
+    axis_labels: string[]; axis_size: number; numbered: boolean; key_size: number; key_left: number;
+    key_top: number; columns: number[]; rows: number[]} | null;
   type: 'chart'; font?: string; label_color?: string; palette?: string[]; value_prefix?: string; value_suffix?: string; show_values?: boolean;
   highlight?: number | null; context_color?: string | null;
   chart: 'bar' | 'column' | 'line' | 'pie' | 'stacked_column'; categories: string[]; series: {name: string; values: number[]}[]; color: string;

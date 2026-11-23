@@ -1,11 +1,11 @@
 import re
 from textwrap import shorten
 from typing import Annotated, Literal
-from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from app.diagrams import Diagram, Swimlane
 from app.domain import Contract, Layout, Recipe, Series, ShortText, display_value
-from app.evidence import EvidenceObservation
+from app.evidence import EvidenceObservation, recover_observation_amount
 from app.lucide import ICON_NAMES
 from app.questions import Question
 from app.visuals import Annotation, Copy, Decorations, VISUAL_LAYOUTS, Visual, VisualChoice
@@ -30,6 +30,9 @@ class Intent(Contract):
     supplied_figures: bool = False
     supplied_evidence_only: bool = False
     supplied_phase_quantities: bool = False
+    requirements: list[ShortText] = Field(default_factory=list, max_length=100, description=(
+        "Inventory of explicit content, image, and speaker-note requirements in the brief. "
+        "Keep exact names, figures, placement, and qualifications."))
     missing: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("visual_direction", mode="before")
@@ -55,6 +58,8 @@ EXHIBIT_LAYOUTS: dict[Exhibit, Layout] = {
 
 
 class OutlineItem(PlanningResponse):
+    requirement_ids: list[int] = Field(default_factory=list, max_length=100,
+                                       description="One-based IDs of brief requirements assigned to this slide")
     title: ShortText
     topic: str = Field(default="", max_length=180, description="A neutral label for the subject.")
     key_message: str = Field(default="", max_length=140, description="The concise supported takeaway or recommendation.")
@@ -111,6 +116,16 @@ class OutlineItem(PlanningResponse):
         }.get(label, label)
 
 
+def validate_assignments(slides, context):
+    if context is None or "brief_requirements" not in context:
+        return
+    expected = set(range(1, len(context["brief_requirements"]) + 1))
+    assigned = {key for slide in slides for key in slide.requirement_ids}
+    if assigned != expected:
+        raise PydanticCustomError("requirement_ids", "Assign every brief requirement. Missing IDs {missing}, unknown IDs {unknown}",
+                                  {"missing": sorted(expected-assigned), "unknown": sorted(assigned-expected)})
+
+
 class Outline(PlanningResponse):
     title: ShortText
     narrative: str = Field(default="", max_length=1000)
@@ -119,6 +134,7 @@ class Outline(PlanningResponse):
     @field_validator("slides")
     @classmethod
     def exact_slide_count(cls, slides: list[OutlineItem], info: ValidationInfo) -> list[OutlineItem]:
+        validate_assignments(slides, info.context)
         count = (info.context or {}).get("slide_count")
         if count is not None and len(slides) != count:
             raise PydanticCustomError("slide_count", "return exactly {expected} slides (received {actual})",
@@ -341,19 +357,53 @@ class ResearchQueries(Contract):
     queries: list[ShortText] = Field(min_length=1, max_length=4)
 
 
-class EvidenceSummary(PlanningResponse):
+class ResearchFindings(Contract):
+    uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
+    observations: list[EvidenceObservation] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def recover_amounts(cls, data, validate):
+        try:
+            return validate(data)
+        except ValidationError as error:
+            invalid = {}
+            for issue in error.errors(include_input=False, include_url=False):
+                path = issue["loc"]
+                if len(path) < 2 or path[0] != "observations" or not isinstance(path[1], int):
+                    raise
+                invalid.setdefault(path[1], set()).add(path[2:])
+        rows = []
+        for i, row in enumerate(data["observations"]):
+            if i not in invalid:
+                rows.append(row)
+            elif invalid[i] == {("amount",)} and (recovered := recover_observation_amount(row)):
+                rows.append(recovered)
+        result = validate({**data, "observations": rows})
+        if len(rows) < len(data["observations"]) and len(result.uncertainties) < 6:
+            result.uncertainties.append("Some observations lacked a usable amount or source detail and were omitted.")
+        return result
+
+
+class EvidenceSummary(ResearchFindings):
+    model_config = PlanningResponse.model_config
     summary: str = Field(max_length=2200)
-    uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
-    observations: list[EvidenceObservation] = Field(default_factory=list, max_length=64)
 
 
-class ResearchBrief(Contract):
+class ResearchBrief(ResearchFindings):
     summary: str = Field(max_length=1800)
-    uncertainties: list[ShortText] = Field(default_factory=list, max_length=6)
     follow_up: Question | None = None
-    observations: list[EvidenceObservation] = Field(default_factory=list, max_length=64)
 
 
 class Review(Contract):
     issues: list[ShortText] = Field(default_factory=list, max_length=5)
     regenerate_content: bool = False
+
+
+class CoverageIssue(Contract):
+    slide_number: int = Field(ge=1, le=40)
+    correction: ShortText
+
+
+class CoverageReview(Contract):
+    issues: list[CoverageIssue] = Field(max_length=10)

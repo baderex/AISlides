@@ -7,11 +7,14 @@ import xml.etree.ElementTree as ET
 from pydantic import Field, ValidationInfo, create_model, model_validator
 
 from app.domain import Contract, Identifier, Layout, WorkbookData
+from app.composition_models import validate_assignments
 from app.evidence import EvidenceObservation
 from app.visuals import VISUAL_MODELS, VisualType
 
 
 class PagePlan(Contract):
+    requirement_ids: list[int] = Field(default_factory=list, max_length=100,
+                                       description="One-based IDs of brief requirements assigned to this slide")
     title: str = Field(min_length=1, max_length=160)
     layout: Layout = "summary"
     direction: str = Field(min_length=1, max_length=1800, description="Specific exhibit, composition and information to communicate")
@@ -31,6 +34,7 @@ class HtmlPlan(Contract):
 
     @model_validator(mode="after")
     def requested_count(self, info: ValidationInfo):
+        validate_assignments(self.slides, info.context)
         if info.context and len(self.slides) != info.context["slide_count"]:
             raise ValueError(f"Return exactly {info.context['slide_count']} slides")
         if (info.context or {}).get("requires_chart_workbook") and not any(s.exhibit == "workbook-chart" for s in self.slides):

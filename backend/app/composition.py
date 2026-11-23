@@ -214,7 +214,13 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     points = content.points
     image_ratio = image_ratio or web_image_ratio
     if rules and item.layout == "cover" and content.image_asset_id in image_ids and image_ratio:
-        if compact:
+        if recipe == "photo_cover_title_above":
+            end = fitted_label(item.title, .06, .055, .88, .40, 48, 36, ink, heading=True)
+            end = fitted_label(content.subtitle, .06, end + .016, .88, .18, 19, 14, muted, role="body")
+            top = end + .028
+            image = Image(x=.06, y=top, w=.88, h=.95-top, asset_id=content.image_asset_id, alt=item.title,
+                          **content.picture_placement.model_dump())
+        elif compact:
             image = Image(x=.055, y=.33, w=.89, h=.61, asset_id=content.image_asset_id, alt=item.title,
                           **content.picture_placement.model_dump())
             end = fitted_label(item.title, .07, .07, .86, .15, 48, 31, ink, heading=True)

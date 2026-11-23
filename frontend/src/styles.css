@@ -432,11 +432,11 @@ studio-canvas { display: block; width: 100%; }
 .chart-point-value.chart-value-side { translate: 4px -50%; }
 .chart-point-value.chart-value-side.chart-value-negative { translate: calc(-100% - 4px) -50%; }
 .chart-bar-category { position: absolute; width: 22%; text-align: right; translate: 0 -50%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  white-space: pre-line; line-height: 1.2; }
 .stacked-point-value { position: absolute; translate: -50% -50%; font-weight: 700; white-space: nowrap; }
 .slide-pie { width: auto; height: 90%; aspect-ratio: 1; margin: 2% auto; max-width: 100%; }
-.chart-labels { display: flex; justify-content: space-around; white-space: nowrap; }
-.chart-labels span { flex: 1; min-width: 0; text-align: center; text-overflow: ellipsis; overflow: hidden; }
+.chart-labels { position: absolute; inset-inline: 0; display: flex; justify-content: space-around; white-space: pre-line; line-height: 1.2; }
+.chart-labels span { flex: 1; min-width: 0; text-align: center; }
 .selected-element { outline: 2px solid #7661ec; outline-offset: 1px; }
 .resize-handle { position: absolute; bottom: -4px; right: -4px; background: white; border: 2px solid #6b53df; width: 10px; height: 10px; border-radius: 2px; cursor: nwse-resize; z-index: 1; }
 .alignment-guide { position: absolute; z-index: 3001; pointer-events: none; }

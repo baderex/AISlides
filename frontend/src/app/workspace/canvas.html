@@ -101,10 +101,24 @@
             }
             @case ('chart') {
               @let key = needsChartKey(el);
-              <div class="chart-plot" [style.width.%]="key ? 47 : 100">
-              @if (el.chart === 'pie') { <div class="slide-pie" [style.background]="pie(el)"></div> }
+              @let layout = el.composition;
+              <div class="chart-plot" [style.width.%]="layout ? 100*layout.plot_width/layout.width : key ? 47 : 100">
+              @if (el.chart === 'pie') {
+                <svg viewBox="0 0 100 100" style="width:100%;height:100%">
+                  @for (slice of pieSlices(el); track $index) {
+                    @if (slice.value) {
+                      <svg:path [attr.d]="slice.path" [attr.fill]="chartColor(el,$index)" [attr.stroke]="slide().background"
+                        stroke-width="1.3" vector-effect="non-scaling-stroke"/>
+                      <svg:text [attr.x]="slice.x" [attr.y]="slice.y" text-anchor="middle" dominant-baseline="central"
+                        [attr.fill]="segmentInk(chartColor(el,$index))" [attr.font-family]="el.font" font-weight="bold"
+                        [attr.font-size]="layout ? 1200 / (layout.plot_width < layout.height ? layout.plot_width : layout.height) : 5">{{ $index+1 }}</svg:text>
+                    }
+                  }
+                </svg>
+              }
               @else {
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="slide-chart"
+                  [style.height.%]="el.chart === 'stacked_column' && layout ? 100*layout.plot_height/layout.height/0.97 : 100"
                   [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values" aria-hidden="true">
                   @if (el.chart === 'stacked_column') {
                     @for (series of stackedColumns(el); track $index; let index = $index) {
@@ -138,7 +152,7 @@
                     @for (mark of series; track $index) {
                       @if (mark.height > 0) {
                         <span class="stacked-point-value" [style.left.%]="mark.x + mark.width / 2"
-                          [style.top.%]="(mark.y + mark.height / 2) * .90"
+                          [style.top.%]="(mark.y + mark.height / 2) * (layout ? layout.plot_height/layout.height/0.97 : .90)"
                           [style.color]="segmentInk(chartColor(el, seriesIndex))" [style.font-family]="fontFamily(el.font)"
                           [style.font-size]="font(12)">{{ chartPointValue(el, $index, seriesIndex) }}</span>
                       }
@@ -160,11 +174,13 @@
                 }
                 @if (el.chart === 'bar') {
                   @for (mark of chart(el)[0]; track $index) {
-                    <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * .4"
-                      [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(11)">{{ el.categories[$index] }}</span>
+                    <span class="chart-bar-category" [style.top.%]="mark.by + mark.horizontal * (el.series.length / 2 - .1)"
+                      [style.width.%]="layout ? 100*(layout.bar_inset-4)/layout.plot_width : 22"
+                      [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color" [style.font-size]="font(11)">{{ chartLabels(el)[$index] }}</span>
                   }
                 } @else {
                   <div class="chart-labels" [class.direct-chart]="el.chart !== 'stacked_column' && el.show_values"
+                    [style.top.%]="layout ? 100*(layout.plot_height+3)/layout.height : 89"
                     [style.font-family]="fontFamily(el.font)" [style.color]="el.label_color"
                     [style.font-size]="font(el.chart === 'stacked_column' || el.show_values ? 13 : 10)"
                     [style.font-weight]="el.chart === 'stacked_column' ? 700 : null">
@@ -176,14 +192,16 @@
               @if (key) {
                 <div class="chart-key" [style.font-family]="fontFamily(el.font)"
                   [style.font-size]="font(el.series.length <= 2 && el.categories.length <= 6 ? 14 : 12)"
-                  [style.color]="el.label_color" [style.grid-template-columns]="'40% repeat(' + el.series.length + ', minmax(0,1fr))'"
-                  [style.row-gap]="font(6)">
+                  [style.color]="el.label_color" [style.left.%]="layout ? 100*layout.key_left/layout.width : 51"
+                  [style.grid-template-columns]="layout ? keyTracks(layout.columns, layout.width-layout.key_left) : '40% repeat(' + el.series.length + ', minmax(0,1fr))'"
+                  [style.grid-template-rows]="layout ? keyTracks(layout.rows, layout.height) : null"
+                  [style.row-gap]="layout ? '0' : font(6)">
                   <span></span>
                   @for (series of el.series; track $index) {
                     <strong>@if (el.chart !== 'pie') { <i [style.background]="chartColor(el,$index)"></i> }{{series.name}}</strong>
                   }
                   @for (category of el.categories; track $index; let row = $index) {
-                    <span>@if (el.chart === 'pie') { <i [style.background]="chartColor(el,row)"></i> }{{category}}</span>
+                    <span>@if (el.chart === 'pie') { <i [style.background]="chartColor(el,row)"></i> }{{layout?.numbered || el.chart === 'pie' ? (row+1) + '. ' : ''}}{{category}}</span>
                     @for (series of el.series; track $index) { <span>{{chartPointValue(el,row,$index)}}</span> }
                   }
                 </div>

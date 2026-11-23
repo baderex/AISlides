@@ -39,7 +39,7 @@ def recipe_options(part, content, document):
         return ["standard"]
     if part.layout == "cover":
         if content.image_asset_id:
-            return ["photo_cover"]
+            return ["photo_cover", "photo_cover_title_above"]
         if content.cover_callout:
             return ["decision_cover"]
         return ["editorial_cover", "standard"] if rules.cover_style == "rules" else ["editorial_cover"]
@@ -88,7 +88,7 @@ GEOMETRY_FIELDS = {"x", "y", "w", "h", "rotation", "z", "start_anchor", "end_anc
 
 
 def generated_state(element):
-    return element.model_dump(mode="json", exclude={"id", "element_key", "edited", "type", "placeholder_idx"})
+    return element.model_dump(mode="json", exclude={"id", "element_key", "edited", "type", "placeholder_idx", "composition"})
 
 
 def snapshot_generated(slide):
@@ -213,7 +213,7 @@ LAYOUT_RUBRIC = (
 
 def technical_score(candidate, content):
     failure = sum(1 for warning in candidate.warnings if warning.startswith(
-        ("Overlapping", "Missing", "Low", "Text may", "Some exhibit", "The chart data")))
+        ("Overlapping", "Missing", "Low", "Text may", "Some exhibit", "Chart labels", "The chart data")))
     incomplete = bool(content.diagram or content.swimlane) and not any(isinstance(el, Line) for el in candidate.elements)
     return int(incomplete), failure
 

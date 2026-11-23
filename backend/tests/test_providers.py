@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from app.composition import Intent, Outline, SlideContent
+from app.composition import EvidenceSummary, Intent, Outline, ResearchBrief, SlideContent
 from app.config import Settings, settings
 from app.providers import Intelligence, ModelReply, ProviderError
 
@@ -187,6 +187,29 @@ def test_chart_observations_require_numeric_values_and_repair_keeps_the_chart(mo
         "item": {"layout": "chart", "title": "Revenue"}, "sources": [source]}, "slide")
     assert slide.chart.values == [12] and slide.source_ids == ["s1"]
     assert slide.exhibit_observations[0].amount == 12
+
+
+@pytest.mark.parametrize("schema", [EvidenceSummary, ResearchBrief])
+def test_research_salvages_individual_amounts_in_one_billed_call(monkeypatch, schema):
+    client = openrouter(monkeypatch)
+    symbols = ["$87,508.83", "−6.3%", "$1.748tn", "not available", "$120k–$200k", "€12m", 3]
+    rows = [{"metric": "Value", "period": "2025", "source_id": "s1", "quote": f"Value 2025: {s}.",
+             "currency": "$" if s == "€12m" else "", "amount": s} for s in symbols]
+    rows.append({"amount": None, "period": "Forecast range"})
+
+    def request(model, prompt, content, image, contract, **kwargs):
+        amount = kwargs["response_schema"]["$defs"]["EvidenceObservation"]["properties"]["amount"]
+        assert amount["type"] == "number"
+        return ModelReply(json.dumps({"summary": "Market snapshot", "observations": rows,
+                                      "uncertainties": ["Different closing times"]}), 180, 220)
+
+    monkeypatch.setattr(client, "_request", request)
+    result = client.structured(schema, "Extract evidence.", {}, "research")
+    assert [(str(row.amount), row.currency, row.unit) for row in result.observations] == [
+        ("87508.83", "$", ""), ("-6.3", "", "%"), ("1.748", "$", "tn"), ("3", "", "")]
+    assert result.summary == "Market snapshot" and result.uncertainties[0] == "Different closing times"
+    assert len(result.uncertainties) == 2
+    assert client.usage["by_stage"]["research"] == {"calls": 1, "input": 180, "output": 220}
 
 
 def test_detailed_design_brief_passes_intent_planning_on_first_response(monkeypatch):

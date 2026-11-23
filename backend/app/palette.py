@@ -36,16 +36,19 @@ def visible_tone(color, background, minimum=3):
     return next(tone for i in range(21) if contrast(tone := blend(color, end, i / 20), background) >= minimum)
 
 
-def categorical_palette(theme, background):
+def categorical_palette(theme, background, count=5):
     seeds = [theme.accent, *(theme.design.chart_colors if theme.design else [])]
     restricted = theme.constraints.palette if theme.constraints else []
     if theme.design and theme.brand_kit and "chart_colors" in theme.brand_kit.protected:
         seeds = restricted = theme.design.chart_colors
-    return list(_series(tuple(c.upper() for c in seeds), tuple(c.upper() for c in restricted), background.upper()))
+    restrained = (theme.constraints and theme.constraints.restrained or
+                  theme.design and len(set(theme.design.chart_colors)) <= 2)
+    return list(_series(tuple(c.upper() for c in seeds), tuple(c.upper() for c in restricted),
+                        background.upper(), count, bool(restrained)))
 
 
 @lru_cache(maxsize=256)
-def _series(seeds, restricted, background):
+def _series(seeds, restricted, background, count, restrained):
     if restricted:
         candidates = list(dict.fromkeys(c for c in (*seeds, *restricted) if c in restricted and contrast(c, background) >= 3))
     else:
@@ -53,11 +56,14 @@ def _series(seeds, restricted, background):
         variants = ["#" + "".join(f"{round(v*255):02X}" for v in colorsys.hls_to_rgb(
             (hue + i / 12) % 1, light, max(.5, min(.8, saturation))))
             for light in (.42, .64) for i in range(12)]
+        if restrained:
+            variants = [blend(seed, end, share) for seed in seeds for end in ("#000000", "#FFFFFF")
+                        for share in (.15, .3, .45, .6, .75, .9, 1)]
         candidates = list(dict.fromkeys(visible_tone(c, background) for c in [*seeds, *variants]))
     if not candidates:
         return (max(restricted, key=lambda c: contrast(c, background)),)
     result = [candidates.pop(0)]
-    while candidates and len(result) < 5:
+    while candidates and len(result) < count:
         distances = {c: min(dist(oklab(c), oklab(other)) for other in result) for c in candidates}
         # Keep an authored series color when it has perceptual separation from earlier ones.
         next_color = next((c for c in candidates if c in seeds and distances[c] >= .12),

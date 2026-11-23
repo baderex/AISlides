@@ -3,7 +3,7 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
-from app.chart_key import chart_key
+from app.chart_key import axis_lines, chart_layout, key_lines, pie_label
 from app.domain import Chart, Document, Image, Line, Shape, Table, Text
 from app.render_geometry import image_placement, pdf_face, pdf_lines, styled_pdf_layout, align_offset, physical, flattened, table_columns, table_rows, table_insets, chart_marks, chart_values, bar_value_position, stacked_labels, segment_ink, arrowheads, connector_points, TEXT_LEADING
 
@@ -151,8 +151,9 @@ def to_pdf(document: Document, get_asset) -> bytes:
                         pdf.setLineWidth(weight)
                         pdf.line(0, rule_y, w, rule_y)
             elif isinstance(el, Chart):
-                plot_w, cells, _ = chart_key(el, w, h)
-                for cell in cells:
+                layout = chart_layout(el, w, h)
+                plot_w, plot_h = layout.plot_width, layout.plot_height
+                for cell in key_lines(el, layout):
                     cx, cy = cell.x, h-cell.y
                     if cell.swatch:
                         pdf.setFillColor(HexColor(cell.swatch))
@@ -161,10 +162,9 @@ def to_pdf(document: Document, get_asset) -> bytes:
                     pdf.setFillColor(HexColor(el.label_color))
                     pdf.setFont(pdf_face(el.font, cell.bold), cell.size)
                     pdf.drawString(cx, cy-cell.size*.32, cell.text)
-                plot_h = h * (.96 if el.chart == "bar" and el.show_values else .87)
                 segment_labels = iter(stacked_labels(el))
                 bar_labels = el.show_values and len(el.series) == 1 and el.chart in {"bar", "column"}
-                for index, (kind, color, dims) in enumerate(chart_marks(el, plot_w, plot_h)):
+                for index, (kind, color, dims) in enumerate(chart_marks(el, plot_w, plot_h, bar_inset=layout.bar_inset)):
                     pdf.setFillColor(HexColor(color))
                     pdf.setStrokeColor(HexColor(color))
                     if kind == "rect":
@@ -186,13 +186,16 @@ def to_pdf(document: Document, get_asset) -> bytes:
                                 pdf.drawRightString(px, h - py - 4, value)
                             else:
                                 pdf.drawCentredString(px, h - py - (10 if anchor == "mt" else 0), value)
-                        if el.chart == "bar" and index < len(el.categories):
-                            pdf.setFont(pdf_face(el.font, False), 11)
-                            pdf.setFillColor(HexColor(el.label_color))
-                            pdf.drawRightString(plot_w * .22, h - ry - rh/2 - 4, el.categories[index])
                     elif kind == "pie":
                         cx, cy, radius, begin, sweep = dims
-                        pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=0, fill=1)
+                        if sweep:
+                            pdf.setStrokeColor(HexColor(slide.background))
+                            pdf.setLineWidth(1.3)
+                            pdf.wedge(cx-radius, h-cy-radius, cx+radius, h-cy+radius, -begin, -sweep, stroke=1, fill=1)
+                            px, py = pie_label(dims)
+                            pdf.setFont(pdf_face(el.font, True), 12)
+                            pdf.setFillColor(HexColor(segment_ink(color)))
+                            pdf.drawCentredString(px, h-py-4, str(index+1))
                     else:
                         pdf.setLineWidth(2 if el.show_values else 1)
                         for (x1, y1), (x2, y2) in zip(dims, dims[1:]):
@@ -203,15 +206,15 @@ def to_pdf(document: Document, get_asset) -> bytes:
                             pdf.setFillColor(HexColor(shade if focus else el.label_color))
                             pdf.setFont(pdf_face(el.font, True), 14)
                             pdf.drawCentredString(px, h-py+(10 if focus else 8), value)
-                if el.chart not in {"pie", "bar"}:
-                    stacked = el.chart == "stacked_column"
-                    if stacked:
-                        pdf.setStrokeColor(HexColor(el.label_color))
-                        pdf.line(0, h - plot_h, plot_w, h - plot_h)
-                    pdf.setFont(pdf_face(el.font, stacked), 13 if stacked or el.show_values else 10)
-                    pdf.setFillColor(HexColor(el.label_color))
-                    for i, category in enumerate(el.category_labels()):
-                        pdf.drawCentredString(plot_w*(i+.5)/len(el.categories), 3, category if stacked else category[:20])
+                stacked = el.chart == "stacked_column"
+                if stacked:
+                    pdf.setStrokeColor(HexColor(el.label_color))
+                    pdf.line(0, h - plot_h, plot_w, h - plot_h)
+                pdf.setFont(pdf_face(el.font, stacked), layout.axis_size)
+                pdf.setFillColor(HexColor(el.label_color))
+                for label, lx, ly in axis_lines(el, layout):
+                    draw_label = pdf.drawRightString if el.chart == "bar" else pdf.drawCentredString
+                    draw_label(lx, h-ly-layout.axis_size*.32, label)
             pdf.restoreState()
         if lineage := evidence_notes(document, slide):
             pdf.textAnnotation(lineage, Rect=(.015 * width, .01 * height, .048 * width, .043 * height))

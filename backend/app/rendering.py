@@ -2,7 +2,7 @@
 import io
 from PIL import Image as PILImage
 from PIL import ImageDraw
-from app.chart_key import chart_key
+from app.chart_key import axis_lines, chart_layout, key_lines, pie_label
 from app.domain import Chart, Document, Image, Line, Shape, Slide, Table, Text
 from app.pdf_render import to_pdf
 from app.render_geometry import (
@@ -128,19 +128,18 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                     table_draw.line((0, rule_y, width, rule_y), fill=shade, width=stroke)
             layer = table_layer.resize((w, h), PILImage.Resampling.LANCZOS)
         elif isinstance(el, Chart):
-            plot_pt, cells, _ = chart_key(el, nw * ptw, nh * pth)
-            plot_w = plot_pt * scale
-            for cell in cells:
+            layout = chart_layout(el, nw * ptw, nh * pth)
+            plot_w, plot_h = layout.plot_width * scale, layout.plot_height * scale
+            for cell in key_lines(el, layout):
                 cx, cy = cell.x * scale, cell.y * scale
                 if cell.swatch:
                     draw.rectangle((cx, cy-3*scale, cx+6*scale, cy+3*scale), fill=cell.swatch)
                     cx += 9 * scale
                 draw.text((cx, cy), cell.text, fill=el.label_color, anchor="lm",
                           font=font(max(1, round(cell.size * scale)), cell.bold, el.font))
-            plot_h = h * (.96 if el.chart == "bar" and el.show_values else .87)
             segment_labels = iter(stacked_labels(el))
             bar_labels = el.show_values and len(el.series) == 1 and el.chart in {"bar", "column"}
-            for index, (kind, color, dims) in enumerate(chart_marks(el, plot_w, plot_h)):
+            for index, (kind, color, dims) in enumerate(chart_marks(el, plot_w, plot_h, bar_inset=layout.bar_inset*scale)):
                 if kind == "rect":
                     rx, ry, rw, rh = dims
                     draw.rectangle((rx, ry, rx+rw, ry+rh), fill=color)
@@ -152,12 +151,13 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                         value, px, py, anchor = bar_value_position(el, index, dims, 4 * scale)
                         draw.text((px, py), value, fill=color if index == el.highlight else el.label_color,
                                   font=font(max(1, round(12 * scale)), True, el.font), anchor=anchor)
-                    if el.chart == "bar" and index < len(el.categories):
-                        draw.text((plot_w * .22, ry + rh/2), el.categories[index], fill=el.label_color,
-                                  font=font(max(1, round(11 * scale)), False, el.font), anchor="rm")
                 elif kind == "pie":
                     cx, cy, radius, begin, sweep = dims
-                    draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color)
+                    if sweep:
+                        draw.pieslice((cx-radius, cy-radius, cx+radius, cy+radius), begin, begin+sweep, fill=color,
+                                      outline=slide.background, width=max(1, round(1.3*scale)))
+                        draw.text(pie_label(dims), str(index+1), fill=segment_ink(color), anchor="mm",
+                                  font=font(max(1, round(12*scale)), True, el.font))
                 else:
                     if len(dims) > 1:
                         draw.line(dims, fill=color, width=max(2, round(2 * scale)))
@@ -166,14 +166,13 @@ def preview(document: Document, slide: Slide, get_asset, pixel_width=1000, *, ar
                         draw.ellipse((px-radius, py-radius, px+radius, py+radius), fill=shade)
                         draw.text((px, py - (9 if focus else 7) * scale), value, fill=shade if focus else el.label_color,
                                   font=font(max(1, round(14 * scale)), True, el.font), anchor="mb")
-            if el.chart not in {"pie", "bar"}:
-                stacked = el.chart == "stacked_column"
-                if stacked:
-                    draw.line((0, plot_h, plot_w, plot_h), fill=el.label_color)
-                face = font(max(1, round((13 if stacked or el.show_values else 10) * scale)), stacked, el.font)
-                for index, category in enumerate(el.category_labels()):
-                    draw.text((plot_w*(index+.5)/len(el.categories), plot_h+3), category if stacked else category[:20],
-                              fill=el.label_color, font=face, anchor="mt")
+            stacked = el.chart == "stacked_column"
+            if stacked:
+                draw.line((0, plot_h, plot_w, plot_h), fill=el.label_color)
+            face = font(max(1, round(layout.axis_size * scale)), stacked, el.font)
+            for label, lx, ly in axis_lines(el, layout):
+                draw.text((lx*scale, ly*scale), label, fill=el.label_color, font=face,
+                          anchor="rm" if el.chart == "bar" else "mm")
         if el.rotation:
             layer = layer.rotate(-el.rotation, expand=True, resample=PILImage.Resampling.BICUBIC)
         if el.opacity < 1:
