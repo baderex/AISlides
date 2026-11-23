@@ -6,6 +6,7 @@ from app.exhibit_evidence import STATUS_KEY, evidence_label, exhibit_bindings, w
 from app.exhibit_layout import compose_exhibit
 from app.html_layout.review import readability_warnings
 from app.slide_design import detach_missing_anchors, generated_state, preserve_edits, recipe_options, snapshot_generated, stable_ids
+from app.render_geometry import fit_slide_text
 
 
 def fill_region(document, slide, region, content, recipe, namespace, workbook=None):
@@ -14,12 +15,12 @@ def fill_region(document, slide, region, content, recipe, namespace, workbook=No
     if workbook:
         chart = Chart(**bounds, **workbook.model_dump(), element_key="workbook:chart",
                       color=document.theme.accent, label_color=document.theme.ink, font=document.theme.font)
-        if document.theme.design:
-            style_chart(chart, document.theme, layer.background)
+        style_chart(chart, document.theme, layer.background)
         layer.elements.append(chart)
     else:
         compose_exhibit(document, layer, content, tuple(bounds[k] for k in ("x", "y", "w", "h")),
                         recipe=recipe, score_bars=True)
+    layer.warnings.extend(fit_slide_text(document, layer))
     stable_ids(layer, namespace, recipe)
     # Reserve space in DOM paint order for internal fills, connectors and labels.
     for element in layer.elements:

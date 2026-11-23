@@ -1,4 +1,5 @@
 from app.design import blend, readable
+from app.palette import semantic_palette
 from app.domain import Line, Shape, Text, TextSpan
 from app.rendering import longest_word_width, physical, text_height
 
@@ -14,9 +15,9 @@ class ExhibitCanvas:
         self.muted = readable(self.theme.muted, slide.background, self.ink)
         self.accent = readable(self.theme.accent, slide.background, self.ink)
         self.surface = blend(slide.background, self.accent, .10)
-        self.rule = blend(slide.background, self.ink, .24)
-        palette = self.theme.design.chart_colors if self.theme.design else []
-        self.palette = list(dict.fromkeys([self.accent, *palette, "#34847C", "#B46839", "#7767A9"]))[:4]
+        self.colors = semantic_palette(self.theme, slide.background)
+        self.rule = self.colors["border"]
+        self.palette = [v for k, v in self.colors.items() if k.startswith("series")]
         self.ptw, self.pth = physical(document)
         self.marks = {}
         self.highlight_band = highlight_band

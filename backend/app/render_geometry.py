@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -8,6 +9,7 @@ from PIL import ImageFont
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from app.domain import Chart, Document, Group, Image, Shape, Slide, Table, Text
+from app.bundled_fonts import FONT_DIR
 from app.lucide import bundled_icon, icon_asset_id
 
 
@@ -30,9 +32,57 @@ FONT_FILES = {
 SERIF_FAMILIES = {"cambria", "georgia", "source serif 4", "times new roman", "serif"}
 
 
+@lru_cache(maxsize=1)
+def installed_faces():
+    """Index actual font family names so Chromium, PDF and raster use the same face."""
+    roots = [FONT_DIR, Path("C:/Windows/Fonts"), Path.home() / ".local/share/fonts", Path.home() / ".fonts",
+             Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), Path("/Library/Fonts"),
+             Path("/System/Library/Fonts"), Path.home() / "Library/Fonts"]
+    if local := os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(local) / "Microsoft/Windows/Fonts")
+    faces = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if path.suffix.lower() not in {".ttf", ".otf", ".ttc"}:
+                continue
+            try:
+                name, style = ImageFont.truetype(str(path), 12).getname()
+            except OSError:
+                continue
+            style = style.casefold()
+            if style in {"regular", "normal", "book", "roman", "medium", "bold"}:
+                faces.setdefault((name.casefold(), style == "bold"), (name, str(path)))
+    return faces
+
+
+@lru_cache(maxsize=128)
+def available_family(family):
+    face = installed_faces().get((family.casefold(), False))
+    return face[0] if face else None
+
+
+@lru_cache(maxsize=128)
+def fallback_family(family):
+    name = family.casefold()
+    if name in SERIF_FAMILIES:
+        choices = ("Georgia", "Liberation Serif", "DejaVu Serif")
+    elif name in {"consolas", "courier new", "dejavu sans mono", "liberation mono"}:
+        choices = ("Consolas", "Liberation Mono", "DejaVu Sans Mono")
+    else:
+        choices = ("Arial", "Liberation Sans", "DejaVu Sans")
+    return next((face for face in choices if available_family(face)), choices[-1])
+
+
 @lru_cache(maxsize=100)
 def font(size: int, bold: bool, family: str = "Arial"):
     family = family.strip().lower()
+    faces = installed_faces()
+    for name in (family, fallback_family(family).casefold()):
+        face = faces.get((name, bold)) or faces.get((name, False))
+        if face:
+            return ImageFont.truetype(face[1], size)
     serif = family in SERIF_FAMILIES
     fallback = "DejaVuSansMono" if family == "consolas" else "DejaVuSerif" if serif else "DejaVuSans"
     alternate = fallback + ("-Bold" if bold else "") + ".ttf"
@@ -295,6 +345,12 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
     warnings = fit_slide_text(document, slide)
     boxes = []
     elements = list(flattened(slide.elements))
+    def backing(element, x, y, w, h):
+        for shape, bx, by, bw, bh in reversed(elements):
+            if isinstance(shape, Shape) and shape.z < element.z and shape.opacity == 1 and (
+                    bx <= x + 1e-6 and by <= y + 1e-6 and bx+bw >= x+w-1e-6 and by+bh >= y+h-1e-6):
+                return shape.fill
+        return slide.background
     for el, x, y, w, h in elements:
         if isinstance(el, Image) and el.asset_id not in assets and not bundled_icon(el.asset_id):
             warnings.append(f"Missing image: {el.alt or el.asset_id}")
@@ -304,18 +360,21 @@ def validate_slide(document: Document, slide: Slide, assets: set[str]) -> list[s
                     warning = "Low table header contrast." if row == 0 and el.header_fill else "Low table cell contrast."
                     if warning not in warnings:
                         warnings.append(warning)
-        if isinstance(el, Chart) and el.palette and contrast(el.label_color, slide.background) < 4.5:
-            warnings.append("Low chart label contrast.")
+        if isinstance(el, Chart) and el.palette:
+            if contrast(el.label_color, backing(el, x, y, w, h)) < 4.5:
+                warnings.append("Low chart label contrast.")
+            if len(el.series) > len(el.palette):
+                warnings.append("The chart palette repeats across series. Use direct labels to distinguish them.")
         if isinstance(el, Text):
             overlap = any(min(x+w, px+pw)-max(x,px) > .008 and min(y+h, py+ph)-max(y,py) > .008
                           for px, py, pw, ph in boxes)
             if overlap:
                 warnings.append(f"Overlapping text box: {el.text[:52]}")
             boxes.append((x, y, w, h))
-            backs = [shape.fill for shape, bx, by, bw, bh in elements
-                     if isinstance(shape, Shape) and shape.z < el.z and bx <= x and by <= y and bx + bw >= x+w and by+bh >= y+h]
             colors = {el.color, *(span.color for span in el.spans if span.color)}
-            if any(contrast(shade, backs[-1] if backs else slide.background) < 3 for shade in colors):
+            minimum = 3 if el.size >= 18 or el.bold and el.size >= 14 else 4.5
+            surface = backing(el, x, y, w, h)
+            if any(contrast(shade, surface) < minimum for shade in colors):
                 warnings.append(f"Low text contrast: {el.text[:55]}")
     return warnings
 

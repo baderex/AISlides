@@ -65,7 +65,8 @@ def test_guided_workflow_and_native_export():
     work()
     final = client.get(path).json()
     assert final["slide_count"] == 3 and final["status"] == "COMPLETED"
-    assert final["document"]["theme"]["font"] == "Georgia"
+    assert final["document"]["theme"]["font"] == "Manrope"
+    assert final["document"]["theme"]["design"]["heading_font"] == "Source Serif 4"
     stream = fetch_events(final["id"], 0)
     assert [item["type"] for item in stream].count("slide.completed") == 3
     latest = fetch_events(final["id"], stream[-2]["id"])

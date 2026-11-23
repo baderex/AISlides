@@ -1,20 +1,29 @@
 import io
+from types import SimpleNamespace
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
 from fastapi.testclient import TestClient
 from PIL import Image
+import pytest
 from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 from sqlalchemy import select
 
 from app.db import Job, Session
-from app.domain import Document, Shape
+from app.deck_design import baseline_rules, DeckDesignSpec
+from app.design import style_chart
+from app.domain import Chart, Document, Shape, Theme
+from app.export_review import compare_rasters
+from app.powerpoint import to_pptx
 from app.html_layout import compose
+from app.html_layout.markup import PagePlan
 from app.main import app
 from app.providers import Intelligence, ProviderError
 from app.queue import claim
-from app.workflow import advance
+from app.workflow import advance, html_slide_inputs
+from model_fixture import model_response
+from test_workflow import create, work
 
 
 PALETTE = dict(background="#FAF9F5", ink="#17283C", accent="#16856B", muted="#58677A", surface="#FFFFFF",
@@ -25,19 +34,40 @@ MATRIX = """<page><text font="display" size="70">FORM</text><row grow="1" align=
   </matrix></row></col></row></page>"""
 
 
+def test_html_slide_uses_planned_evidence_and_preserves_older_outlines():
+    item = SimpleNamespace(request={"prompt": "Compare error correction methods"})
+    sources = [{"id": key, "excerpt": key * 200} for key in ("brief", "history", "hardware")]
+    context = {"sources": sources, "brief_source_id": "brief", "research": {
+        "summary": "Deck-wide findings", "uncertainties": ["Dates are estimates"],
+        "observations": [{"source_id": key, "quote": key} for key in ("history", "hardware")]}}
+    plan = PagePlan(title="Hardware", direction="Explain the current demonstration", source_ids=["hardware"])
+    request = html_slide_inputs(item, context, plan)
+    assert request["sources"] == [sources[0], sources[2]]
+    assert request["research"] == {"uncertainties": ["Dates are estimates"], "observations": [{"source_id": "hardware"}]}
+    for ids in (None, ["missing"]):
+        assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": ids}))["sources"] == sources
+    assert html_slide_inputs(item, context, plan.model_copy(update={"source_ids": []}))["sources"] == sources[:1]
+
+
 def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeypatch):
     calls = []
 
     def model(self, schema, task, data, stage="planning", image=None):
         calls.append(schema.__name__)
+        if schema.__name__ == "ArtDirection":
+            return schema.model_validate(model_response("ArtDirection", data))
         if schema.__name__ == "Intent":
             return schema(subject="Inspection", audience="Board", visual_direction="Editorial", slide_count=1)
         if schema.__name__ == "Clarification":
             return schema(questions=[])
         if schema.__name__ == "HtmlPlan":
-            return schema(title="Inspection", **PALETTE, slides=[dict(title="Inspection", direction="Show the table")])
+            return schema(title="Inspection", slides=[dict(title="Inspection", direction="Show the table")])
         if schema.__name__ == "PageMarkup":
-            return schema(markup=MATRIX if "correction" in data else "<page><script/></page>")
+            return schema(markup="<page><script/></page>", notes="Keep these presenter notes.")
+        if schema.__name__ == "LayoutMarkup":
+            assert data["previous"] == "<page><script/></page>" and "correction" in data
+            assert {"research", "sources", "outline", "previous_exhibit_data"}.isdisjoint(data)
+            return schema(markup=MATRIX)
         raise AssertionError(f"Unexpected legacy generation request: {schema.__name__}")
 
     monkeypatch.setattr(Intelligence, "structured", model)
@@ -72,9 +102,10 @@ def test_live_route_checkpoints_browser_retry_and_exports_edited_objects(monkeyp
     assert item["status"] == "COMPLETED" and item["slide_count"] == 1
     assert reviewed == ["<page><script/></page>", MATRIX]
     assert interruptions == [True]
-    assert calls.count("HtmlPlan") == 1 and calls.count("PageMarkup") == 2
+    assert calls.count("HtmlPlan") == calls.count("PageMarkup") == calls.count("LayoutMarkup") == 1
     saved = item["document"]
     slide = saved["slides"][0]
+    assert slide["notes"] == "Keep these presenter notes."
     title, table = slide["elements"]
     assert title["single_line"] and table["css"]["columns"][0] > .69
     table["rows"][1][0] = "Updated inspection"
@@ -101,6 +132,127 @@ def test_picture_keeps_the_uploaded_asset_and_its_aspect(monkeypatch):
     assert image.asset_id == "upload" and image.alt == "Sample"
     assert abs((image.w / image.h) * 4 / 3 - 2) < .001
     assert Document.model_validate_json(Document(title="Product", slides=[slide]).model_dump_json()).slides == [slide]
+
+
+def test_palette_and_type_roles_reach_editable_objects():
+    from app.render_geometry import contrast
+
+    theme = Theme(accent="#FDFDFD", surface="#FDFCFB", font="Verdana")
+    theme.design = baseline_rules(theme, "editorial")
+    theme.design.chart_colors = ["#FAFAFA", "#FBFBFB"]
+    deck = Document(title="Review", theme=theme)
+    spec = DeckDesignSpec.from_theme(theme, "16:9")
+    markup = ('<page><text role="headline">Review</text><text role="body" size="12">Body copy</text>'
+              '<rule color="#FF00FF"/><text role="footnote">Source note</text></page>')
+    slide, _ = compose(markup, "Review", theme.model_dump(), "16:9", document=deck)
+    heading, body, shape, footnote = slide.elements
+    assert heading.font == theme.design.heading_font and heading.size == spec.typography["headline"].target_pt
+    assert body.font == "Verdana" and body.size >= 18
+    assert footnote.size == pytest.approx(11, abs=.01)
+    assert shape.fill.upper() in {color.upper() for color in spec.palette.values()}
+    for design in (theme.design, None):
+        chart = Chart(x=0, y=0, w=1, h=1, categories=["A"], series=[dict(name=str(i),values=[i]) for i in range(5)])
+        style_chart(chart, theme.model_copy(update={"design":design}), "#FFFFFF")
+        assert len(set(chart.palette)) == 5
+        assert all(contrast(c, "#FFFFFF") >= 3 for c in chart.palette)
+
+
+@pytest.mark.parametrize(("repair_valid", "export_only"), [(True, False), (False, False), (True, True)])
+def test_hard_visual_defects_require_a_valid_repair(monkeypatch, repair_valid, export_only):
+    structured = Intelligence.structured
+    attempts = []
+    def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ in {"PageMarkup", "LayoutMarkup"}:
+            if attempts:
+                assert ("Export fit" if export_only else "Low text contrast") in data["correction"]
+            attempts.append(schema.__name__)
+            color = "ink" if export_only or len(attempts) > 1 and repair_valid else "background"
+            return schema(markup=f'<page><text color="{color}">Coverage</text></page>')
+        return structured(self, schema, task, data, stage, image)
+    monkeypatch.setattr(Intelligence, "structured", model)
+    monkeypatch.setattr("app.workflow.renderer", lambda: "test-renderer" if export_only else None)
+    if export_only:
+        monkeypatch.setattr("app.workflow.compare_slide_export", lambda *args:
+                            (["Export fit: the headline moved outside its box."] if len(attempts) == 1 else [], 0.))
+    client = TestClient(app)
+    path = create(client, "Create one slide for staff about coverage in an editorial style.", research=False)
+    work()
+    result = client.get(path).json()
+    assert result["status"] == ("COMPLETED" if repair_valid else "FAILED")
+    assert result["slide_count"] == int(repair_valid)
+    assert len(attempts) == (2 if repair_valid else 3)
+
+
+@pytest.mark.parametrize("improves", [True, False])
+def test_soft_selection_preserves_content_and_passes_recent_geometry(monkeypatch, improves):
+    structured = Intelligence.structured
+    first = '<page><text role="headline">Coverage</text><text>Four districts</text></page>'
+    repairs = []
+    def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "HtmlPlan":
+            return schema(title="Coverage", slides=[dict(title=t, direction="Show service coverage")
+                          for t in ("Coverage", "Teams")])
+        if schema.__name__ == "PageMarkup":
+            if data["slide_number"] == 1:
+                assert data["recent_compositions"]["recent"] == []
+                return schema(markup=first)
+            prior, = data["recent_compositions"]["recent"]
+            assert prior["pattern"] == "text stack" and prior["headline"]["pt"] >= 30 and prior["left_margin"] > 0
+            return schema(markup='<page><text role="headline">Teams</text></page>')
+        if schema.__name__ == "LayoutMarkup":
+            assert "canvas" in data["correction"]
+            repairs.append(data["previous"])
+            if improves:
+                return schema(markup=first.replace("<page>", '<page justify="between">'))
+            return schema(markup='<page><text role="headline">Coverage</text></page>')
+        return structured(self, schema, task, data, stage, image)
+    monkeypatch.setattr(Intelligence, "structured", model)
+    monkeypatch.setattr("app.workflow.renderer", lambda: None)
+    client = TestClient(app)
+    path = create(client, "Create two slides for staff about coverage in an editorial style.", research=False, skill_id="product")
+    work()
+    result = client.get(path).json()
+    assert result["status"] == "COMPLETED" and repairs == [first]
+    assert result["document"]["theme"]["accent"].upper() == "#6941C6"
+    body = next(t for t in result["document"]["slides"][0]["elements"] if t.get("text") == "Four districts")
+    assert (body["y"] > .7) == improves
+
+
+def test_raster_comparison_localizes_export_shift():
+    def png(image):
+        raw = io.BytesIO()
+        image.save(raw, "PNG")
+        return raw.getvalue()
+    before = Image.new("RGB", (480, 270), "white")
+    after = before.copy()
+    after.paste("black", (320, 180, 480, 270))
+    assert compare_rasters(png(before), png(before), [])[0] == 0
+    distance, region, missing = compare_rasters(png(before), png(after), [])
+    assert distance > .9 and region == "bottom right"
+
+
+def test_google_fonts_survive_offline_measurement_and_editable_export():
+    deck = Document(title="Coverage", theme=Theme(font="Manrope"))
+    deck.theme.design = baseline_rules(deck.theme, "editorial")
+    markup = ('<page><text role="headline">Coverage</text><text role="body">Four districts</text>'
+              '<text role="code">count = 4</text></page>')
+    slide, _ = compose(markup, deck.title, deck.theme.model_dump(), "16:9", document=deck)
+    families = ["Source Serif 4", "Manrope", "IBM Plex Mono"]
+    assert [el.font for el in slide.elements] == families
+    deck.slides.append(slide)
+    raw = to_pptx(deck, lambda key: None)
+    with ZipFile(io.BytesIO(raw)) as package:
+        xml = ElementTree.fromstring(package.read("ppt/presentation.xml"))
+        assert {e.get("typeface") for e in xml.findall(".//{*}embeddedFont/{*}font")} == set(families)
+        parts = [package.read(n) for n in package.namelist() if n.endswith(".fntdata")]
+        assert len(parts) == 6
+        for font in parts:
+            assert int.from_bytes(font[:4], "little") == len(font) and font[34:36] == b"LP"
+            size = int.from_bytes(font[4:8], "little")
+            assert font[-size:][:4] == b"\0\1\0\0"
+    client = TestClient(app)
+    assert "SIL OPEN FONT LICENSE" in client.get("/api/v1/fonts/Manrope-OFL.txt").text
+    assert client.get("/api/v1/fonts/Manrope-Regular.ttf").content.startswith(b"\0\1\0\0")
 
 
 def test_brand_and_readability_apply_to_measured_objects(monkeypatch):
@@ -133,16 +285,21 @@ def test_northstar_html_edit_recalculates_flags_and_exports_workbook(monkeypatch
     markup = '<page><text size="42">Northstar decision</text><row grow="1"><exhibit grow="3"/><col grow="1"><text>Board note</text></col></row></page>'
 
     def model(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "ArtDirection":
+            return schema.model_validate(model_response("ArtDirection", data))
         if schema.__name__ == "Intent":
             return schema(subject="Northstar", slide_count=2, supplied_figures=True, requires_chart_workbook=True)
         if schema.__name__ == "Clarification":
             return schema(questions=[])
         if schema.__name__ == "HtmlPlan":
             assert data["requires_chart_workbook"]
-            return schema(title="Northstar", **PALETTE, slides=[
+            return schema(title="Northstar", slides=[
                 dict(title="Northstar decision", layout="research", exhibit="decision-matrix", direction="Compare initiatives"),
                 dict(title="Score inputs", layout="chart", exhibit="workbook-chart", direction="Compare the raw scores")])
-        assert schema.__name__ == "ExhibitPage"
+        if schema.__name__ == "LayoutMarkup":
+            assert "Export difference:" in data["correction"]
+            return schema(markup=data["previous"])
+        assert schema.__name__ == "ExhibitPage", data.get("correction")
         source = data["sources"][0]["id"]
         if data["slide_number"] == 1:
             return schema(markup=markup, source_ids=[source], exhibit_data={

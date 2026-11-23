@@ -18,6 +18,7 @@ class Contract(BaseModel):
 
 
 class DesignRules(Contract):
+    family: Literal["corporate", "consulting", "editorial", "technology", "financial", "product"] = "corporate"
     audience: ShortText
     purpose: ShortText
     industry: ShortText

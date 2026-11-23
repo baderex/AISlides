@@ -3,6 +3,7 @@ export type Status = 'CREATED' | 'ANALYZING' | 'WAITING_FOR_USER' | 'RESEARCHING
 export type Layout = 'cover' | 'section' | 'summary' | 'comparison' | 'timeline' | 'process' | 'metrics' | 'chart' | 'showcase' | 'editorial' | 'research' | 'quote' | 'closing';
 
 export interface DesignRules {
+  family?: 'corporate' | 'consulting' | 'editorial' | 'technology' | 'financial' | 'product';
   audience: string; purpose: string; industry: string; mood: string; brand_constraints: string; visual_references: string;
   imagery: string; heading_font: string; spacing: 'compact' | 'regular' | 'spacious'; card_shape: 'rect' | 'round';
   cover_style: 'rules' | 'panel' | 'circles'; cover_background: string; dense_surface: string; dense_ink: string; chart_colors: string[];

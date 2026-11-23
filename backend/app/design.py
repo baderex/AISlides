@@ -7,6 +7,7 @@ from PIL import Image as PILImage
 from pydantic import Field
 
 from app.domain import Color, Contract, DesignConstraints, DesignRules, Table, Theme
+from app.palette import blend, readable, semantic_palette
 from app.rendering import contrast, flattened
 from app.storage import Storage
 
@@ -23,12 +24,13 @@ class ArtDirection(Contract):
 
 DIRECTOR_PROMPT = (
     "You are an expert presentation art director. Create one cohesive design system. "
+    "Start from deck_design, its font pairing, grid, density and visual language. Prefer available_fonts. "
     "Infer audience, purpose, industry, mood and visual references from the request and clarification answers. "
     "Honor explicit brand instructions, exact color values, requested fonts and locked template settings before "
     "inferred preferences. Treat uploaded materials as references. Choose body and heading fonts, card geometry, "
     "spacing, cover treatment, chart colors and an imagery direction. Give font family names without style suffixes "
-    "such as Bold or Regular. Choose fonts by role. For an editorial deck, "
-    "prefer Georgia for headings and Arial for body text, charts and tables unless another font is requested. "
+    "such as Bold or Regular. Choose fonts by role. For editorial slides prefer Source Serif 4 headlines "
+    "with Manrope body text. Use IBM Plex Mono for code when the brand permits it. "
     "Use background for content slides and cover_background for the cover and closing. When a brief names a dark "
     "brand color without requiring dark slides throughout, consider a quiet light background for analytical slides "
     "and use the dark color on decision slides. Make ink and muted text readable on both background and surface. "
@@ -100,11 +102,13 @@ def enforce_constraints(theme: Theme, constraints: DesignConstraints | None) -> 
             if constraints.background_mode == "light":
                 acceptable = [color for color in constraints.palette if contrast(color, "#FFFFFF") <= 1.55]
                 if contrast(current, "#FFFFFF") > 1.55:
-                    current = acceptable[0] if acceptable else "#F7F5EF"
+                    current = acceptable[0] if acceptable else min(
+                        constraints.palette, key=lambda c: contrast(c, "#FFFFFF"), default="#F7F5EF")
             elif constraints.background_mode == "dark" and field in {"background", "cover_background"}:
                 acceptable = [color for color in constraints.palette if contrast(color, "#FFFFFF") >= 7]
                 if contrast(current, "#FFFFFF") < 7:
-                    current = acceptable[0] if acceptable else "#191B20"
+                    current = acceptable[0] if acceptable else max(
+                        constraints.palette, key=lambda c: contrast(c, "#FFFFFF"), default="#191B20")
         if constraints.restrained and field in {"background", "cover_background", "surface", "dense_surface"} and (
                 not constraints.palette and field not in constraints.colors):
             channels = [int(current[i:i+2], 16) for i in (1, 3, 5)]
@@ -151,17 +155,6 @@ def reference_sheet(assets):
     return base64.b64encode(output.getvalue()).decode("ascii")
 
 
-def readable(preferred, surface, *alternatives, minimum=4.5):
-    colors = (preferred, *alternatives, "#FFFFFF", "#000000")
-    return next(color for color in colors if contrast(color, surface) >= minimum)
-
-
-def blend(first, second, share):
-    channels = [round(int(first[i:i+2], 16) * (1 - share) + int(second[i:i+2], 16) * share)
-                for i in (1, 3, 5)]
-    return "#" + "".join(f"{channel:02X}" for channel in channels)
-
-
 NUMERIC_CELL = re.compile(r"[+\-−]?\s*[$€£¥]?\s*(?:\d[\d,]*(?:\.\d+)?|\.\d+)\s*%?")
 
 
@@ -192,7 +185,7 @@ def style_table(table, theme, background=None, *, preserve_palette=False):
                     contrast(ink, fill) >= 4.5 for fill in (table.focus_fill, table.focus_cell_fill)
                 )), table.color)
             fills = [fill for fill in (table.fill, table.focus_fill, table.focus_cell_fill) if fill]
-            table.negative_ink = "#8B3533" if contrast("#8B3533", table.focus_fill or table.fill) >= 4.5 else "#FFBBB4"
+            table.negative_ink = semantic_palette(theme, table.fill)["negative"]
             if any(contrast(table.negative_ink, fill) < 4.5 for fill in fills):
                 table.negative_ink = table.color
         if table.w >= .65:
@@ -214,13 +207,10 @@ def style_slide_tables(slide, theme, *, preserve_palette=False):
 
 
 def style_chart(chart, theme, background):
-    colors = [readable(color, background, theme.ink, minimum=3) for color in [theme.accent, *theme.design.chart_colors]]
-    palette = list(dict.fromkeys(colors))[:5]
-    if chart.chart == "stacked_column":
-        palette[1:] = sorted(palette[1:], key=lambda color: contrast(palette[0], color), reverse=True)
-    chart.palette = palette
+    palette = semantic_palette(theme, background)
+    chart.palette = [c for key, c in palette.items() if key.startswith("series")]
     chart.color = chart.palette[0]
-    chart.label_color = readable(theme.muted, background, theme.ink)
+    chart.label_color = palette["muted"]
     if chart.highlight is not None:
-        chart.context_color = readable(blend(background, theme.ink, .50), background, chart.label_color, minimum=3)
+        chart.context_color = palette["neutral"]
     chart.font = theme.font

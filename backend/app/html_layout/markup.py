@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 from pydantic import Field, ValidationInfo, create_model, model_validator
 
-from app.domain import Color, Contract, Identifier, Layout, WorkbookData
+from app.domain import Contract, Identifier, Layout, WorkbookData
 from app.evidence import EvidenceObservation
 from app.visuals import VISUAL_MODELS, VisualType
 
@@ -14,19 +14,15 @@ class PagePlan(Contract):
     title: str = Field(min_length=1, max_length=160)
     layout: Layout = "summary"
     direction: str = Field(min_length=1, max_length=1800, description="Specific exhibit, composition and information to communicate")
+    source_ids: list[Identifier] | None = Field(default=None, max_length=60)
     exhibit: VisualType | Literal["workbook-chart"] | None = None
+    picture_id: Identifier | None = Field(default=None, description="Uploaded picture explicitly assigned to this slide")
     image_query: str = Field(default="", max_length=380)
     image_prompt: str = Field(default="", max_length=400)
 
 
 class HtmlPlan(Contract):
     title: str = Field(min_length=1, max_length=160)
-    background: Color
-    ink: Color
-    accent: Color
-    muted: Color
-    surface: Color
-    display: Literal["Georgia", "Arial", "Aptos", "Consolas"]
     slides: list[PagePlan] = Field(min_length=1, max_length=40)
 
     @model_validator(mode="after")
@@ -35,13 +31,26 @@ class HtmlPlan(Contract):
             raise ValueError(f"Return exactly {info.context['slide_count']} slides")
         if (info.context or {}).get("requires_chart_workbook") and not any(s.exhibit == "workbook-chart" for s in self.slides):
             raise ValueError("Assign workbook-chart to a slide presenting the requested editable data series.")
+        assigned = [slide.picture_id for slide in self.slides if slide.picture_id]
+        if info.context and "available_pictures" in info.context:
+            if set(assigned) - set(info.context["available_pictures"]):
+                raise ValueError("Assign pictures only from available_pictures.")
+            if len(set(assigned)) < len(assigned) and not info.context.get("reuse_uploaded_images"):
+                raise ValueError("Assign a different available picture to each slide unless reuse was requested.")
         return self
 
 
-class PageMarkup(Contract):
+class LayoutMarkup(Contract):
+    markup: str = Field(description="One XML page containing composed visual content", max_length=30000)
+
+
+class MarkupError(ValueError):
+    """The page XML can be repaired without changing its evidence or exhibit data."""
+
+
+class PageMarkup(LayoutMarkup):
     source_ids: list[Identifier] = Field(default_factory=list, max_length=20)
     notes: str = Field(default="", max_length=3500)
-    markup: str = Field(description="One XML page containing composed visual content", max_length=30000)
 
 
 @lru_cache
@@ -60,8 +69,11 @@ comparisons, schedules or diagrams so their inputs remain editable together. Use
 weighted scorecard or weighted choice, heatmap for retention grids, waterfall for bridges, and workbook-chart for ordinary
 bar, column, pie and line charts, especially when an editable chart workbook is requested. Leave exhibit
 null for free layouts. Use image_query only for requested, enabled web photos and image_prompt only
-for enabled generated imagery. Prefer available uploaded images. Choose legible contrasting colors.
-Write each direction as an instruction to a slide designer, including what must be drawn."""
+for enabled generated imagery. Set picture_id to the exact available_pictures ID for each assigned upload.
+Follow the supplied deck_design.
+Write each direction as an instruction to a slide designer, including what must be drawn. For each slide,
+list the source_ids needed to support its claims or data. Use exact IDs from sources. Use an empty list
+for a slide that needs no source material."""
 
 DESIGN = """You are the slide designer. Create ONLY the requested slide as XML in the markup property.
 The XML compiles to HTML with CSS flex layout and browser-measured editable native PowerPoint objects.
@@ -74,7 +86,7 @@ On covers preserve the requested title and tagline. Use concise, precise languag
 Do not add slide metadata labels for decoration. All vector illustrations are built from native primitives.
 
 Language (no other tags, CSS, HTML entities except XML built-ins, scripts or URLs):
-<page bg="background" pad="42" gap="16">children</page>: vertical flex, full canvas 720px high. Default 36px padding.
+<page>children</page>: vertical flex, full canvas 720px high. Defaults use the deck margin, gap and background.
 <row gap="16" grow="1">...</row> horizontal flex. <col ...>...</col> vertical flex.
 Containers and drawing panels can use grow=positive relative flex weight on parent main axis, w or h in
 pixels or percentages, pad, gap, bg (opaque background exported as shape), justify=start|center|end|between,
@@ -86,10 +98,12 @@ Supply exact observations and cited source_ids for quantitative inputs. Set illu
 explicitly identified as illustrative. Leave room below the exhibit for the evidence footer.
 Use <picture asset="uploaded-id" alt="Description" grow="1"/> for a relevant supplied picture.
 Only use IDs in available_pictures. The original image retains its aspect ratio and is editable.
-<text size="32" font="display" color="ink" bold="true" align="left">Text</text>. Size in CSS px, 12–100;
-fonts display|body|mono. Newlines preserved. Usually headings 32–48, body 17–23, source 12–14.
-Color values are theme tokens background|ink|accent|muted|surface or #RRGGBB. Choose readable contrast.
-<matrix grow="1" widths="40,30,30" size="18"><tr><td bg="accent" color="#FFFFFF">...</td>...</tr>...</matrix>
+<text role="headline" align="left">Text</text>. Use cover, headline, body, label, code or footnote roles.
+The role supplies the font, weight, leading and size. For overrides size is in CSS pixels (points / 0.75).
+Use the supplied deck_design typography targets in points. Keep body copy readable by shortening it or
+enlarging its frame. Use deck_design.palette tokens for all paint. Use onAccent and onSurface on those fills.
+Follow recent_compositions for headline alignment and margins. Vary the central composition when the content changes.
+<matrix grow="1" widths="40,30,30"><tr><td bg="accent" color="onAccent">...</td>...</tr>...</matrix>
 is an editable fixed-column table, max 12 rows, 8 columns. Use distinct cell fills for heatmaps; widths
 are optional percentages. Cells accept bg,color,bold,align. Include all labels and all source values.
 <waterfall grow="1" unit="$" suffix="M" decimals="1"><bar label="..." value="10" kind="total"/>
@@ -126,17 +140,17 @@ def parse_markup(value):
     if value.startswith("```"):
         value = value.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     if "<!" in value or "<?" in value:
-        raise ValueError("Markup declarations are unsupported")
+        raise MarkupError("Markup declarations are unsupported")
     root = ET.fromstring(value)
     if root.tag != "page" or len(list(root.iter())) > 300:
-        raise ValueError("Expected one page with at most 300 nodes")
+        raise MarkupError("Expected one page with at most 300 nodes")
     def clean(node, depth):
         if depth > 12 or any(child.tag not in TAGS.get(node.tag, "").split() for child in node):
-            raise ValueError(f"Unexpected nesting inside {node.tag}")
+            raise MarkupError(f"Unexpected nesting inside {node.tag}")
         if (node.tag not in TEXT and (node.text or "").strip()) or any((c.tail or "").strip() for c in node):
-            raise ValueError("All visible copy must be in a text, label or td")
+            raise MarkupError("All visible copy must be in a text, label or td")
         if node.tag in TAGS and node.tag not in {"row","col"} and not len(node):
-            raise ValueError(f"Empty {node.tag}")
+            raise MarkupError(f"Empty {node.tag}")
         return {"tag":node.tag, "a":node.attrib, "t":(node.text or "").strip(),
                 "children":[clean(c, depth + 1) for c in node]}
     return clean(root, 0)

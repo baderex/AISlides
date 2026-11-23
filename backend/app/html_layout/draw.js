@@ -9,11 +9,11 @@ payload => {
   };
   const color = (value, fallback="ink") => {
     const chosen = value || fallback;
-    const c = theme[chosen] || chosen;
-    if (!/^#[a-f0-9]{6}$/i.test(c)) throw Error("Expected a theme color or #RRGGBB: " + chosen);
+    const c = theme.palette[chosen] || chosen;
+    if (!Object.values(theme.palette).includes(c)) throw Error("Use a deck palette token: " + chosen);
     return c;
   };
-  const font = name => name === "display" ? theme.display : name === "mono" && !theme.lockFont ? "Consolas" : theme.font || "Arial";
+  const font = name => JSON.stringify(name === "display" ? theme.display : name === "mono" && !theme.lockFont ? theme.mono : theme.font);
   const bool = x => x === "true" || x === "1";
   const align = value => ["left","right","center"].includes(value) ? value : "left";
   const flexAlign = value => ({start:"flex-start",end:"flex-end",between:"space-between",center:"center",stretch:"stretch"})[value];
@@ -80,15 +80,22 @@ payload => {
     return svg;
   }
   // The native text contract supports 8–100 pt. CSS uses 96 px/in and PowerPoint uses 72 pt/in.
-  const textStyle = a => ({fontFamily:font(a.font),fontSize:px(Math.max(11,Math.min(125,number(a.size,19,1,500)))),
-    lineHeight:"1.17",fontWeight:bool(a.bold)?"700":"400",textAlign:align(a.align),
-    color:color(a.color),whiteSpace:"pre-wrap",overflowWrap:"anywhere"});
+  function textStyle(a, defaultRole="body") {
+    const role = a.role || defaultRole, type = theme.roles[role];
+    if (!type) throw Error("Unknown typography role: " + role);
+    const size = number(a.size, type.target_pt/.75, 1, 500);
+    return {fontFamily:font(a.font || (role === "code" ? "mono" : ["cover","headline"].includes(role) ? "display" : "body")),
+      fontSize:px(Math.max(type.minimum_pt/.75, Math.min(125,size))), lineHeight:String(type.leading),
+      fontWeight:(a.bold === undefined ? type.bold : bool(a.bold)) ? "700" : "400",textAlign:align(a.align),
+      color:color(a.color),whiteSpace:"pre-wrap",overflowWrap:"anywhere"};
+  }
   function label(p,x,y,w,h,value,a={}) {
     if (!(w>0 && h>0)) throw Error("Empty label bounds");
     const holder = el("div",p,{...pos(x,y,w,h),display:"flex",flexDirection:"column",justifyContent:"center"});
-    const n = mark(el("div",holder,textStyle(a)),"text"); n.textContent=value;
+    const n = mark(el("div",holder,textStyle(a,"label")),"text"); n.textContent=value;
     let size=parseFloat(n.style.fontSize);
-    while(n.offsetHeight > h+1 && size>11) n.style.fontSize=px(--size);
+    const min=(theme.roles[a.role || "label"].minimum_pt)/.75;
+    while(n.offsetHeight > h+1 && size>min) n.style.fontSize=px(size=Math.max(min,size-1));
     if (n.offsetHeight>h+3) throw Error("Label needs more room: "+value);
   }
   function drawing(p,children,w,h) {
@@ -120,7 +127,7 @@ payload => {
     if(rows.length<2 || rows.length>12 || n>8 || rows.some(r=>r.children.length!==n))
       throw Error("Matrix needs 2–12 uniform rows and 1–8 columns");
     const table=mark(el("table",p,{width:"100%",height:"100%",borderCollapse:"collapse",tableLayout:"fixed",
-      fontFamily:font("body"),fontSize:px(number(a.size,18,12,36)),lineHeight:"1.18"}),"table");
+      ...textStyle(a,"table")}),"table");
     if(a.widths) {
       const widths=a.widths.split(",").map(v=>number(v,1,0.1,100));
       if(widths.length!==n) throw Error("Matrix width count differs from column count");
@@ -132,14 +139,15 @@ payload => {
       const tr=el("tr",body);
       r.children.forEach(({a:cell,t})=>{
         const td=el("td",tr,{padding:"4px 8px",verticalAlign:"middle",textAlign:align(cell.align),
-          backgroundColor:color(cell.bg||(!i?"ink":"surface")),color:color(cell.color||(!i?"background":"ink")),
-          fontWeight:bool(cell.bold)||!i?"700":"400",borderBottom:"1px solid "+color("muted"),
+          backgroundColor:color(cell.bg||(!i?"ink":"surface")),color:color(cell.color||(!i?"page":"onSurface")),
+          fontWeight:bool(cell.bold)||!i?"700":"400",borderBottom:"1px solid "+color("border"),
           overflowWrap:"anywhere",whiteSpace:"pre-wrap"});
         td.textContent=t;
       });
     });
     let size=parseFloat(table.style.fontSize);
-    while(table.offsetHeight>h+2 && size>12) table.style.fontSize=px(--size);
+    const min=theme.roles.table.minimum_pt/.75;
+    while(table.offsetHeight>h+2 && size>min) table.style.fontSize=px(size=Math.max(min,size-1));
     if(table.offsetHeight>h+3) throw Error("Matrix is too dense for the allocated height");
   }
   function waterfall(p,bars,a,w,h) {
@@ -155,7 +163,7 @@ payload => {
     line(p,2,y(0),w-2,y(0),"muted",false,.65);
     values.forEach(({start,end,v,total,b},i)=>{
       const x=step*(i+.18),top=y(Math.max(start,end)),bottom=y(Math.min(start,end));
-      shape(p,x,top,bw,Math.max(1,bottom-top),b.color||(total?"ink":v<0?"muted":"accent"));
+      shape(p,x,top,bw,Math.max(1,bottom-top),b.color||(total?"highlight":v<0?"negative":v>0?"positive":"neutral"));
       if(i<values.length-1) line(p,x+bw,y(end),x+step,y(end),"muted",false,.75);
       const str=(v<0?"−":!total?"+":"")+(a.unit||"")+Math.abs(v).toFixed(number(a.decimals,0,0,6))+(a.suffix||"");
       label(p,i*step,top-32,step,30,str,{size:19,bold:"true",align:"center"});
@@ -290,12 +298,13 @@ payload => {
       bg.dataset.shape="rect";
     }
     if(["page","row","col"].includes(tag)) {
-      Object.assign(box.style,{display:"flex",flexDirection:tag==="row"?"row":"column",padding:px(number(a.pad,tag==="page"?36:0)),
-        gap:px(number(a.gap,tag==="page"?14:8)),alignItems:flexAlign(a.align)||"stretch",justifyContent:flexAlign(a.justify)||"flex-start"});
+      Object.assign(box.style,{display:"flex",flexDirection:tag==="row"?"row":"column",padding:px(number(a.pad,tag==="page"?theme.margin:0)),
+        gap:px(number(a.gap,tag==="page"?theme.gap:theme.gap/2)),alignItems:flexAlign(a.align)||"stretch",justifyContent:flexAlign(a.justify)||"flex-start"});
       if (tag==="page" && (payload.hasExhibit || logo)) box.style.paddingBottom=px(Math.max(logo?52:32,parseFloat(box.style.paddingBottom)));
       children.forEach(c=>render(c,box,pending));
     } else if(tag==="text") {
       const copy=mark(el("div",box,{...textStyle(a),position:"relative"}),"text");copy.textContent=t;
+      if(a.h || a.grow) copy.dataset.checkParent="true";
       if(!a.grow && !a.h) box.style.flexShrink="0";
     } else if(tag==="rule") {
       if(!a.h) box.style.height="2px";

@@ -232,7 +232,8 @@ class Intelligence:
         return stats
 
     def structured(self, schema: type[BaseModel], task: str, data: dict, stage: str = "planning", image: str | None = None):
-        validation_context = {k: data[k] for k in ("slide_count", "requires_chart_workbook") if k in data} if stage == "outline" else None
+        outline_fields = ("slide_count", "requires_chart_workbook", "available_pictures", "reuse_uploaded_images")
+        validation_context = {k: data[k] for k in outline_fields if k in data} if stage == "outline" else None
         required_exhibit = data.get("required_exhibit") if stage == "slide" else None
         visual_choice = data.get("visual_choice") if required_exhibit == "visual" else None
         if required_exhibit:

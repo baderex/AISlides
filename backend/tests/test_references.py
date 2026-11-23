@@ -17,7 +17,7 @@ from app.composition import Intent, Outline, ResearchBrief, ResearchQueries, Sli
 from app.config import Settings, settings
 from app.db import Job, Session, SlidePreview, WorkerHeartbeat
 from app.domain import Source
-from app.html_layout.markup import HtmlPlan, PageMarkup
+from app.html_layout.markup import HtmlPlan, LayoutMarkup, PageMarkup
 from app.main import app
 from app.providers import Intelligence
 from app.questions import Clarification
@@ -25,6 +25,7 @@ from app.queue import claim
 from app.research import collect
 from app.workflow import advance, align_query_period, outline_inputs, requested_calendar_period
 from test_workflow import create, work
+from model_fixture import model_response
 
 
 def test_outline_reuses_web_research_and_keeps_supplied_evidence():
@@ -305,15 +306,16 @@ def test_generated_illustration_is_embedded(monkeypatch, provider, image_setting
         return httpx.Response(200, json={"data": [{"b64_json": encoded}]}, request=httpx.Request("POST", url))
 
     def structured(self, schema, task, data, stage="planning", image=None):
+        if schema.__name__ == "ArtDirection":
+            return schema.model_validate(model_response("ArtDirection", data))
         fixtures = {
             "Intent": {"subject": "Example", "slide_count": 1},
             "Clarification": {"questions": []},
-            "HtmlPlan": {"title":"Example", "background":"#FFFFFF", "accent":"#234567", "ink":"#111111",
-                         "muted":"#334455", "surface":"#EEEEEE", "display":"Georgia", "slides":[{
+            "HtmlPlan": {"title":"Example", "slides":[{
                              "title":"Example", "layout":"editorial", "direction":"Place the illustration",
                              "image_prompt":"An abstract blue shape Deck imagery direction: Restrained editorial imagery coordinated with the deck palette."}]},
         }
-        if schema is PageMarkup:
+        if schema in (PageMarkup, LayoutMarkup):
             asset = data["required_picture"]
             assert asset in data["available_pictures"]
             markup = f'<page><picture asset="{asset}" alt="Blue shape"/></page>' if "correction" in data else "<page><text>Missing image</text></page>"
@@ -380,8 +382,7 @@ def test_web_research_only_embeds_and_credits_a_requested_portrait(monkeypatch, 
             return Clarification()
         if schema is HtmlPlan:
             assert data["web_images"] == requested
-            return schema(title="Example", background="#FFFFFF", accent="#234567", ink="#111111", muted="#334455",
-                          surface="#EEEEEE", display="Georgia", slides=[dict(title="Example", layout="editorial",
+            return schema(title="Example", slides=[dict(title="Example", layout="editorial",
                           direction="Introduce the subject", image_query="Example official portrait")])
         if schema is PageMarkup:
             asset = data["required_picture"]
