@@ -161,7 +161,8 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         roles = DeckDesignSpec.from_theme(document.theme, document.aspect_ratio, layout).typography
         return style_slide_tables(slide, document.theme, preserve_palette=True, table_floor=roles["table"].minimum_pt)
     t = document.theme
-    typography = DeckDesignSpec.from_theme(t, document.aspect_ratio, layout).typography
+    design_spec = DeckDesignSpec.from_theme(t, document.aspect_ratio, layout)
+    typography = design_spec.typography
     compact = document.aspect_ratio == "1:1"
     factor = {"1:1": .68, "4:3": .83, "16:9": 1}[document.aspect_ratio]
     font_scale = max(.87, factor) if rules else factor
@@ -175,6 +176,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         ink = readable(t.ink, bg, t.background)
         muted = readable(t.muted, bg, ink)
         accent = readable(t.accent, bg, ink)
+    accent_fill = design_spec.palette["highlight"] if rules else accent
     slide = Slide(title=item.title, background=bg, layout=item.layout, notes=content.notes,
                   source_ids=list(dict.fromkeys(s for s in content.source_ids if s in source_ids)))
     elements = slide.elements
@@ -252,7 +254,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         step = .86 / len(decision.gates)
         for i, gate in enumerate(decision.gates):
             x = .07 + i * step
-            rect(x, .375, step - .022, .004, accent)
+            rect(x, .375, step - .022, .004, accent_fill)
             threshold, measure = gate.threshold, ""
             if mixed_threshold := re.match(r"^([<>≤≥=]*\s*\d+(?:\.\d+)?\s*%)\s+(.+)$", threshold):
                 threshold, measure = mixed_threshold.groups()
@@ -269,21 +271,42 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
     if rules and item.layout in {"cover", "closing"}:
         centered = recipe == "closing_centered"
         align = "center" if centered else "left"
+        side_art = item.layout == "cover" and rules.cover_style in {"panel", "circles"}
+        if side_art:
+            # Decoration moves above long locked copy rather than consuming the
+            # width needed to retain its minimum readable size.
+            side_art = all(text_height(value, .66 * ptw, minimum, False, face) + 4 <= height * pth
+                           for value, minimum, face, height in (
+                               (item.title, max(32, typography["cover"].minimum_pt), rules.heading_font, .40),
+                               (content.next_step or content.subtitle, max(14, typography["body"].minimum_pt), t.font, .15),
+                           ) if value.strip())
         if item.layout == "cover":
-            if recipe == "editorial_cover" and rules.cover_style == "rules":
-                rect(.07, .165, .86, .003, accent)
-                rect(.07, .858, .86, .003, accent)
+            if rules.cover_style == "panel":
+                x, y, w, h = (.76, .125, .172, .59) if side_art else (.76, .07, .172, .12)
+                rect(x, y, w, h, accent_fill)
+                panel_rule = readable(t.muted, accent_fill, ink, minimum=3)
+                for offset in (.127, .686):
+                    rect(x + .163 * w, y + offset * h, .657 * w, max(.004, .014 * h), panel_rule)
+            elif rules.cover_style == "circles":
+                x, y, w = (.77, .09, .19) if side_art else (.81, .06, .09)
+                rect(x, y, w, w * ptw / pth, accent_fill, "ellipse")
+                x, y, w = (.82, .28, .135) if side_art else (.87, .10, .06)
+                rect(x, y, w, w * ptw / pth, blend(bg, accent_fill, .35), "ellipse")
+            elif recipe == "editorial_cover" and rules.cover_style == "rules":
+                rect(.07, .165, .86, .003, accent_fill)
+                rect(.07, .858, .86, .003, accent_fill)
             else:
-                rect(.07, .202, .075, .004, accent)
+                rect(.07, .202, .075, .004, accent_fill)
         elif centered:
-            rect(.463, .212, .074, .003, accent)
+            rect(.463, .212, .074, .003, accent_fill)
             rect(.20, .80, .60, .002, blend(bg, ink, .34))
         display = recipe in {"closing_display", "closing_centered"}
-        end = fitted_label(item.title, .12 if centered else .07, .29 if centered else .24, .76 if centered else .86,
+        end = fitted_label(item.title, .12 if centered else .07, .29 if centered else .24,
+                           .76 if centered else .66 if side_art else .86,
                            .40, (60 if compact else 78) if display else (54 if compact else 62), 32, ink,
                            heading=True, align=align)
         end = fitted_label(content.next_step or content.subtitle, .12 if centered else .07, end + .023,
-                           .76 if centered else .75, .15, 20, 14, muted, align=align, role="body")
+                           .76 if centered else .66 if side_art else .75, .15, 20, 14, muted, align=align, role="body")
         if item.layout == "closing" and not content.next_step:
             visible = [point for point in points[:3] if point.title.casefold() not in {
                 item.title.casefold(), (content.next_step or content.subtitle).casefold()
@@ -296,7 +319,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
 
     if not rules:
         label(f"{index + 1:02d}  /  {item.layout.upper()}", .068, .065, .65, .045, 12, accent, True)
-        rect(.068, .137, .048, .008, accent)
+        rect(.068, .137, .048, .008, accent_fill)
     if item.layout in DISPLAY_LAYOUTS:
         if rules and rules.cover_style == "rules":
             rect(.07, .196, .86, .003, t.accent)
@@ -346,7 +369,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         panel = t.surface if abs(contrast(t.surface, bg) - 1) >= .16 else blend(bg, t.accent, .14)
         panel_ink = readable(ink, panel, t.ink)
         body_ink = readable(muted, panel, panel_ink)
-        panel_accent = readable(accent, panel, panel_ink, minimum=3)
+        panel_accent = readable(accent_fill, panel, panel_ink, minimum=3)
         for index, point in enumerate(points[:3]):
             name = point.title.strip().casefold()
             if sum(other.title.strip().casefold() == name for other in points) > 1:
@@ -445,7 +468,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
             x = .07 + step * index
             lead = index == readout.highlight
             width = step - .022
-            rect(x, .463, width, .004, accent if lead else blend(bg, ink, .30))
+            rect(x, .463, width, .004, accent_fill if lead else blend(bg, ink, .30))
             fitted_label(metric.title, x, .492, width, .075, 16, 12, ink, bold=True)
             fitted_label(metric.value, x, .586, width, .131, 42 if lead else 35, 23, accent if lead else ink, heading=True)
             fitted_label(metric.body, x, .75, width, .124, 15, 12, muted, role="body")
@@ -569,7 +592,7 @@ def compose(item: OutlineItem, content: SlideContent, document: Document, index:
         for i, point in enumerate(points):
             x = .068 + i * (width + gap)
             if rules and item.layout == "comparison":
-                rect(x, .463, width, .004, accent)
+                rect(x, .463, width, .004, accent_fill)
             else:
                 rect(x, .463, width, .426, t.surface, rules.card_shape if rules else "round")
             value = point.value if slide.source_ids or not any(character.isdigit() for character in point.value) else ""
