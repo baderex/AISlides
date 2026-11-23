@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     asset_limit_bytes: int = 12 * 1024 * 1024
     artifact_retention_days: int = 30
     powerpoint_renderer: str = ""
+    html_layout_browser: str = ""
     powerpoint_review_timeout: int = Field(default=45, ge=5, le=90)
     lease_seconds: int = 300
 

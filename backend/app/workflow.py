@@ -1,6 +1,7 @@
 import base64
 import io
 import logging
+import xml.etree.ElementTree as ET
 import re
 from datetime import date
 
@@ -20,6 +21,8 @@ from app.domain import Image, Skill, Slide, Source, Theme, read_document
 from app.evidence import EVIDENCE_GUIDANCE, EvidenceObservation, resolve_headline, verified_observations
 from app.export_review import ReviewBusy, ReviewUnavailable, renderer
 from app.imagery import image_configured, render_image, source_web_image
+from app import html_layout
+from app.html_layout.markup import DESIGN as HTML_DESIGN, PLAN as HTML_PLAN, HtmlPlan, PageMarkup
 from app.master_artwork import master_artwork
 from app.presentations import asset_sources, assets_for, begin_write, emit, persist, skill_for
 from app.previews import put_preview
@@ -180,6 +183,14 @@ def visual_direction(item, context):
         if answer["question_id"] == "visual_direction" or answer["question_id"] in context.get("style_questions", []):
             direction = answer["value"]
     return direction
+
+
+def requested_slide_count(context):
+    count = context["intent"].get("slide_count")
+    for answer in context.get("answers", []):
+        if answer["question_id"] in context.get("count_questions", []) and answer["value"].isdigit():
+            count = int(answer["value"])
+    return count or 6
 
 
 def requested_calendar_period(prompt, today):
@@ -411,6 +422,13 @@ def lock_presentation(db, job_id):
     ).with_for_update())
 
 
+def completed(document, usage, count):
+    message = ("The presentation was generated. Check the slide review notes before exporting."
+               if any(slide.warnings for slide in document.slides) else "The presentation is ready to edit and export.")
+    return ("done", "complete", "COMPLETED",
+            [("generation.completed", message, {"slides":count, "usage":usage})], document, "Generated presentation")
+
+
 def process(job_id, token, item, stage, context, assets, skill, ai):
     document = read_document(item.document)
     brand = skill.brand if skill else None
@@ -468,6 +486,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             "Only supply visual_direction if the user specified a visual style or selected a skill. A request for impressive slides or a topic that "
             "needs charts does not specify a visual style. Set requires_quantitative_evidence for factual statistics, historical performance, "
             "rankings by measurable criteria, and numeric comparisons, even when no visual style is specified. "
+            "Set requires_chart_workbook only for explicit requests for a native chart with editable series or an embedded data workbook. "
             "Set supplied_figures if the user includes quantitative evidence in their own brief. A requested slide count "
             "or date range alone is not evidence. Set supplied_evidence_only if the user asks to use only the inputs or "
             "references they supplied, or forbids external evidence. Set supplied_phase_quantities only if the brief assigns "
@@ -506,6 +525,19 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         if web_research is None:
             return "research", "waiting", "WAITING_FOR_USER", events, None, None
         context["web_research_enabled"] = web_research
+        if context.get("layout_engine") == "auto":
+            # These paths bind template slots, place actual image assets, or verify quantitative
+            # exhibits against retrieved observations. They still require the native compositor.
+            native = (ai.provider == "demo" or brand or (skill and skill.theme.brand_kit)
+                      or item.request.get("generate_images")
+                      or inferred_intent.get("requires_chart_workbook")
+                      or (web_research and inferred_intent.get("web_images_requested"))
+                      or (data_driven and (web_research or any(not a.media_type.startswith("image/") for a in assets))))
+            context["layout_engine"] = "native" if native else "html"
+        after_research = "html_plan" if context.get("layout_engine") == "html" else "design"
+        if after_research == "html_plan" and not web_research and not any(a.extracted.strip() for a in assets):
+            events.append(("research.completed", "Using the supplied prompt as the slide brief.", {}))
+            return after_research, "queued", "PLANNING", events, None, None
         if web_research and not context.get("web_research_complete"):
             if data_driven:
                 research = ai.structured(ResearchQueries,
@@ -551,7 +583,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                 question = brief.follow_up
                 if question.type not in used_kinds and question.id not in used_ids:
                     pause_for_questions(context, Clarification(questions=[question]), events)
-                    return "design", "waiting", "WAITING_FOR_USER", events, None, None
+                    return after_research, "waiting", "WAITING_FOR_USER", events, None, None
         else:
             if data_driven:
                 reason = ("Web research returned no usable sources." if web_research else
@@ -560,7 +592,71 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                {"uncertainties": [reason]}))
             else:
                 events.append(("research.completed", "No reference sources were provided for this deck.", {}))
-        stage, status = "design", "RESEARCHING"
+        stage, status = after_research, "PLANNING"
+    elif stage == "html_plan":
+        if not start_status(job_id, token, "PLANNING", "agent.started", "Planning the deck and its visual layout."):
+            return None
+        plan = ai.structured(HtmlPlan, HTML_PLAN, {
+            **inputs(item, context), "slide_count":requested_slide_count(context), "aspect":document.aspect_ratio,
+            "visual_direction":direction,
+            "available_pictures":{a.id:a.name for a in assets if a.media_type.startswith("image/")},
+        }, "outline", reference_sheet(assets) if settings().llm_vision_enabled else None)
+        context["html_plan"] = plan.model_dump(mode="json")
+        document.title = plan.title
+        document.theme = document.theme.model_copy(update=plan.model_dump(include={"background","ink","accent","muted","surface"}))
+        attach_slide_sources(document, context)
+        events.extend([("design.completed", "HTML/CSS layout and palette ready.", {}),
+                       ("outline.completed", "Slide outline ready.", {"outline":{"title":plan.title,
+                        "slides":[{"title":p.title} for p in plan.slides]}})])
+        stage, status, changed = "html_slide", "GENERATING", document
+    elif stage in {"html_slide", "html_measure"}:
+        plan = HtmlPlan.model_validate(context["html_plan"])
+        index = context.get("progress_index", len(document.slides))
+        if index == len(plan.slides):
+            return completed(document, ai.usage, index)
+        part = plan.slides[index]
+        theme = plan.model_dump(exclude={"slides", "title"})
+        pictures = {a.id:a.name for a in assets if a.media_type.startswith("image/")}
+        if not inferred_intent.get("reuse_uploaded_images"):
+            for prior in document.slides:
+                for element, *_ in flattened(prior.elements):
+                    if isinstance(element, Image):
+                        pictures.pop(element.asset_id, None)
+        previous = context.get("layout_retry", {})
+        if stage == "html_slide":
+            if not start_status(job_id, token, "GENERATING", "slide.started", f"Designing slide {index+1}: {part.title}.", index=index):
+                return None
+            request = {**inputs(item, context), "slide":part.model_dump(), "slide_number":index+1,
+                       "available_pictures":pictures,
+                       "outline":[p.title for p in plan.slides], "theme":theme, "deck_title":document.title,
+                       "aspect":document.aspect_ratio, "width":html_layout.WIDTH[document.aspect_ratio]}
+            if previous:
+                request.update(previous=previous["markup"], correction=previous["error"])
+            candidate = ai.structured(PageMarkup, HTML_DESIGN, request, "html-slide")
+            context["html_candidate"] = candidate.model_dump(mode="json")
+            return "html_measure", state, "REVIEWING", events, None, None
+        candidate = PageMarkup.model_validate(context["html_candidate"])
+        try:
+            if set(candidate.source_ids) - {source.id for source in document.sources}:
+                raise ValueError("Cite only source IDs supplied with this brief.")
+            slide, png = html_layout.compose(candidate.markup, part.title, theme, document.aspect_ratio, pictures)
+        except (ValueError, ET.ParseError) as error:
+            attempt = previous.get("attempt", 0) + 1
+            issue = str(error)[:800]
+            if attempt >= 3:
+                context.pop("layout_retry", None)
+                raise ProviderError(f"Could not fit slide {index+1} after three layouts: {issue}") from error
+            context["layout_retry"] = {"attempt":attempt,"markup":candidate.markup,"error":issue}
+            context.pop("html_candidate")
+            return "html_slide", state, "GENERATING", [("slide.revised", "Adjusting the slide to fit its layout.", {"index":index})], None, None
+        context.pop("layout_retry", None)
+        context.pop("html_candidate")
+        slide.notes, slide.source_ids, slide.layout = candidate.notes, candidate.source_ids, part.layout
+        document.slides.append(slide)
+        context["progress_index"] = index+1
+        context["_preview_bytes"] = png
+        events.append(("slide.completed", f"Slide {index+1} is ready.", {"slide_id":slide.id,"index":index,"warnings":slide.warnings}))
+        stage, status, changed = "html_slide", "GENERATING", document
     elif stage == "design":
         if not start_status(job_id, token, "PLANNING", "agent.started", "Choosing the deck typography, palette and visual rules."):
             return None
@@ -596,12 +692,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
     elif stage == "plan":
         if not start_status(job_id, token, "PLANNING", "agent.started", "Planning the narrative and slide sequence."):
             return None
-        intent = Intent.model_validate(context["intent"])
-        count = intent.slide_count
-        for answer in context.get("answers", []):
-            if answer["question_id"] in context.get("count_questions", []) and answer["value"].isdigit():
-                count = int(answer["value"])
-        count = count or 6
+        count = requested_slide_count(context)
         theme = document.theme
         style_guidance = " " + PLAN_GUIDANCE if theme.profile == "consulting" else ""
         if data_driven:
@@ -617,7 +708,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             " Web image search is enabled. Set image_query only where an existing image serves the slide's purpose and "
             "the layout is showcase, editorial, or research without a primary chart or table. "
             "For portraits use the subject's full name and 'official photographic portrait'. Leave other image queries empty."
-            if web_research and intent.web_images_requested else " Leave every image_query empty."
+            if web_research and inferred_intent.get("web_images_requested") else " Leave every image_query empty."
         )
         planning_inputs = evidence_inputs(item, context) if data_driven else inputs(item, context)
         outline = ai.structured(Outline,
@@ -661,12 +752,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
         index = context.get("progress_index", len(document.slides))
         outline = Outline.model_validate(context["outline"])
         if index == len(outline.slides):
-            has_review_notes = any(slide.warnings for slide in document.slides)
-            message = ("The presentation was generated. Check the slide review notes before exporting."
-                       if has_review_notes else "The presentation is ready to edit and export.")
-            return ("done", "complete", "COMPLETED",
-                    [("generation.completed", message, {"slides": index, "usage": ai.usage})],
-                    document, "Generated presentation")
+            return completed(document, ai.usage, index)
         part = outline.slides[index]
         if not start_status(job_id, token, "GENERATING", "slide.started", f"Designing slide {index + 1}: {part.title}.", index=index):
             return None

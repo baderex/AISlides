@@ -26,6 +26,8 @@ export class FitText {
     const frame = this.host.parentElement;
     if (!frame?.clientWidth || !frame.clientHeight) return;
     this.host.style.fontSize = this.preferredFont();
+    const element = this.studioFitText();
+    if (!element.edited && (element.type === 'text' ? element.line_spacing : element.css)) return;
     const overflows = () => this.host.scrollHeight > frame.clientHeight || this.host.scrollWidth > frame.clientWidth;
     if (!overflows()) return;
 

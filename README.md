@@ -2,6 +2,8 @@
 
 A self-hosted presentation studio that turns prompts and references into editable slide decks. Angular handles the design workspace. FastAPI and a separate Python worker manage guided generation, saved versions and exports.
 
+New live prompt decks use HTML/CSS layout. The worker measures each slide in Chromium and saves its text, shapes, connectors, tables and pictures as editable studio objects. PowerPoint, PDF and the editor read that saved geometry. The native compositor serves PowerPoint templates, protected brand kits, generated or web-sourced pictures, charts requiring an embedded workbook, quantitative research with external evidence, and the offline demo.
+
 ## Run locally
 
 Install Python 3.11 or later, Node.js 22.13 or later in the 22.x series, npm and Git. The [local development guide](docs/local-development.md) lists the other supported Node.js versions.

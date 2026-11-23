@@ -4,6 +4,7 @@ Build Angular with `npm ci` and `npm run build` in `frontend`. Serve `frontend/d
 
 ## Runtime configuration
 
+- Install the backend package and run `python -m playwright install --with-deps --only-shell chromium` on Linux workers. Install the browser for the worker service account or share its configured Playwright browser cache. Workers may also use an installed Chromium executable selected with `HTML_LAYOUT_BROWSER`. The browser measures slides locally.
 - Set `APP_ENV=production`, `PUBLIC_ORIGIN=https://studio.example.com` and `ALLOW_SIGNUP=false`. Production requires an account session. Set `PUBLIC_ORIGIN` to the browser-visible HTTPS origin so the API accepts same-origin writes.
 - `DATABASE_URL=postgresql+psycopg://studio:...@db.example.com/studio`. Enable TLS and use a least-privileged service role.
 - `JOB_BACKEND=redis` and `REDIS_URL=rediss://...`. Redis dispatches queued job IDs. SQL keeps the authoritative job records, lease tokens and checkpoints. Workers recover queued jobs through SQL if a dispatch is missed.

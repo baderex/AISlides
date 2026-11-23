@@ -21,6 +21,7 @@
           @switch (el.type) {
             @case ('text') {
               <div class="slide-text" [studioFitText]="el" [preferredFont]="font(el.size)" [style.font-family]="el.font" [style.color]="el.color"
+                [style.white-space]="el.single_line && !el.edited ? 'pre' : null" [style.line-height]="el.line_spacing"
                 [style.text-align]="el.align" [style.font-weight]="el.bold ? 700 : 400">@for (run of textRuns(el); track $index) {<span [style.color]="run.color" [style.font-weight]="run.bold ? 700 : 400">{{ run.text }}</span>}</div>
             }
             @case ('shape') {
@@ -70,20 +71,22 @@
                 }
                 @for (row of el.rows; track $index; let rowIndex = $index) {
                   @if ($first && el.header_fill) {
-                    <tr [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">
+                    <tr [style.height.%]="el.css ? el.css.rows[rowIndex] * 100 : null" [style.background]="el.header_fill" [style.color]="el.header_color ?? el.color">
                       @for (cell of row; track $index) {
                         <th scope="col" [class.numeric-cell]="el.numeric_columns?.includes($index)"
+                          [style.text-align]="el.css?.align?.[rowIndex]?.[$index]" [style.font-weight]="el.css ? (el.css.bold[rowIndex][$index] ? 700 : 400) : null"
                           [style.background]="el.cell_fills?.[rowIndex]?.[$index]" [style.color]="el.cell_inks?.[rowIndex]?.[$index]"
                           [style.--cell-inset-x]="format.columns[$index].insetX">{{ cell }}</th>
                       }
                     </tr>
                   } @else {
                     @let focusRow = el.focus_rows?.includes(rowIndex);
-                    <tr [style.background]="focusRow ? el.focus_fill : null">
+                    <tr [style.height.%]="el.css ? el.css.rows[rowIndex] * 100 : null" [style.background]="focusRow ? el.focus_fill : null">
                       @for (cell of row; track $index) {
                         @let focusCell = focusRow && el.focus_columns?.includes($index);
                         @let negative = tableNegative(el, rowIndex, $index, cell);
                         <td [class.numeric-cell]="el.numeric_columns?.includes($index)"
+                          [style.text-align]="el.css?.align?.[rowIndex]?.[$index]" [style.font-weight]="el.css ? (el.css.bold[rowIndex][$index] ? 700 : 400) : null"
                           [class.row-label]="$first && !el.numeric_columns?.includes($index)"
                           [class.negative-value]="negative" [class.focus-value]="focusCell"
                           [style.background]="el.cell_fills?.[rowIndex]?.[$index] ?? (focusCell ? el.focus_cell_fill : null)"

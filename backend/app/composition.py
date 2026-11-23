@@ -32,6 +32,7 @@ class Intent(Contract):
         "Give a short style label such as 'Strategy consulting'. The designer receives the full brief separately."
     ))
     requires_quantitative_evidence: bool = False
+    requires_chart_workbook: bool = False
     slide_count: int | None = Field(default=None, ge=1, le=30)
     web_images_requested: bool = False
     reuse_uploaded_images: bool = False
