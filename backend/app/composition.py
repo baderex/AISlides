@@ -337,6 +337,19 @@ class SlideContent(Contract):
                                                 description="Exact headers of criteria that justify the selection in table_focus.")
     next_step: str = Field(default="", max_length=145)
 
+    @model_validator(mode="before")
+    @classmethod
+    def omit_unused_generation_fields(cls, value, info: ValidationInfo):
+        layout = (info.context or {}).get("layout")
+        if not layout or not isinstance(value, dict):
+            return value
+        result = dict(value)
+        if layout not in {"cover", "closing"} and not result.get("decision"):
+            result.pop("next_step", None)
+        if not any(result.get(field) is not None for field in ("chart", "visual", "stacked_comparison")):
+            result.pop("exhibit_observations", None)
+        return result
+
     @model_validator(mode="after")
     def planned_exhibit(self, info: ValidationInfo):
         context = info.context or {}

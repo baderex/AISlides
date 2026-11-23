@@ -25,6 +25,8 @@ TimeType = Literal["roadmap", "gantt", "timing-diagram"]
 VisualType = QuantitativeType | MatrixType | ScatterType | GraphType | TimeType | Literal[
     "sequence-diagram", "venn", "annotated-code", "flow-diagram", "swimlane"]
 
+NUMERIC_VISUAL_TYPES = {*get_args(QuantitativeType), *get_args(MatrixType), *get_args(ScatterType), *get_args(TimeType), "sankey"}
+
 VISUAL_LAYOUTS: dict[VisualType, Layout] = {
     **dict.fromkeys(get_args(QuantitativeType) + get_args(ScatterType), "chart"),
     **dict.fromkeys(get_args(MatrixType), "research"),

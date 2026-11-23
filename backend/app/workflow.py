@@ -33,7 +33,7 @@ from app.rendering import flattened
 from app.research import collect
 from app.slide_design import LAYOUT_RUBRIC, LayoutReview, build_slide, review_layouts
 from app.storage import Storage
-from app.visuals import CONTENT_GUIDANCE, SELECTION_GUIDANCE, VISUAL_LAYOUTS, named_visual
+from app.visuals import CONTENT_GUIDANCE, NUMERIC_VISUAL_TYPES, SELECTION_GUIDANCE, VISUAL_LAYOUTS, named_visual
 
 log = logging.getLogger(__name__)
 POINT_ICON_GUIDANCE = (
@@ -51,21 +51,16 @@ DATA_PLAN_GUIDANCE = (
     "its purpose. State any missing evidence explicitly."
 )
 DATA_SLIDE_GUIDANCE = (
-    " Put specific sourced figures with dates and units in visible slide content. For a chart layout, supply the native "
-    "chart with all evidenced observations in order, the metric and unit in the label, and their source IDs. Include a "
-    "short finding in the subtitle. For a research layout, supply a concise table with a header and comparable rows. "
-    "For a metrics layout, put the figures in point.value. For a ranked entity, include its rank, the ranking basis and "
-    "date, and entity-specific financial or operating metrics. Cite only sources that actually support the numbers. "
-    "A figure in the outline or research summary is not evidence by itself. For a dated ranking, only use figures from "
-    "sources that actually report the specified snapshot. If unavailable, leave the ranking metric value unreported. "
-    "Match every plotted value to its exact category in the evidence. In annual charts, use full-year data or year-end "
-    "observations as specified. Never substitute quarterly observations or infer dates from column position. "
-    "Use reported observations for historical series and label any provisional observations explicitly. "
-    "Set chart.highlight only when one category supports the takeaway. Set chart.compare_to only when another "
-    "category is a meaningful baseline measured in the same units. Both are zero-based category indices. "
-    "Every analytical slide should show a supported chart, data table, or numeric KPIs. If the evidence supports a "
-    "stronger exhibit than planned, supply it. Call out material data gaps. Do not mix currencies or reporting periods."
+    " Cite the supplied excerpts for each figure, with its exact period, category and unit. The outline and research "
+    "summary are planning material. For ranked entities report the rank, basis and date only when the evidence "
+    "documents that snapshot. Include sourced operating or financial metrics and disclose gaps."
 )
+DATA_LAYOUT_GUIDANCE = {
+    "chart": " Use the native chart with the ordered series, metric and unit. For annual data check year-end or full-year "
+             "dates explicitly. Label provisional observations. Highlight and compare only meaningful zero-based indices.",
+    "research": " Use a concise table with a header and comparable rows.",
+    "metrics": " Put each sourced KPI in point.value with a short label and a date.",
+}
 COMPOSITION_PLAN = (
     " Give each slide one job and one primary visual. In topic name what the slide covers. In key_message write its concise "
     "supported finding, recommendation, or explanation in natural language. Examples of useful headline structure are "
@@ -295,8 +290,8 @@ def slide_inputs(item, context, part=None):
     terms = set(re.findall(r"[a-z0-9]{3,}", f"{part.title} {part.research_query}".lower()))
     background.sort(key=lambda source: len(terms.intersection(re.findall(r"[a-z0-9]{3,}", source["title"].lower()))), reverse=True)
     limit = 700 if focused else 1500
-    supplied["sources"] = [*[{**source, "excerpt": source["excerpt"][:2000]} for source in focused],
-                           *[{**source, "excerpt": source["excerpt"][:limit]} for source in background[:4]]]
+    supplied["sources"] = [{"id": source["id"], "title": source["title"], "excerpt": source["excerpt"][:size]}
+                           for group, size in ((focused, 2000), (background[:4], limit)) for source in group]
     return supplied
 
 
@@ -797,7 +792,7 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
             if document.theme.profile == "consulting":
                 style_guidance += " " + SLIDE_GUIDANCE
             if data_driven:
-                style_guidance += DATA_SLIDE_GUIDANCE
+                style_guidance += DATA_SLIDE_GUIDANCE + DATA_LAYOUT_GUIDANCE.get(part.layout, "")
             if document.theme.design and not brand:
                 style_guidance += COMPOSITION_GUIDANCE.get(part.layout, "")
         if context.get("brief_source_id"):
@@ -860,6 +855,12 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
                                                         "showcase", "editorial"} else None
         if point_count and not part.exhibit:
             exhibit_instruction += f"Write exactly {point_count} visible points in the points array. "
+        if part.layout == "chart" or part.exhibit == "stacked_comparison" or (part.visual and part.visual.type in NUMERIC_VISUAL_TYPES):
+            exhibit_instruction += (
+                "For plotted numbers include exhibit_observations with source IDs and exact quotes. "
+                "Match metric and period to each series and category. Use plain numbers for amount, "
+                "short units such as bn or %, and currency separately. Omit unsupported observations. "
+            )
         content = ai.structured(SlideContent, exhibit_instruction + "Write concise content for the single item given. Use its exact title and fulfill its purpose. "
              "Include the item's required_details in its main visible content or specified notes, with exact terms and figures. "
              "Cover the current item only and do not repeat earlier slides. Write for the audience. Keep visual instructions, "
@@ -874,17 +875,14 @@ def process(job_id, token, item, stage, context, assets, skill, ai):
              "as illustrative, label them explicitly in the visible copy on slides that report those figures. "
              "Qualify claims about speed, feasibility, causality and performance when comparative evidence is absent. "
              "Never turn a possible application into a demonstrated capability. "
-             "Only include numerical charts if their values are grounded in sources. For semantic exhibits, populate exhibit_observations "
-             "with the numerical inputs, source IDs and exact supporting quotes from the supplied excerpts. Map the metric to the "
-             "series, criterion, axis or flow name and the period to the exact displayed category. "
-             "Provide a table as an array of rows, or null if absent. "
+             "Use sourced values for quantitative content. "
              "Keep repeated scope, units and commitments consistent with the brief and earlier exhibits. "
              "Preserve required terms, every requested table row, and negative signs. Keep unsupported explanations out of "
              "findings, including implied causes for changes over time. Keep the measurement separate from a metric label. "
              "Use an image ID only from provided image assets. Keep any requested uploaded image on its assigned slide. "
              "When image generation is enabled and a relevant uploaded asset is unavailable, provide an illustration prompt in image_prompt."
              + style_guidance + period_guidance + point_icon_guidance(part, document, brand),
-             {"item": part.model_dump(), "topic": document.title, "slide_index": index,
+             {"item": part.model_dump(exclude_defaults=True, exclude={"research_query", "image_query"}), "topic": document.title, "slide_index": index,
               "imagery_direction": document.theme.design.imagery if document.theme.design else "",
               "brief_source_id": context.get("brief_source_id"),
               "required_exhibit": part.exhibit,

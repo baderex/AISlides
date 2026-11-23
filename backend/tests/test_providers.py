@@ -110,6 +110,80 @@ def test_openrouter_retries_with_validation_feedback(monkeypatch):
     assert client.usage["input"] == 270
 
 
+def test_metrics_slide_ignores_unused_evidence_and_closing_copy_in_json_fallback(monkeypatch):
+    client = openrouter(monkeypatch)
+    calls = []
+    content = {"title": "Al Rajhi Bank", "points": [{"title": "Market cap", "value": "SAR 399bn"}],
+               "source_ids": ["filing"], "exhibit_observations": [{"amount": "not available", "unit": "billion riyals"}],
+               "next_step": "x" * 146}
+
+    def post(url, body, headers):
+        calls.append(body)
+        if len(calls) == 1:
+            contract = body["response_format"]["json_schema"]["schema"]
+            assert set(contract["properties"]) == {"title", "subtitle", "points", "source_ids", "notes"}
+            assert set(contract["$defs"]) == {"Point"}
+            httpx.Response(404, request=httpx.Request("POST", url)).raise_for_status()
+        return {"choices": [{"message": {"content": json.dumps(content)}}], "usage": {"prompt_tokens": 90, "completion_tokens": 30}}
+
+    monkeypatch.setattr(client, "_post", post)
+    slide = client.structured(SlideContent, "Write the profile.", {"item": {"layout": "metrics", "title": content["title"]}}, "slide")
+    assert len(calls) == 2
+    assert slide.points[0].value == "SAR 399bn" and slide.source_ids == ["filing"]
+    assert slide.next_step == "" and not slide.exhibit_observations
+    assert client.usage["by_stage"]["slide"] == {"calls": 1, "input": 90, "output": 30}
+
+
+def test_closing_repairs_only_visible_copy_without_resending_sources(monkeypatch):
+    client = openrouter(monkeypatch)
+    calls = []
+
+    def post(url, body, headers):
+        calls.append(body)
+        if len(calls) == 1:
+            answer = {"title": "Next decision", "notes": "Preserve this text", "source_ids": ["filing"], "next_step": "x" * 146}
+        else:
+            assert set(body["response_format"]["json_schema"]["schema"]["properties"]) == {"next_step"}
+            brief = json.loads(body["messages"][1]["content"])
+            assert brief["fields"] == {"next_step": "x" * 146}
+            assert "sources" not in brief
+            answer = {"next_step": "Review the filing."}
+        return {"choices": [{"message": {"content": json.dumps(answer)}}], "usage": {"prompt_tokens": 90, "completion_tokens": 30}}
+
+    monkeypatch.setattr(client, "_post", post)
+    slide = client.structured(SlideContent, "Write a closing.", {
+        "item": {"layout": "closing", "title": "Next decision"}, "sources": [{"id": "filing", "excerpt": "original sources"}]}, "slide")
+    assert len(calls) == 2
+    assert slide.next_step == "Review the filing." and slide.notes == "Preserve this text" and slide.source_ids == ["filing"]
+    assert client.usage["by_stage"]["slide"]["validation_failures"] == 1
+
+
+def test_chart_observations_require_numeric_values_and_repair_keeps_the_chart(monkeypatch):
+    client = openrouter(monkeypatch)
+    chart = {"label": "Revenue", "categories": ["2025"], "values": [12]}
+    source = {"id": "s1", "excerpt": "Revenue in 2025 was USD 12m."}
+    row = {"metric": "Revenue", "period": "2025", "unit": "m", "currency": "USD", "source_id": "s1", "quote": source["excerpt"]}
+
+    def post(url, body, headers):
+        props = body["response_format"]["json_schema"]["schema"]["properties"]
+        assert "exhibit_observations" in props
+        if "chart" in props:
+            answer = {"title": "Revenue", "chart": chart, "source_ids": ["s1"], "exhibit_observations": [{**row, "amount": "USD 12m"}]}
+        else:
+            assert set(props) == {"exhibit_observations"}
+            request = json.loads(body["messages"][1]["content"])
+            assert request["sources"] == [source] and request["exhibit"] == chart
+            assert "use a plain numeric amount" in body["messages"][0]["content"]
+            answer = {"exhibit_observations": [{**row, "amount": 12}]}
+        return {"choices": [{"message": {"content": json.dumps(answer)}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    slide = client.structured(SlideContent, "Write the chart.", {
+        "item": {"layout": "chart", "title": "Revenue"}, "sources": [source]}, "slide")
+    assert slide.chart.values == [12] and slide.source_ids == ["s1"]
+    assert slide.exhibit_observations[0].amount == 12
+
+
 def test_detailed_design_brief_passes_intent_planning_on_first_response(monkeypatch):
     client = openrouter(monkeypatch)
     direction = (

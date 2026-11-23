@@ -57,7 +57,8 @@ class EvidenceObservation(Contract):
     metric: str = Field(min_length=1, max_length=80)
     period: str = Field(min_length=1, max_length=40, description="The source's period or comparison category label.")
     scope: str = Field(default="", max_length=80, description="Series context such as fiscal year and geography.")
-    amount: Decimal = Field(ge=Decimal("-1e15"), le=Decimal("1e15"))
+    amount: Decimal = Field(ge=Decimal("-1e15"), le=Decimal("1e15"),
+                            description="Plain numeric value, e.g. 399. Put SAR in currency and bn in unit. Omit unavailable values.")
     unit: str = Field(default="", max_length=8)
     currency: str = Field(default="", max_length=8)
     quote: str = Field(min_length=1, max_length=420, description="Verbatim excerpt containing the metric, period and value.")
